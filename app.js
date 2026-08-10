@@ -1,5 +1,7 @@
 // ============================================================
-// FERRETERÍA · App de inventario — Fase 1: Login + Productos/Stock
+// FERRETERÍA · App de inventario — Firebase + Escáner OCR + Inventario
+// Incluye: login, Firestore, escáner OCR (Tesseract), pestaña Inventario,
+// campo código de barras, exportar/importar CSV, categorías e historial.
 // ============================================================
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
 import {
@@ -7,7 +9,7 @@ import {
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 import {
   getFirestore, collection, doc, setDoc, addDoc, updateDoc, deleteDoc,
-  onSnapshot, query, orderBy, where, getDoc, serverTimestamp, increment, Timestamp, writeBatch
+  onSnapshot, query, orderBy, where, getDoc, serverTimestamp, increment, Timestamp, writeBatch, limit
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
 // ---- Tu configuración de Firebase ----
@@ -80,6 +82,14 @@ logoutBtn.addEventListener("click", () => signOut(auth));
 let currentUser = null;
 let currentRole = "vendedor";
 let unsubProducts = null;
+let unsubCompras = null;
+let unsubTurno = null;
+let unsubMovimientos = null;
+let unsubVentas = null;
+let unsubGastos = null;
+let unsubCategorias = null;
+let unsubHistorial = null;
+let unsubHistorialBusquedas = null;
 
 onAuthStateChanged(auth, async (user) => {
   if (user) {
@@ -92,6 +102,8 @@ onAuthStateChanged(auth, async (user) => {
     startTurnoListener();
     startVentasListener();
     startGastosListener();
+    startCategoriasListener();
+    startHistorialListeners();
   } else {
     currentUser = null;
     appShell.classList.remove("active");
@@ -102,6 +114,12 @@ onAuthStateChanged(auth, async (user) => {
     if (unsubMovimientos) { unsubMovimientos(); unsubMovimientos = null; }
     if (unsubVentas) { unsubVentas(); unsubVentas = null; }
     if (unsubGastos) { unsubGastos(); unsubGastos = null; }
+    if (unsubCategorias) { unsubCategorias(); unsubCategorias = null; }
+    if (unsubHistorial) { unsubHistorial(); unsubHistorial = null; }
+    if (unsubHistorialBusquedas) { unsubHistorialBusquedas(); unsubHistorialBusquedas = null; }
+    allScans = [];
+    allBuscados = [];
+    allCategorias = [];
   }
 });
 
@@ -135,6 +153,8 @@ function switchView(viewName) {
   target.classList.add("active");
   document.querySelectorAll("main > section").forEach(s => s.style.display = "none");
   document.getElementById("view-" + viewName).style.display = "block";
+  if (viewName === "categorias") renderCategorias();
+  if (viewName === "historial") { renderScanHistory(); renderSearchHistory(); }
 }
 
 navItems.forEach(item => {
@@ -171,12 +191,36 @@ function nivelDe(stock, minimo) {
   return { pct, color };
 }
 
+function getAllCategoryNames() {
+  const set = new Set(allCategorias.map(c => c.trim()).filter(Boolean));
+  allProducts.forEach(p => { if (p.categoria) set.add(p.categoria.trim()); });
+  return Array.from(set).sort((a, b) => a.localeCompare(b, "es"));
+}
+
+function populateCategoryFilter() {
+  const sel = document.getElementById("search-categoria");
+  if (!sel) return;
+  const current = sel.value;
+  const cats = getAllCategoryNames();
+  sel.innerHTML = '<option value="">Todas las categorías</option>' +
+    cats.map(c => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join("");
+  if (cats.includes(current)) sel.value = current;
+}
+
 function renderProducts() {
+  populateCategoryFilter();
   const term = searchInput.value.trim().toLowerCase();
-  const list = allProducts.filter(p =>
-    !term || p.nombre.toLowerCase().includes(term) || (p.sku || "").toLowerCase().includes(term) ||
-    (p.marca || "").toLowerCase().includes(term) || (p.categoria || "").toLowerCase().includes(term)
-  );
+  const catSel = document.getElementById("search-categoria");
+  const catFilter = catSel ? catSel.value : "";
+  const list = allProducts.filter(p => {
+    const okTerm = !term ||
+      p.nombre.toLowerCase().includes(term) ||
+      (p.sku || "").toLowerCase().includes(term) ||
+      (p.marca || "").toLowerCase().includes(term) ||
+      (p.categoria || "").toLowerCase().includes(term);
+    const okCat = !catFilter || (p.categoria || "").trim().toLowerCase() === catFilter.toLowerCase();
+    return okTerm && okCat;
+  });
 
   tbody.innerHTML = "";
   emptyState.style.display = list.length ? "none" : "block";
@@ -206,6 +250,7 @@ function renderProducts() {
       <td class="num">Bs ${precio.toFixed(2)}</td>
       <td class="num">${minimo}</td>
       <td class="num">${stock}</td>
+      <td class="sku">${escapeHtml(p.codigoBarras || "—")}</td>
       <td><div class="gauge"><i style="width:${pct}%; background:${color};"></i></div></td>
       <td>
         <div class="row-actions">
@@ -223,9 +268,13 @@ function renderProducts() {
   statValor.textContent = "Bs " + valor.toLocaleString("es-BO", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
   renderStockView();
+  renderInventario();
+  renderCategorias();
 }
 
 searchInput.addEventListener("input", renderProducts);
+searchInput.addEventListener("change", () => logSearchHistory(searchInput.value));
+document.getElementById("search-categoria").addEventListener("change", renderProducts);
 
 // ---------------- Vista Stock ----------------
 const stockTbody = document.getElementById("stock-tbody");
@@ -299,6 +348,7 @@ const productForm = document.getElementById("product-form");
 const fId = document.getElementById("product-id");
 const fNombre = document.getElementById("p-nombre");
 const fSku = document.getElementById("p-sku");
+const fCodigoBarras = document.getElementById("p-codigobarras");
 const fMarca = document.getElementById("p-marca");
 const fCategoria = document.getElementById("p-categoria");
 const fPrecio = document.getElementById("p-precio");
@@ -318,6 +368,7 @@ function openProductModal(product, prefillCodigo) {
     fId.value = product.id;
     fNombre.value = product.nombre || "";
     fSku.value = product.sku || "";
+    fCodigoBarras.value = product.codigoBarras || "";
     fMarca.value = product.marca || "";
     fCategoria.value = product.categoria || "";
     fPrecio.value = product.precio ?? "";
@@ -345,6 +396,7 @@ productForm.addEventListener("submit", async (e) => {
   const data = {
     nombre: fNombre.value.trim(),
     sku: fSku.value.trim(),
+    codigoBarras: fCodigoBarras.value.trim(),
     marca: fMarca.value.trim(),
     categoria: fCategoria.value.trim(),
     precio: Number(fPrecio.value),
@@ -354,6 +406,18 @@ productForm.addEventListener("submit", async (e) => {
     minimo: Number(fMinimo.value),
     actualizadoEn: serverTimestamp()
   };
+
+  // Validación: no se pueden duplicar productos por código.
+  // Si el código ya existe, el stock y el código de barras se actualizan desde Inventario.
+  if (!fId.value && data.sku) {
+    const dup = allProducts.find(p => (p.sku || "").trim().toUpperCase() === data.sku.toUpperCase());
+    if (dup) {
+      showToast("Ya existe un producto con ese código. Actualiza su cantidad desde Inventario.");
+      saveBtn.disabled = false;
+      saveBtn.textContent = "Guardar";
+      return;
+    }
+  }
 
   try {
     if (fId.value) {
@@ -375,7 +439,6 @@ productForm.addEventListener("submit", async (e) => {
 });
 
 // ---------------- Compras (tiempo real) ----------------
-let unsubCompras = null;
 let allCompras = [];
 
 const comprasTbody = document.getElementById("compras-tbody");
@@ -514,8 +577,6 @@ compraForm.addEventListener("submit", async (e) => {
 
 // ---------------- Caja (turno activo en tiempo real) ----------------
 let currentTurno = null; // {id, ...data}
-let unsubTurno = null;
-let unsubMovimientos = null;
 let allMovimientos = [];
 
 const cajaCerradaView = document.getElementById("caja-cerrada-view");
@@ -555,9 +616,9 @@ function startMovimientosListener() {
 }
 
 function renderCajaTotales() {
-  const tbody = document.getElementById("movimientos-tbody");
+  const tbodyMov = document.getElementById("movimientos-tbody");
   const empty = document.getElementById("movimientos-empty");
-  tbody.innerHTML = "";
+  tbodyMov.innerHTML = "";
 
   let ventasEfectivo = 0, ingresos = 0, egresos = 0;
   const manuales = allMovimientos.filter(m => m.tipo === "ingreso" || m.tipo === "egreso");
@@ -576,7 +637,7 @@ function renderCajaTotales() {
       <td class="num" style="color:${m.tipo === "egreso" ? "var(--red)" : "var(--green)"};">${m.tipo === "egreso" ? "-" : "+"}Bs ${Number(m.monto).toFixed(2)}</td>
       <td class="sku">${escapeHtml(m.registradoPor || "—")}</td>
     `;
-    tbody.appendChild(tr);
+    tbodyMov.appendChild(tr);
   });
 
   const inicial = Number(currentTurno?.montoInicial) || 0;
@@ -787,7 +848,6 @@ document.getElementById("confirm-venta-btn").addEventListener("click", async () 
 });
 
 // ---------------- Historial de ventas (tiempo real) ----------------
-let unsubVentas = null;
 let allVentas = [];
 const ventasTbody = document.getElementById("ventas-tbody");
 const ventasEmpty = document.getElementById("ventas-empty");
@@ -847,7 +907,6 @@ function renderVentasHistorial() {
 }
 
 // ---------------- Gastos extra (tiempo real) ----------------
-let unsubGastos = null;
 let allGastos = [];
 const gastosTbody = document.getElementById("gastos-tbody");
 const gastosEmpty = document.getElementById("gastos-empty");
@@ -933,95 +992,219 @@ gastoForm.addEventListener("submit", async (e) => {
   }
 });
 
-// ---------------- Escáner de código de barras ----------------
-let html5QrCode = null;
-const scannerModalBg = document.getElementById("scanner-modal-bg");
-const scannerModeSelect = document.getElementById("scanner-mode-select");
-const scannerCameraWrap = document.getElementById("scanner-camera-wrap");
-const scannerResult = document.getElementById("scanner-result");
+// ---------------- Categorías ----------------
+let allCategorias = [];
 
-// Formatos típicos de código numérico (EAN/UPC) vs alfanumérico (CODE128/CODE39/QR)
-const FORMATS_NUMERICO = ["EAN_13", "EAN_8", "UPC_A", "UPC_E", "ITF", "CODABAR"];
-const FORMATS_ALFANUMERICO = ["CODE_128", "CODE_39", "CODE_93", "QR_CODE", "DATA_MATRIX"];
-
-function resolveFormats(names) {
-  // Html5QrcodeSupportedFormats es un enum expuesto globalmente por la librería
-  if (!window.Html5QrcodeSupportedFormats) return undefined;
-  return names
-    .map(n => window.Html5QrcodeSupportedFormats[n])
-    .filter(f => f !== undefined);
+function startCategoriasListener() {
+  const q = query(collection(db, "categorias"), orderBy("nombre"));
+  unsubCategorias = onSnapshot(q, (snapshot) => {
+    allCategorias = snapshot.docs.map(d => d.data().nombre).filter(Boolean);
+    renderProducts();
+  }, (err) => {
+    console.error(err);
+  });
 }
 
-function openScanner() {
-  scannerModeSelect.style.display = "block";
-  scannerCameraWrap.style.display = "none";
-  scannerResult.style.display = "none";
-  scannerModalBg.classList.add("active");
+function renderCategorias() {
+  const grid = document.getElementById("categorias-grid");
+  if (!grid) return;
+  const cats = getAllCategoryNames();
+  if (!cats.length) {
+    grid.innerHTML = `<p style="color:var(--ink-soft);">Aún no hay categorías. Crea productos con categoría o agrega una arriba.</p>`;
+    return;
+  }
+  grid.innerHTML = cats.map(c => {
+    const count = allProducts.filter(p => (p.categoria || "").trim().toLowerCase() === c.toLowerCase()).length;
+    return `
+      <div class="cat-card" data-cat="${escapeHtml(c)}">
+        <div class="label">${escapeHtml(c)}</div>
+        <div class="value">${count}</div>
+      </div>`;
+  }).join("");
+  grid.querySelectorAll("[data-cat]").forEach(el => {
+    el.addEventListener("click", () => {
+      const sel = document.getElementById("search-categoria");
+      if (sel) sel.value = el.dataset.cat;
+      switchView("productos");
+      renderProducts();
+    });
+  });
 }
-document.getElementById("global-scan-btn").addEventListener("click", openScanner);
-document.getElementById("open-scanner-btn").addEventListener("click", openScanner);
 
-async function startScan(formats) {
-  scannerModeSelect.style.display = "none";
-  scannerResult.style.display = "none";
-  scannerCameraWrap.style.display = "block";
+document.getElementById("btn-add-categoria").addEventListener("click", async () => {
+  const input = document.getElementById("nueva-categoria-input");
+  const val = input.value.trim();
+  if (!val) { showToast("Escribe un nombre de categoría"); return; }
   try {
-    const supported = resolveFormats(formats);
-    html5QrCode = new Html5Qrcode("scanner-reader", supported ? { formatsToSupport: supported } : undefined);
-    await html5QrCode.start(
-      { facingMode: "environment" },
-      { fps: 10, qrbox: 220 },
-      (decodedText) => onCodeScanned(decodedText),
-      () => {}
-    );
+    await addDoc(collection(db, "categorias"), { nombre: val, creadoEn: serverTimestamp() });
+    input.value = "";
+    showToast("Categoría agregada");
   } catch (err) {
-    showToast("No se pudo abrir la cámara: " + err.message);
-    scannerModeSelect.style.display = "block";
-    scannerCameraWrap.style.display = "none";
+    console.error(err);
+    showToast("Error: " + err.message);
   }
-}
-
-document.getElementById("scan-mode-numeric").addEventListener("click", () => startScan(FORMATS_NUMERICO));
-document.getElementById("scan-mode-alpha").addEventListener("click", () => startScan(FORMATS_ALFANUMERICO));
-
-async function pauseCamera() {
-  if (html5QrCode) {
-    try { await html5QrCode.stop(); html5QrCode.clear(); } catch (e) {}
-    html5QrCode = null;
-  }
-}
-
-document.getElementById("scanner-back").addEventListener("click", async () => {
-  await pauseCamera();
-  scannerCameraWrap.style.display = "none";
-  scannerModeSelect.style.display = "block";
 });
 
-async function stopScanner() {
-  await pauseCamera();
-  scannerModalBg.classList.remove("active");
-}
-document.getElementById("scanner-cancel").addEventListener("click", stopScanner);
-scannerModalBg.addEventListener("click", (e) => { if (e.target === scannerModalBg) stopScanner(); });
+// ---------------- Historial (escaneos y búsquedas) ----------------
+let allScans = [];
+let allBuscados = [];
 
-async function onCodeScanned(decodedText) {
-  await pauseCamera();
-  scannerCameraWrap.style.display = "none";
-  const codigo = decodedText.trim();
-  const match = allProducts.find(p => (p.sku || "").toLowerCase() === codigo.toLowerCase());
-  renderScanResult(codigo, match);
+function startHistorialListeners() {
+  unsubHistorial = onSnapshot(
+    query(collection(db, "historial_escaneos"), orderBy("fecha", "desc"), limit(300)),
+    (snap) => { allScans = snap.docs.map(d => ({ id: d.id, ...d.data() })); renderScanHistory(); },
+    (err) => console.error(err)
+  );
+  unsubHistorialBusquedas = onSnapshot(
+    query(collection(db, "historial_busquedas"), orderBy("fecha", "desc"), limit(200)),
+    (snap) => { allBuscados = snap.docs.map(d => ({ id: d.id, ...d.data() })); renderSearchHistory(); },
+    (err) => console.error(err)
+  );
 }
 
-function renderScanResult(codigo, product) {
-  scannerResult.style.display = "block";
+async function logScanHistory(codigo) {
+  const p = findProductByCodigo(codigo);
+  try {
+    await addDoc(collection(db, "historial_escaneos"), {
+      codigo: String(codigo),
+      encontrado: !!p,
+      nombre: p ? p.nombre : "",
+      fecha: serverTimestamp(),
+      userId: currentUser?.uid || "",
+      usuario: currentUser?.email || ""
+    });
+  } catch (err) { console.error(err); }
+}
+
+async function logSearchHistory(query) {
+  query = (query || "").trim();
+  if (!query) return;
+  try {
+    await addDoc(collection(db, "historial_busquedas"), {
+      query,
+      fecha: serverTimestamp(),
+      userId: currentUser?.uid || "",
+      usuario: currentUser?.email || ""
+    });
+  } catch (err) { console.error(err); }
+}
+
+function renderScanHistory() {
+  const tbodyH = document.getElementById("scan-history-tbody");
+  const empty = document.getElementById("scan-history-empty");
+  if (!tbodyH) return;
+  const mine = allScans.filter(h => h.userId === currentUser?.uid);
+  tbodyH.innerHTML = "";
+  empty.style.display = mine.length ? "none" : "block";
+  mine.slice(0, 100).forEach(h => {
+    const fecha = h.fecha?.toDate ? h.fecha.toDate() : new Date();
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td><strong class="mono">${escapeHtml(h.codigo)}</strong></td>
+      <td>${escapeHtml(h.nombre || "—")}</td>
+      <td>${h.encontrado ? '<span class="badge ok">Encontrado</span>' : '<span class="badge bad">No encontrado</span>'}</td>
+      <td>${fecha.toLocaleString("es-BO", { day: "2-digit", month: "2-digit", year: "2-digit", hour: "2-digit", minute: "2-digit" })}</td>
+    `;
+    tbodyH.appendChild(tr);
+  });
+}
+
+function renderSearchHistory() {
+  const list = document.getElementById("search-history-list");
+  const empty = document.getElementById("search-history-empty");
+  if (!list) return;
+  const mine = allBuscados.filter(h => h.userId === currentUser?.uid);
+  list.innerHTML = "";
+  empty.style.display = mine.length ? "none" : "block";
+  mine.slice(0, 80).forEach(h => {
+    const fecha = h.fecha?.toDate ? h.fecha.toDate() : new Date();
+    const row = document.createElement("div");
+    row.style.cssText = "display:flex; justify-content:space-between; align-items:center; gap:10px; padding:11px 18px; border-bottom:1px dashed var(--line); font-size:13.5px;";
+    row.innerHTML = `<span>🔍 ${escapeHtml(h.query)}</span><small style="color:var(--ink-soft); white-space:nowrap;">${fecha.toLocaleString("es-BO", { day: "2-digit", month: "2-digit", year: "2-digit", hour: "2-digit", minute: "2-digit" })}</small>`;
+    list.appendChild(row);
+  });
+}
+
+document.getElementById("btn-clear-scan-history").addEventListener("click", async () => {
+  const mine = allScans.filter(h => h.userId === currentUser?.uid);
+  if (!mine.length) { showToast("No hay escaneos que borrar"); return; }
+  if (!confirm("¿Borrar tu historial de escaneos?")) return;
+  const batch = writeBatch(db);
+  mine.forEach(h => batch.delete(doc(db, "historial_escaneos", h.id)));
+  await batch.commit();
+  showToast("Historial de escaneos borrado");
+});
+
+document.getElementById("btn-clear-search-history").addEventListener("click", async () => {
+  const mine = allBuscados.filter(h => h.userId === currentUser?.uid);
+  if (!mine.length) { showToast("No hay búsquedas que borrar"); return; }
+  if (!confirm("¿Borrar tu historial de búsquedas?")) return;
+  const batch = writeBatch(db);
+  mine.forEach(h => batch.delete(doc(db, "historial_busquedas", h.id)));
+  await batch.commit();
+  showToast("Historial de búsquedas borrado");
+});
+
+// ---------------- Vista Inventario ----------------
+const invTbody = document.getElementById("inventario-tbody");
+const invEmpty = document.getElementById("inventario-empty");
+const invSearch = document.getElementById("inv-search");
+
+function renderInventario() {
+  if (!invTbody) return;
+  const term = invSearch.value.trim().toLowerCase();
+  const list = allProducts.filter(p =>
+    !term || (p.sku || "").toLowerCase().includes(term) || p.nombre.toLowerCase().includes(term)
+  ).slice().sort((a, b) => (a.sku || "").localeCompare(b.sku || "", "es"));
+
+  invTbody.innerHTML = "";
+  invEmpty.style.display = list.length ? "none" : "block";
+
+  list.forEach(p => {
+    const stock = Number(p.stock) || 0;
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td class="sku">${escapeHtml(p.sku || "—")}</td>
+      <td style="font-weight:600;">${escapeHtml(p.nombre)}</td>
+      <td class="num">${stock}</td>
+      <td class="sku">${escapeHtml(p.codigoBarras || "—")}</td>
+      <td><div class="row-actions"><button class="icon-btn" data-inv-edit="${p.id}" title="Registrar cantidad">✎</button></div></td>
+    `;
+    invTbody.appendChild(tr);
+  });
+}
+
+invSearch.addEventListener("input", renderInventario);
+invTbody.addEventListener("click", (e) => {
+  const id = e.target.closest("[data-inv-edit]")?.dataset.invEdit;
+  if (id) openInventoryModal(allProducts.find(p => p.id === id), null);
+});
+
+document.getElementById("open-registrar-inventario").addEventListener("click", () => openScanner("inventario"));
+document.getElementById("open-export-inventario").addEventListener("click", exportInventarioCSV);
+
+// ---------------- Modal registrar cantidad de inventario ----------------
+let invTargetProduct = null;
+let invScannedCode = "";
+
+const inventoryModalBg = document.getElementById("inventory-modal-bg");
+const inventoryForm = document.getElementById("inventory-form");
+const inventoryModalTitle = document.getElementById("inventory-modal-title");
+const inventoryProductInfo = document.getElementById("inventory-product-info");
+const invCantidad = document.getElementById("inv-cantidad");
+const invCodigoBarras = document.getElementById("inv-codigo-barras");
+
+function openInventoryModal(product, codigo) {
+  invTargetProduct = product || null;
+  invScannedCode = codigo || (product ? (product.sku || "") : "");
+  inventoryForm.reset();
+  const crearWrap = document.getElementById("inv-crear-nuevo-wrap");
+  const fields = document.getElementById("inv-fields");
+  const saveBtn = document.getElementById("inventory-save");
+
   if (product) {
-    const stock = Number(product.stock) || 0;
-    const minimo = Number(product.minimo) || 0;
-    let badge = `<span class="badge ok">OK</span>`;
-    if (stock === 0) badge = `<span class="badge bad">Sin stock</span>`;
-    else if (stock <= minimo) badge = `<span class="badge warn">Stock bajo</span>`;
-
-    scannerResult.innerHTML = `
+    inventoryModalTitle.textContent = "Registrar cantidad de inventario";
+    inventoryProductInfo.innerHTML = `
       <div class="scan-result-card">
         <div class="rc-title">✔ Producto encontrado</div>
         <dl>
@@ -1029,58 +1212,103 @@ function renderScanResult(codigo, product) {
           <dt>Descripción</dt><dd style="font-family:inherit;">${escapeHtml(product.nombre)}</dd>
           <dt>Marca</dt><dd style="font-family:inherit;">${escapeHtml(product.marca || "—")}</dd>
           <dt>Categoría</dt><dd style="font-family:inherit;">${escapeHtml(product.categoria || "—")}</dd>
-          <dt>Precio compra</dt><dd>Bs ${(Number(product.costo) || 0).toFixed(2)}</dd>
-          <dt>Precio referencia</dt><dd>Bs ${(Number(product.precioReferencia) || 0).toFixed(2)}</dd>
-          <dt>Precio venta</dt><dd>Bs ${(Number(product.precio) || 0).toFixed(2)}</dd>
-          <dt>Stock mínimo</dt><dd>${minimo}</dd>
-          <dt>Stock actual</dt><dd>${stock} ${badge}</dd>
+          <dt>Stock actual</dt><dd>${Number(product.stock) || 0}</dd>
         </dl>
-      </div>
-      <div class="scan-actions">
-        <button type="button" class="btn btn-primary" id="scan-act-venta">🛒 Registrar venta</button>
-        <button type="button" class="btn btn-secondary" id="scan-act-compra">📦 Registrar compra</button>
-        <button type="button" class="btn btn-secondary" id="scan-act-editar">✎ Ver / editar información</button>
-        <button type="button" class="btn btn-secondary" id="scan-act-otro">🔁 Escanear otro código</button>
-      </div>
-    `;
-    document.getElementById("scan-act-venta").addEventListener("click", () => {
-      addToCart(product);
-      showToast(`Agregado a la venta: ${product.nombre}`);
-      stopScanner();
-      switchView("ventas");
-    });
-    document.getElementById("scan-act-compra").addEventListener("click", () => {
-      stopScanner();
-      switchView("compras");
-      openCompraModal(product.id);
-    });
-    document.getElementById("scan-act-editar").addEventListener("click", () => {
-      stopScanner();
-      switchView("productos");
-      openProductModal(product);
-    });
+      </div>`;
+    invCantidad.value = product.stock ?? 0;
+    invCodigoBarras.value = product.codigoBarras || "";
+    fields.style.display = "";
+    saveBtn.style.display = "";
+    crearWrap.style.display = "none";
   } else {
-    scannerResult.innerHTML = `
+    inventoryModalTitle.textContent = "Código no encontrado";
+    inventoryProductInfo.innerHTML = `
       <div class="scan-result-card">
-        <div class="rc-title">Código no encontrado</div>
+        <div class="rc-title">⚠️ Código no encontrado</div>
         <p style="margin:0 0 6px; font-size:13px; color:var(--ink-soft);">No hay ningún producto con el código:</p>
-        <span class="scan-code-pill">${escapeHtml(codigo)}</span>
-      </div>
-      <div class="scan-actions">
-        <button type="button" class="btn btn-primary" id="scan-act-nuevo">+ Nuevo producto con este código</button>
-        <button type="button" class="btn btn-secondary" id="scan-act-otro">🔁 Escanear otro código</button>
-      </div>
-    `;
-    document.getElementById("scan-act-nuevo").addEventListener("click", () => {
-      stopScanner();
-      switchView("productos");
-      openProductModal(null, codigo);
-    });
+        <span class="scan-code-pill">${escapeHtml(invScannedCode)}</span>
+      </div>`;
+    invCantidad.value = 0;
+    fields.style.display = "none";
+    saveBtn.style.display = "none";
+    crearWrap.style.display = "block";
   }
-  document.getElementById("scan-act-otro").addEventListener("click", () => {
-    scannerResult.style.display = "none";
-    scannerModeSelect.style.display = "block";
-  });
+  inventoryModalBg.classList.add("active");
+}
+
+function closeInventoryModal() { inventoryModalBg.classList.remove("active"); }
+
+document.getElementById("inventory-cancel").addEventListener("click", closeInventoryModal);
+inventoryModalBg.addEventListener("click", (e) => { if (e.target === inventoryModalBg) closeInventoryModal(); });
+
+document.getElementById("inv-crear-nuevo").addEventListener("click", () => {
+  closeInventoryModal();
+  switchView("productos");
+  openProductModal(null, invScannedCode);
+});
+
+inventoryForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  if (!invTargetProduct) { showToast("Primero crea el producto"); return; }
+  const saveBtn = document.getElementById("inventory-save");
+  saveBtn.disabled = true;
+  saveBtn.textContent = "Guardando...";
+  const cantidad = Number(invCantidad.value);
+  const codigoBarras = invCodigoBarras.value.trim();
+  try {
+    await updateDoc(doc(db, "productos", invTargetProduct.id), {
+      stock: cantidad,
+      codigoBarras: codigoBarras || invTargetProduct.codigoBarras || "",
+      actualizadoEn: serverTimestamp()
+    });
+    showToast(`Stock de "${invTargetProduct.nombre}" actualizado a ${cantidad}`);
+    closeInventoryModal();
+  } catch (err) {
+    console.error(err);
+    showToast("Error al guardar: " + err.message);
+  } finally {
+    saveBtn.disabled = false;
+    saveBtn.textContent = "Guardar";
+  }
+});
+
+// ---------------- Exportar CSV ----------------
+document.getElementById("open-export-products").addEventListener("click", exportProductsCSV);
+
+function downloadCSV(cols, rows, baseName) {
+  const escape = (v) => {
+    const s = String(v ?? "");
+    return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+  };
+  const csv = "\uFEFF" + [cols.join(","), ...rows.map(r => r.map(escape).join(","))].join("\r\n");
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `${baseName}_${new Date().toISOString().slice(0, 10)}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+function exportProductsCSV() {
+  const cols = ["CODIGO", "DESCRIPCION", "MARCA", "CATEGORIA", "PRECIO COMPRA", "PRECIO REFERENCIA", "PRECIO VENTA", "STOCK MINIMO", "STOCK ACTUAL", "CODIGO BARRAS"];
+  const rows = allProducts.map(p => [
+    p.sku || "", p.nombre || "", p.marca || "", p.categoria || "",
+    p.costo ?? 0, p.precioReferencia ?? 0, p.precio ?? 0,
+    p.minimo ?? 0, p.stock ?? 0, p.codigoBarras || ""
+  ]);
+  downloadCSV(cols, rows, "productos");
+}
+
+function exportInventarioCSV() {
+  const cols = ["CODIGO", "DESCRIPCION", "MARCA", "CATEGORIA", "CANTIDAD", "CODIGO BARRAS"];
+  const rows = allProducts.map(p => [
+    p.sku || "", p.nombre || "", p.marca || "", p.categoria || "",
+    p.stock ?? 0, p.codigoBarras || ""
+  ]);
+  downloadCSV(cols, rows, "inventario");
 }
 
 // ---------------- Importar productos desde Excel ----------------
@@ -1143,6 +1371,7 @@ btnAnalizar.addEventListener("click", () => {
         const costo = Number(norm["PRECIO COMPRA"]) || 0;
         const precioReferencia = Number(norm["PRECIO REFERENCIA"]) || 0;
         const precio = Number(norm["PRECIO VENTA"]) || 0;
+        const codigoBarras = String(norm["CODIGO BARRAS"] ?? norm["CODIGOBARRAS"] ?? norm["BARCODE"] ?? "").trim();
         const minimoRaw = norm["STOCK MINIMO"];
         const stockRaw = norm["STOCK ACTUAL"] ?? norm["STOCK"];
         const minimo = minimoRaw !== undefined && minimoRaw !== "" ? Number(minimoRaw) : 5;
@@ -1152,7 +1381,7 @@ btnAnalizar.addEventListener("click", () => {
         if (existingId) actualizados++; else nuevos++;
 
         parsedImportRows.push({
-          existingId, sku: codigo, nombre, marca, categoria, costo, precioReferencia, precio, minimo,
+          existingId, sku: codigo, nombre, marca, categoria, costo, precioReferencia, precio, minimo, codigoBarras,
           stockInicial: stockDelArchivo !== null ? stockDelArchivo : stockInicial
         });
       });
@@ -1194,13 +1423,13 @@ btnConfirmar.addEventListener("click", async () => {
           batch.update(doc(db, "productos", r.existingId), {
             nombre: r.nombre, sku: r.sku, marca: r.marca, categoria: r.categoria,
             costo: r.costo, precioReferencia: r.precioReferencia, precio: r.precio,
-            minimo: r.minimo, actualizadoEn: serverTimestamp()
+            minimo: r.minimo, codigoBarras: r.codigoBarras, actualizadoEn: serverTimestamp()
           });
         } else {
           batch.set(doc(collection(db, "productos")), {
             nombre: r.nombre, sku: r.sku, marca: r.marca, categoria: r.categoria,
             costo: r.costo, precioReferencia: r.precioReferencia, precio: r.precio,
-            stock: r.stockInicial, minimo: r.minimo,
+            stock: r.stockInicial, minimo: r.minimo, codigoBarras: r.codigoBarras,
             creadoEn: serverTimestamp()
           });
         }
@@ -1219,6 +1448,502 @@ btnConfirmar.addEventListener("click", async () => {
     btnConfirmar.textContent = "Confirmar importación";
   }
 });
+
+// ---------------- Escáner OCR (Tesseract.js) ----------------
+// Palabras que suelen aparecer junto al código en las etiquetas y deben ignorarse
+const OCR_IGNORE_WORDS = [
+  'NUEVO','NEW','OFERTA','DESCUENTO','EXCELENTE','EXC','IMPORTADO','IMPORT',
+  'PROMO','PROMOCION','CALIDAD','GARANTIA','ORIGINAL','SALE','STOCK','PRECIO',
+  'FERRETERIA','BOLIVIA','MARCA','MODELO','PROD','PRODUCTO'
+];
+
+// Dos modos de escaneo: numérico puro (más preciso para códigos como 12399)
+// y alfanumérico (2-4 letras + 2-5 números, guion opcional, ej: HNV3445)
+const OCR_MODES = {
+  numerico: {
+    pattern: /^[0-9]{3,8}$/,
+    whitelist: '0123456789 '
+  },
+  alfanumerico: {
+    pattern: /^[A-Z]{2,4}[0-9]{2,5}(-[0-9]{2,4})?$/,
+    whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789- '
+  }
+};
+
+let scanCodeMode = 'numerico';
+
+// El recuadro punteado en pantalla (#ocr-guide) está definido en porcentajes
+// del contenedor visible, pero el <video> se muestra con object-fit:cover
+// (recorta y escala la imagen nativa de la cámara). Esta función calcula
+// qué parte del video nativo es la que realmente se ve, y recién ahí aplica
+// los porcentajes del recuadro.
+// IMPORTANTE: deben coincidir con #ocr-guide en el CSS.
+const GUIDE_BOX = { left: 0.15, right: 0.15, top: 0.35, bottom: 0.35 };
+
+let ocrWorker = null;
+let ocrStream = null;
+let ocrTimer = null;
+let ocrBusy = false;
+let ocrActive = false;
+let ocrPaused = false;
+let ocrStarting = false;
+let scannerContext = "general";
+
+const OCR_INTERVAL_MS = 600;
+
+function findProductByCodigo(codigo) {
+  if (!codigo) return null;
+  const c = String(codigo).trim().toUpperCase();
+  return allProducts.find(p => (p.sku || "").trim().toUpperCase() === c) || null;
+}
+
+function cleanOcrToken(raw) {
+  return raw.toUpperCase().replace(/[^A-Z0-9-]/g, '').trim();
+}
+
+function extractCandidateCodes(text) {
+  if (!text) return [];
+  const pattern = OCR_MODES[scanCodeMode].pattern;
+  const tokens = text.split(/[\s\n\r,;:|]+/).map(cleanOcrToken).filter(Boolean);
+  const seen = new Set();
+  const candidates = [];
+  tokens.forEach(tok => {
+    if (seen.has(tok)) return;
+    seen.add(tok);
+    if (OCR_IGNORE_WORDS.includes(tok)) return;
+    if (pattern.test(tok)) candidates.push(tok);
+  });
+  return candidates;
+}
+
+function pickBestCandidate(candidates) {
+  if (candidates.length === 0) return null;
+  const existing = candidates.find(c => findProductByCodigo(c));
+  if (existing) return existing;
+  return candidates[0];
+}
+
+// Normaliza confusiones típicas de OCR entre letras y números parecidos
+// (O/0, I/1, S/5, B/8, Z/2, G/6) para comparar contra códigos guardados
+// aunque el OCR haya leído mal algún carácter.
+function normalizeForFuzzyMatch(str) {
+  return String(str || '').toUpperCase().replace(/[^A-Z0-9]/g, '')
+    .replace(/O/g, '0').replace(/I/g, '1').replace(/S/g, '5')
+    .replace(/B/g, '8').replace(/Z/g, '2').replace(/G/g, '6');
+}
+
+function findProductoFuzzy(token) {
+  if (!token || token.length < 3) return null;
+  const norm = normalizeForFuzzyMatch(token);
+  return allProducts.find(p => normalizeForFuzzyMatch(p.sku || '') === norm) || null;
+}
+
+function resolveScannedText(text) {
+  const candidates = extractCandidateCodes(text);
+  const exactExisting = candidates.find(c => findProductByCodigo(c));
+  if (exactExisting) return exactExisting;
+
+  if (scanCodeMode === 'alfanumerico') {
+    const tokens = String(text || '').split(/[\s\n\r,;:|]+/).map(cleanOcrToken).filter(Boolean);
+    for (const tok of tokens) {
+      if (OCR_IGNORE_WORDS.includes(tok)) continue;
+      const fuzzyMatch = findProductoFuzzy(tok);
+      if (fuzzyMatch) return fuzzyMatch.codigo;
+    }
+  }
+
+  return candidates[0] || null;
+}
+
+function setOcrStatus(msg) {
+  const el = document.getElementById('ocrStatus');
+  if (el) el.textContent = msg;
+}
+
+function getGuideBoxCropRect(videoEl, box) {
+  box = box || GUIDE_BOX;
+  const vw = videoEl.videoWidth, vh = videoEl.videoHeight;
+  const containerW = videoEl.clientWidth || vw;
+  const containerH = videoEl.clientHeight || vh;
+
+  const coverScale = Math.max(containerW / vw, containerH / vh);
+  const visibleW = containerW / coverScale;
+  const visibleH = containerH / coverScale;
+  const offsetX = (vw - visibleW) / 2;
+  const offsetY = (vh - visibleH) / 2;
+
+  const boxW = visibleW * (1 - box.left - box.right);
+  const boxH = visibleH * (1 - box.top - box.bottom);
+  const boxX = offsetX + visibleW * box.left;
+  const boxY = offsetY + visibleH * box.top;
+
+  return { x: boxX, y: boxY, w: boxW, h: boxH };
+}
+
+function preprocessCanvas(canvas) {
+  const ctx = canvas.getContext('2d');
+  const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const d = imgData.data;
+  const n = canvas.width * canvas.height;
+
+  const gray = new Uint8ClampedArray(n);
+  let min = 255, max = 0;
+  for (let i = 0, j = 0; i < d.length; i += 4, j++) {
+    const g = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+    gray[j] = g;
+    if (g < min) min = g;
+    if (g > max) max = g;
+  }
+
+  const range = Math.max(max - min, 1);
+  for (let i = 0, j = 0; i < d.length; i += 4, j++) {
+    const stretched = ((gray[j] - min) / range) * 255;
+    d[i] = d[i + 1] = d[i + 2] = stretched;
+  }
+  ctx.putImageData(imgData, 0, 0);
+}
+
+async function startOcrScanner() {
+  if (ocrActive || ocrStarting) return;
+  ocrStarting = true;
+
+  if (typeof Tesseract === 'undefined') {
+    setOcrStatus('No se pudo cargar Tesseract.js. Verifica tu conexión a internet o usa la búsqueda manual.');
+    ocrStarting = false;
+    return;
+  }
+
+  const videoEl = document.getElementById('ocrVideo');
+
+  try {
+    setOcrStatus('Iniciando cámara...');
+    ocrStream = await navigator.mediaDevices.getUserMedia({
+      video: {
+        facingMode: { ideal: 'environment' },
+        width: { ideal: 1280 },
+        height: { ideal: 720 }
+      },
+      audio: false
+    });
+    videoEl.srcObject = ocrStream;
+    await videoEl.play();
+  } catch (err) {
+    console.warn(err);
+    setOcrStatus('No se pudo acceder a la cámara. Verifica los permisos del navegador o usa la búsqueda manual.');
+    ocrStarting = false;
+    return;
+  }
+
+  try {
+    setOcrStatus('Preparando el lector de texto...');
+    ocrWorker = await Tesseract.createWorker('eng');
+    await ocrWorker.setParameters({
+      tessedit_char_whitelist: OCR_MODES[scanCodeMode].whitelist,
+      tessedit_pageseg_mode: '6',
+      preserve_interword_spaces: '1'
+    });
+  } catch (err) {
+    console.warn(err);
+    setOcrStatus('No se pudo iniciar el motor de lectura de texto. Verifica tu conexión a internet.');
+    ocrStarting = false;
+    return;
+  }
+
+  ocrActive = true;
+  ocrStarting = false;
+  setOcrStatus('🔎 Buscando código...');
+  scheduleNextOcrCapture();
+}
+
+function scheduleNextOcrCapture() {
+  if (!ocrActive || ocrPaused) return;
+  ocrTimer = setTimeout(runOcrCapture, OCR_INTERVAL_MS);
+}
+
+async function runOcrCapture() {
+  if (!ocrActive || ocrBusy || ocrPaused) return;
+  const videoEl = document.getElementById('ocrVideo');
+  const canvasEl = document.getElementById('ocrCanvas');
+  if (!videoEl || !videoEl.videoWidth) { scheduleNextOcrCapture(); return; }
+
+  ocrBusy = true;
+  try {
+    const crop = getGuideBoxCropRect(videoEl);
+    const scale = 2;
+    canvasEl.width = crop.w * scale;
+    canvasEl.height = crop.h * scale;
+    const ctx = canvasEl.getContext('2d');
+    ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(videoEl, crop.x, crop.y, crop.w, crop.h, 0, 0, canvasEl.width, canvasEl.height);
+    preprocessCanvas(canvasEl);
+
+    setOcrStatus('🔎 Analizando etiqueta...');
+    const { data: { text } } = await ocrWorker.recognize(canvasEl);
+    if (ocrPaused) return;
+    const best = resolveScannedText(text);
+
+    if (best) {
+      const now = Date.now();
+      if (!(window.__lastOcrCode === best && now - (window.__lastOcrTime || 0) < 3000)) {
+        window.__lastOcrCode = best;
+        window.__lastOcrTime = now;
+        onCodeScanned(best);
+      }
+      if (ocrActive) setOcrStatus('✅ Código detectado: ' + best);
+    } else if (ocrActive) {
+      const raw = String(text || '').replace(/\s+/g, ' ').trim();
+      if (raw) {
+        setOcrStatus('🔎 Leyendo: "' + raw.slice(0, 28) + '" — buscando código...');
+      } else {
+        setOcrStatus('🔎 Buscando código... (acerca más la etiqueta o mejora la luz)');
+      }
+    }
+  } catch (err) {
+    console.warn('Error de OCR', err);
+  } finally {
+    ocrBusy = false;
+    scheduleNextOcrCapture();
+  }
+}
+
+async function captureShot() {
+  if (!ocrActive || !ocrWorker) return;
+  const videoEl = document.getElementById('ocrVideo');
+  const canvasEl = document.getElementById('ocrCanvas');
+  const frozenImg = document.getElementById('ocrFrozenImg');
+  if (!videoEl || !videoEl.videoWidth) return;
+
+  ocrPaused = true;
+  if (ocrTimer) { clearTimeout(ocrTimer); ocrTimer = null; }
+
+  const crop = getGuideBoxCropRect(videoEl);
+  const scale = 2.2;
+  canvasEl.width = crop.w * scale;
+  canvasEl.height = crop.h * scale;
+  const ctx = canvasEl.getContext('2d');
+  ctx.imageSmoothingEnabled = true;
+  ctx.drawImage(videoEl, crop.x, crop.y, crop.w, crop.h, 0, 0, canvasEl.width, canvasEl.height);
+
+  frozenImg.src = canvasEl.toDataURL('image/jpeg', 0.85);
+  frozenImg.classList.add('visible');
+  document.getElementById('btnCaptureShot').style.display = 'none';
+  document.getElementById('btnResumeLive').style.display = '';
+  setOcrStatus('📸 Foto capturada. Analizando...');
+
+  ocrBusy = true;
+  try {
+    preprocessCanvas(canvasEl);
+    const { data: { text } } = await ocrWorker.recognize(canvasEl);
+    const best = resolveScannedText(text);
+
+    if (best) {
+      onCodeScanned(best);
+      setOcrStatus('✅ Código detectado: ' + best);
+    } else {
+      const raw = String(text || '').replace(/\s+/g, ' ').trim();
+      setOcrStatus(raw
+        ? '⚠️ No coincide ningún código. Se leyó: "' + raw.slice(0, 28) + '"'
+        : '⚠️ No se detectó texto legible. Intenta de nuevo o cambia de modo (numérico/alfanumérico).');
+    }
+  } catch (err) {
+    console.warn('Error al capturar foto', err);
+    setOcrStatus('No se pudo analizar la foto. Intenta de nuevo.');
+  } finally {
+    ocrBusy = false;
+  }
+}
+
+function resumeLiveScan() {
+  ocrPaused = false;
+  const frozenImg = document.getElementById('ocrFrozenImg');
+  frozenImg.classList.remove('visible');
+  frozenImg.removeAttribute('src');
+  document.getElementById('btnCaptureShot').style.display = '';
+  document.getElementById('btnResumeLive').style.display = 'none';
+  if (ocrActive) {
+    setOcrStatus('🔎 Buscando código...');
+    scheduleNextOcrCapture();
+  }
+}
+
+function stopOcrScanner() {
+  ocrActive = false;
+  ocrStarting = false;
+  ocrPaused = false;
+  if (ocrTimer) { clearTimeout(ocrTimer); ocrTimer = null; }
+  if (ocrStream) {
+    ocrStream.getTracks().forEach(t => t.stop());
+    ocrStream = null;
+  }
+  const videoEl = document.getElementById('ocrVideo');
+  if (videoEl) videoEl.srcObject = null;
+  if (ocrWorker) {
+    const w = ocrWorker;
+    ocrWorker = null;
+    w.terminate().catch(() => {});
+  }
+  const frozenImg = document.getElementById('ocrFrozenImg');
+  if (frozenImg) { frozenImg.classList.remove('visible'); frozenImg.removeAttribute('src'); }
+  const btnCapture = document.getElementById('btnCaptureShot');
+  const btnResume = document.getElementById('btnResumeLive');
+  if (btnCapture) btnCapture.style.display = '';
+  if (btnResume) btnResume.style.display = 'none';
+  setOcrStatus('Iniciando cámara...');
+}
+
+async function setScanCodeMode(mode) {
+  if (!OCR_MODES[mode] || mode === scanCodeMode) return;
+  scanCodeMode = mode;
+  document.getElementById("scan-mode-numeric").classList.toggle("active", mode === "numerico");
+  document.getElementById("scan-mode-alpha").classList.toggle("active", mode === "alfanumerico");
+  if (ocrWorker) {
+    try {
+      await ocrWorker.setParameters({ tessedit_char_whitelist: OCR_MODES[mode].whitelist });
+    } catch (err) { console.warn(err); }
+  }
+}
+
+function openScanner(context) {
+  scannerContext = context || "general";
+  const resultEl = document.getElementById("scanner-result");
+  resultEl.style.display = "none";
+  resultEl.innerHTML = "";
+  document.getElementById("scan-manual-input").value = "";
+  document.getElementById("scanner-modal-bg").classList.add("active");
+  startOcrScanner();
+}
+
+document.getElementById("global-scan-btn").addEventListener("click", () => openScanner("general"));
+document.getElementById("open-scanner-btn").addEventListener("click", () => openScanner("ventas"));
+document.getElementById("scan-mode-numeric").addEventListener("click", () => setScanCodeMode("numerico"));
+document.getElementById("scan-mode-alpha").addEventListener("click", () => setScanCodeMode("alfanumerico"));
+
+document.getElementById("scan-manual-go").addEventListener("click", () => {
+  const val = document.getElementById("scan-manual-input").value.trim();
+  if (val) onCodeScanned(val);
+});
+document.getElementById("scan-manual-input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    const val = e.target.value.trim();
+    if (val) onCodeScanned(val);
+  }
+});
+document.getElementById("btnCaptureShot").addEventListener("click", captureShot);
+document.getElementById("btnResumeLive").addEventListener("click", resumeLiveScan);
+
+async function stopScanner() {
+  stopOcrScanner();
+  document.getElementById("scanner-modal-bg").classList.remove("active");
+}
+document.getElementById("scanner-cancel").addEventListener("click", stopScanner);
+document.getElementById("scanner-modal-bg").addEventListener("click", (e) => {
+  if (e.target === document.getElementById("scanner-modal-bg")) stopScanner();
+});
+
+function onCodeScanned(codigo) {
+  codigo = String(codigo).trim();
+  if (!codigo) return;
+  logScanHistory(codigo);
+  const product = findProductByCodigo(codigo);
+
+  if (scannerContext === "inventario") {
+    stopScanner();
+    openInventoryModal(product, codigo);
+    return;
+  }
+
+  if (scannerContext === "ventas") {
+    if (product) {
+      stopScanner();
+      addToCart(product);
+      showToast("Agregado a la venta: " + product.nombre);
+      return;
+    }
+    renderScanResult(codigo, null);
+    return;
+  }
+
+  renderScanResult(codigo, product);
+}
+
+function renderScanResult(codigo, product) {
+  const el = document.getElementById("scanner-result");
+  el.style.display = "block";
+  if (product) {
+    const stock = Number(product.stock) || 0;
+    const minimo = Number(product.minimo) || 0;
+    let badge = `<span class="badge ok">OK</span>`;
+    if (stock === 0) badge = `<span class="badge bad">Sin stock</span>`;
+    else if (stock <= minimo) badge = `<span class="badge warn">Stock bajo</span>`;
+
+    el.innerHTML = `
+      <div class="scan-result-card">
+        <div class="rc-title">✔ Producto encontrado</div>
+        <dl>
+          <dt>Código</dt><dd>${escapeHtml(product.sku || "—")}</dd>
+          <dt>Descripción</dt><dd style="font-family:inherit;">${escapeHtml(product.nombre)}</dd>
+          <dt>Marca</dt><dd style="font-family:inherit;">${escapeHtml(product.marca || "—")}</dd>
+          <dt>Categoría</dt><dd style="font-family:inherit;">${escapeHtml(product.categoria || "—")}</dd>
+          <dt>Cód. barras</dt><dd>${escapeHtml(product.codigoBarras || "—")}</dd>
+          <dt>Precio compra</dt><dd>Bs ${(Number(product.costo) || 0).toFixed(2)}</dd>
+          <dt>Precio referencia</dt><dd>Bs ${(Number(product.precioReferencia) || 0).toFixed(2)}</dd>
+          <dt>Precio venta</dt><dd>Bs ${(Number(product.precio) || 0).toFixed(2)}</dd>
+          <dt>Stock mínimo</dt><dd>${minimo}</dd>
+          <dt>Stock actual</dt><dd>${stock} ${badge}</dd>
+        </dl>
+      </div>
+      <div class="scan-actions">
+        <button type="button" class="btn btn-primary" id="scan-act-venta">🛒 Registrar venta</button>
+        <button type="button" class="btn btn-secondary" id="scan-act-compra">📦 Registrar compra</button>
+        <button type="button" class="btn btn-secondary" id="scan-act-inventario">📦 Registrar cantidad de inventario</button>
+        <button type="button" class="btn btn-secondary" id="scan-act-editar">✎ Ver / editar información</button>
+        <button type="button" class="btn btn-secondary" id="scan-act-otro">🔁 Escanear otro código</button>
+      </div>
+    `;
+    document.getElementById("scan-act-venta").addEventListener("click", () => {
+      addToCart(product);
+      showToast(`Agregado a la venta: ${product.nombre}`);
+      stopScanner();
+      switchView("ventas");
+    });
+    document.getElementById("scan-act-compra").addEventListener("click", () => {
+      stopScanner();
+      switchView("compras");
+      openCompraModal(product.id);
+    });
+    document.getElementById("scan-act-inventario").addEventListener("click", () => {
+      stopScanner();
+      openInventoryModal(product, null);
+    });
+    document.getElementById("scan-act-editar").addEventListener("click", () => {
+      stopScanner();
+      switchView("productos");
+      openProductModal(product);
+    });
+  } else {
+    el.innerHTML = `
+      <div class="scan-result-card">
+        <div class="rc-title">⚠️ Código no encontrado</div>
+        <p style="margin:0 0 6px; font-size:13px; color:var(--ink-soft);">No hay ningún producto con el código:</p>
+        <span class="scan-code-pill">${escapeHtml(codigo)}</span>
+      </div>
+      <div class="scan-actions">
+        <button type="button" class="btn btn-primary" id="scan-act-nuevo">+ Nuevo producto con este código</button>
+        <button type="button" class="btn btn-secondary" id="scan-act-otro">🔁 Escanear otro código</button>
+      </div>
+    `;
+    document.getElementById("scan-act-nuevo").addEventListener("click", () => {
+      stopScanner();
+      switchView("productos");
+      openProductModal(null, codigo);
+    });
+  }
+  document.getElementById("scan-act-otro").addEventListener("click", () => {
+    el.style.display = "none";
+    el.innerHTML = "";
+  });
+}
 
 function escapeHtml(str) {
   return String(str ?? "").replace(/[&<>"']/g, m => ({

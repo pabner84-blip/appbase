@@ -1,1455 +1,1086 @@
-// ============================================================
-// FERRETERÍA · App de inventario — Firebase + Escáner OCR + Inventario
-// Incluye: login, Firestore, escáner OCR (Tesseract), pestaña Inventario,
-// campo código de barras, exportar/importar CSV, categorías e historial.
-// ============================================================
-import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
-import {
-  getAuth, signInWithEmailAndPassword, onAuthStateChanged, signOut
-} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
-import {
-  getFirestore, collection, doc, setDoc, addDoc, updateDoc, deleteDoc,
-  onSnapshot, query, orderBy, where, getDoc, serverTimestamp, increment, Timestamp, writeBatch, limit
-} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+/* =========================================================================
+   STOCKFERRE — Consulta rápida de productos (100% frontend)
+   Escaneas un código con la cámara (OCR) o lo escribes, y ves al instante:
+   código, descripción, marca, categoría, precio de compra y de venta.
+   Todo editable. Persistencia: Firebase Firestore (si está configurado en
+   firebase-config.js) + LocalStorage como caché/respaldo local. Sin Google Sheets.
+   ========================================================================= */
 
-// ---- Tu configuración de Firebase ----
-const firebaseConfig = {
-  apiKey: "AIzaSyBzl4dJy3ofDNkFV2WNy3If2crpZZScqsk",
-  authDomain: "app-ferreteria-bd73f.firebaseapp.com",
-  projectId: "app-ferreteria-bd73f",
-  storageBucket: "app-ferreteria-bd73f.firebasestorage.app",
-  messagingSenderId: "358852202919",
-  appId: "1:358852202919:web:8f2a3fc62be0ca1d232682"
-};
+const STORAGE_KEY = 'stockferre_catalogo_v1';
 
-// Correo que se registra automáticamente como ADMIN la primera vez que entra
-const ADMIN_BOOTSTRAP_EMAIL = "abnerdaniloperezquispe@gmail.com";
+let db = null;
 
-const app = initializeApp(firebaseConfig);
-const auth = getAuth(app);
-const db = getFirestore(app);
+/* -------------------------------------------------------------------------
+   1. MODELO DE DATOS + PERSISTENCIA (Firebase + LocalStorage)
+   ------------------------------------------------------------------------- */
 
-// ---------------- Elementos DOM ----------------
-const loginScreen = document.getElementById("login-screen");
-const appShell = document.getElementById("app-shell");
-const loginForm = document.getElementById("login-form");
-const loginEmail = document.getElementById("login-email");
-const loginPass = document.getElementById("login-pass");
-const loginBtn = document.getElementById("login-btn");
-const loginError = document.getElementById("login-error");
-const whoEmail = document.getElementById("who-email");
-const whoRole = document.getElementById("who-role");
-const logoutBtn = document.getElementById("logout-btn");
-const toastEl = document.getElementById("toast");
-
-function showToast(msg) {
-  toastEl.textContent = msg;
-  toastEl.classList.add("show");
-  setTimeout(() => toastEl.classList.remove("show"), 2600);
-}
-
-// ---------------- LOGIN ----------------
-loginForm.addEventListener("submit", async (e) => {
-  e.preventDefault();
-  loginError.style.display = "none";
-  loginBtn.disabled = true;
-  loginBtn.textContent = "Ingresando...";
-  try {
-    await signInWithEmailAndPassword(auth, loginEmail.value.trim(), loginPass.value);
-  } catch (err) {
-    loginError.textContent = traducirErrorAuth(err.code);
-    loginError.style.display = "block";
-  } finally {
-    loginBtn.disabled = false;
-    loginBtn.textContent = "Ingresar";
-  }
-});
-
-function traducirErrorAuth(code) {
-  const map = {
-    "auth/invalid-credential": "Correo o contraseña incorrectos.",
-    "auth/invalid-email": "El correo no es válido.",
-    "auth/user-not-found": "No existe una cuenta con ese correo.",
-    "auth/wrong-password": "Contraseña incorrecta.",
-    "auth/too-many-requests": "Demasiados intentos. Espera un momento e intenta de nuevo."
+function defaultDB(){
+  return {
+    productos: [],
+    categorias: [],
+    contador: { producto: 1, venta: 1 },
+    historialEscaneos: [],
+    historialBusquedas: [],
+    ventas: []
   };
-  return map[code] || "No se pudo iniciar sesión. Intenta de nuevo.";
 }
 
-logoutBtn.addEventListener("click", () => signOut(auth));
+function normalizeDB(obj){
+  obj = obj || {};
+  obj.productos = obj.productos || [];
+  obj.categorias = obj.categorias || [];
+  obj.contador = obj.contador || { producto: 1, venta: 1 };
+  obj.contador.venta = obj.contador.venta || 1;
+  obj.contador.producto = obj.contador.producto || 1;
+  obj.historialEscaneos = obj.historialEscaneos || [];
+  obj.historialBusquedas = obj.historialBusquedas || [];
+  obj.ventas = obj.ventas || [];
+  obj.productos.forEach(p=>{
+    p.codigoBarras = p.codigoBarras || '';
+    p.stock = typeof p.stock === 'number' ? p.stock : 0;
+  });
+  return obj;
+}
 
-// ---------------- Sesión / bootstrap de rol ----------------
-let currentUser = null;
-let currentRole = "vendedor";
-let unsubProducts = null;
-let unsubCompras = null;
-let unsubTurno = null;
-let unsubMovimientos = null;
-let unsubVentas = null;
-let unsubGastos = null;
-let unsubCategorias = null;
-let unsubHistorial = null;
-let unsubHistorialBusquedas = null;
+// Carga inicial: siempre desde LocalStorage (instantáneo, funciona sin internet).
+// Si Firebase está configurado, connectFirebase() la reemplaza/sincroniza después.
+function loadDB(){
+  try{
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if(raw){ db = normalizeDB(JSON.parse(raw)); return; }
+  }catch(e){ console.error('Error leyendo LocalStorage', e); }
+  db = defaultDB();
+  persistLocalCache();
+}
 
-onAuthStateChanged(auth, async (user) => {
-  if (user) {
-    currentUser = user;
-    await ensureUserDoc(user);
-    loginScreen.style.display = "none";
-    appShell.classList.add("active");
-    startProductsListener();
-    startComprasListener();
-    startTurnoListener();
-    startVentasListener();
-    startGastosListener();
-    startCategoriasListener();
-    startHistorialListeners();
-  } else {
-    currentUser = null;
-    appShell.classList.remove("active");
-    loginScreen.style.display = "flex";
-    if (unsubProducts) { unsubProducts(); unsubProducts = null; }
-    if (unsubCompras) { unsubCompras(); unsubCompras = null; }
-    if (unsubTurno) { unsubTurno(); unsubTurno = null; }
-    if (unsubMovimientos) { unsubMovimientos(); unsubMovimientos = null; }
-    if (unsubVentas) { unsubVentas(); unsubVentas = null; }
-    if (unsubGastos) { unsubGastos(); unsubGastos = null; }
-    if (unsubCategorias) { unsubCategorias(); unsubCategorias = null; }
-    if (unsubHistorial) { unsubHistorial(); unsubHistorial = null; }
-    if (unsubHistorialBusquedas) { unsubHistorialBusquedas(); unsubHistorialBusquedas = null; }
-    allScans = [];
-    allBuscados = [];
-    allCategorias = [];
+function persistLocalCache(){
+  try{
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(db));
+  }catch(e){
+    console.error('Error guardando en LocalStorage', e);
+    toast('No se pudo guardar en el almacenamiento local (¿espacio lleno?)', 'error');
   }
-});
+}
 
-// Crea el documento del usuario en /usuarios/{uid} si no existe.
-// El correo definido en ADMIN_BOOTSTRAP_EMAIL se vuelve admin automáticamente la primera vez.
-async function ensureUserDoc(user) {
-  const ref = doc(db, "usuarios", user.uid);
-  const snap = await getDoc(ref);
-  if (!snap.exists()) {
-    const rol = user.email.toLowerCase() === ADMIN_BOOTSTRAP_EMAIL.toLowerCase() ? "admin" : "vendedor";
-    await setDoc(ref, {
-      email: user.email,
-      rol,
-      creadoEn: serverTimestamp()
+// Guarda siempre en LocalStorage (instantáneo) y, si Firebase está conectado,
+// también sube los datos a Firestore para que se vean en todos los dispositivos.
+// El historial de escaneos/búsquedas se queda solo en este dispositivo (no se
+// sube) para no gastar la cuota gratuita de Firebase con cada escaneo.
+function saveDB(){
+  persistLocalCache();
+  if(fbReady && fbDocRef){
+    const { historialEscaneos, historialBusquedas, ...syncData } = db;
+    fbDocRef.set(syncData).then(()=>{
+      setSyncStatus('synced');
+    }).catch(err=>{
+      console.error('Error guardando en Firebase', err);
+      setSyncStatus('error');
     });
-    currentRole = rol;
-  } else {
-    currentRole = snap.data().rol || "vendedor";
   }
-  whoEmail.textContent = user.email;
-  whoRole.textContent = currentRole;
 }
 
-// ---------------- Navegación ----------------
-const navItems = document.querySelectorAll(".nav-item");
+/* -------------------------------------------------------------------------
+   1b. FIREBASE (sincronización entre dispositivos — opcional)
+   ------------------------------------------------------------------------- */
 
-function switchView(viewName) {
-  const target = document.querySelector(`.nav-item[data-view="${viewName}"]`);
-  if (!target || target.classList.contains("disabled")) return;
-  navItems.forEach(n => n.classList.remove("active"));
-  target.classList.add("active");
-  document.querySelectorAll("main > section").forEach(s => s.style.display = "none");
-  document.getElementById("view-" + viewName).style.display = "block";
-  if (viewName === "categorias") renderCategorias();
-  if (viewName === "historial") { renderScanHistory(); renderSearchHistory(); }
+let fbReady = false;
+let fbDocRef = null;
+let fbUnsub = null;
+
+function setSyncStatus(status){
+  const el = document.getElementById('sidebarSyncStatus');
+  if(!el) return;
+  const labels = {
+    local: '💾 Solo en este dispositivo',
+    connecting: '🔄 Conectando a Firebase...',
+    synced: '🔥 Sincronizado con Firebase',
+    error: '⚠️ Error de sincronización'
+  };
+  el.textContent = labels[status] || '';
 }
 
-navItems.forEach(item => {
-  item.addEventListener("click", () => switchView(item.dataset.view));
-});
+function rerenderCurrentView(){
+  const activeView = document.querySelector('.view.active');
+  if(!activeView) return;
+  const name = activeView.id.replace('view-', '');
+  if(name === 'productos') renderProductos();
+  if(name === 'categorias') renderCategorias();
+  if(name === 'ventas') renderVentas();
+  if(name === 'historial') renderHistorial();
+  if(name === 'inventario') renderInventario();
+  updateSidebarProductCount();
+}
 
-// ---------------- Productos / Stock (tiempo real) ----------------
-const tbody = document.getElementById("products-tbody");
-const emptyState = document.getElementById("products-empty");
-const statTotal = document.getElementById("stat-total");
-const statBajo = document.getElementById("stat-bajo");
-const statCero = document.getElementById("stat-cero");
-const statValor = document.getElementById("stat-valor");
-const searchInput = document.getElementById("search-input");
+async function connectFirebase(){
+  if(typeof firebaseConfig === 'undefined' || !firebaseConfig.apiKey || !firebaseConfig.projectId){
+    setSyncStatus('local');
+    return; // no configurado: la app sigue funcionando 100% local
+  }
+  if(typeof firebase === 'undefined'){
+    console.warn('El SDK de Firebase no cargó (revisa tu conexión a internet)');
+    setSyncStatus('error');
+    return;
+  }
 
-let allProducts = [];
+  try{
+    setSyncStatus('connecting');
+    firebase.initializeApp(firebaseConfig);
+    const fbFirestore = firebase.firestore();
+    fbDocRef = fbFirestore.collection('stockferre').doc('inventario');
+    fbReady = true;
 
-function startProductsListener() {
-  const q = query(collection(db, "productos"), orderBy("nombre"));
-  unsubProducts = onSnapshot(q, (snapshot) => {
-    allProducts = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
-    renderProducts();
-  }, (err) => {
-    console.error(err);
-    showToast("Error leyendo productos: " + err.message);
+    const snap = await fbDocRef.get();
+    if(snap.exists){
+      // Ya hay datos en la nube: son la fuente de verdad, mantenemos el historial local
+      const remote = normalizeDB(snap.data());
+      remote.historialEscaneos = db.historialEscaneos;
+      remote.historialBusquedas = db.historialBusquedas;
+      db = remote;
+      persistLocalCache();
+      rerenderCurrentView();
+    }else{
+      // Primera vez: sube los datos locales como semilla inicial de la nube
+      const { historialEscaneos, historialBusquedas, ...syncData } = db;
+      await fbDocRef.set(syncData);
+    }
+
+    fbUnsub = fbDocRef.onSnapshot(snap=>{
+      if(snap.metadata.hasPendingWrites) return; // es un cambio que hicimos nosotros mismos
+      if(!snap.exists) return;
+      const remote = normalizeDB(snap.data());
+      remote.historialEscaneos = db.historialEscaneos;
+      remote.historialBusquedas = db.historialBusquedas;
+      db = remote;
+      persistLocalCache();
+      rerenderCurrentView();
+      setSyncStatus('synced');
+    }, err=>{
+      console.error('Error de sincronización Firebase', err);
+      setSyncStatus('error');
+    });
+
+    setSyncStatus('synced');
+  }catch(err){
+    console.error('No se pudo conectar a Firebase', err);
+    setSyncStatus('error');
+  }
+}
+
+
+
+/* -------------------------------------------------------------------------
+   2. UTILIDADES
+   ------------------------------------------------------------------------- */
+
+function uid(kind){
+  kind = kind || 'producto';
+  db.contador[kind] = db.contador[kind] || 1;
+  const n = db.contador[kind]++;
+  return kind[0] + n + '_' + Date.now().toString(36);
+}
+
+function escapeHtml(str){
+  if(str === null || str === undefined) return '';
+  return String(str)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+
+function fmtMoney(n){
+  n = Number(n) || 0;
+  return 'Bs ' + n.toFixed(2);
+}
+
+function normalize(str){
+  return String(str||'').toUpperCase().trim();
+}
+
+function todayISO(){
+  return new Date().toISOString();
+}
+
+/* -------------------------------------------------------------------------
+   3. PRODUCTOS — CRUD
+   ------------------------------------------------------------------------- */
+
+// Busca por código interno O por código de barras (para que escanear un
+// código de barras real también encuentre el producto)
+function getProductoByCodigo(codigo){
+  const c = normalize(codigo);
+  if(!c) return null;
+  return db.productos.find(p => normalize(p.codigo) === c || (p.codigoBarras && normalize(p.codigoBarras) === c)) || null;
+}
+
+function getProductoById(id){
+  return db.productos.find(p => p.id === id) || null;
+}
+
+function upsertCategoria(nombre){
+  const n = String(nombre||'').trim();
+  if(!n) return;
+  const exists = db.categorias.some(c => normalize(c) === normalize(n));
+  if(!exists) db.categorias.push(n);
+}
+
+function saveProducto(data){
+  upsertCategoria(data.categoria);
+
+  if(data.id){
+    const p = getProductoById(data.id);
+    if(!p) return null;
+    p.codigo = data.codigo.trim();
+    p.nombre = data.nombre.trim();
+    p.marca = data.marca.trim();
+    p.categoria = data.categoria.trim();
+    p.codigoBarras = (data.codigoBarras||'').trim();
+    p.precioCompra = parseFloat(data.precioCompra) || 0;
+    p.precioMarca = parseFloat(data.precioMarca) || 0;
+    p.precioVenta = parseFloat(data.precioVenta) || 0;
+    saveDB();
+    return p;
+  }else{
+    // Si ya existe un producto con ese código, actualízalo en vez de duplicar
+    const existing = getProductoByCodigo(data.codigo);
+    if(existing){
+      existing.nombre = data.nombre.trim();
+      existing.marca = data.marca.trim();
+      existing.categoria = data.categoria.trim();
+      existing.codigoBarras = (data.codigoBarras||'').trim() || existing.codigoBarras;
+      existing.precioCompra = parseFloat(data.precioCompra) || 0;
+      existing.precioMarca = parseFloat(data.precioMarca) || 0;
+      existing.precioVenta = parseFloat(data.precioVenta) || 0;
+      saveDB();
+      return existing;
+    }
+    const p = {
+      id: uid(),
+      codigo: data.codigo.trim(),
+      nombre: data.nombre.trim(),
+      marca: data.marca.trim(),
+      categoria: data.categoria.trim(),
+      codigoBarras: (data.codigoBarras||'').trim(),
+      precioCompra: parseFloat(data.precioCompra) || 0,
+      precioMarca: parseFloat(data.precioMarca) || 0,
+      precioVenta: parseFloat(data.precioVenta) || 0,
+      stock: 0,
+      fechaCreacion: todayISO()
+    };
+    db.productos.push(p);
+    saveDB();
+    return p;
+  }
+}
+
+function deleteProducto(id){
+  confirmDialog('Eliminar producto', '¿Seguro que quieres eliminar este producto? Esta acción no se puede deshacer.', ()=>{
+    db.productos = db.productos.filter(p => p.id !== id);
+    saveDB();
+    renderProductos();
+    renderCategorias();
+    toast('Producto eliminado', 'success');
   });
 }
 
-function nivelDe(stock, minimo) {
-  let pct = minimo > 0 ? Math.min(100, (stock / (minimo * 2)) * 100) : (stock > 0 ? 100 : 0);
-  let color = "var(--green)";
-  if (stock === 0) { color = "var(--red)"; pct = 100; }
-  else if (stock <= minimo) { color = "var(--yellow)"; }
-  return { pct, color };
+/* -------------------------------------------------------------------------
+   4b. VENTAS
+   ------------------------------------------------------------------------- */
+
+function saveVenta(data){
+  const cantidad = parseFloat(data.cantidad) || 0;
+  const precio = parseFloat(data.precio) || 0;
+  const venta = {
+    id: uid('venta'),
+    codigo: data.codigo,
+    nombre: data.nombre,
+    cantidad,
+    precioUnitario: precio,
+    total: cantidad * precio,
+    metodoPago: data.metodoPago,
+    fecha: todayISO()
+  };
+  db.ventas.unshift(venta);
+  saveDB();
+  return venta;
 }
 
-function getAllCategoryNames() {
-  const set = new Set(allCategorias.map(c => c.trim()).filter(Boolean));
-  allProducts.forEach(p => { if (p.categoria) set.add(p.categoria.trim()); });
-  return Array.from(set).sort((a, b) => a.localeCompare(b, "es"));
-}
-
-function populateCategoryFilter() {
-  const sel = document.getElementById("search-categoria");
-  if (!sel) return;
-  const current = sel.value;
-  const cats = getAllCategoryNames();
-  sel.innerHTML = '<option value="">Todas las categorías</option>' +
-    cats.map(c => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join("");
-  if (cats.includes(current)) sel.value = current;
-}
-
-function renderProducts() {
-  populateCategoryFilter();
-  const term = searchInput.value.trim().toLowerCase();
-  const catSel = document.getElementById("search-categoria");
-  const catFilter = catSel ? catSel.value : "";
-  const list = allProducts.filter(p => {
-    const okTerm = !term ||
-      p.nombre.toLowerCase().includes(term) ||
-      (p.sku || "").toLowerCase().includes(term) ||
-      (p.marca || "").toLowerCase().includes(term) ||
-      (p.categoria || "").toLowerCase().includes(term);
-    const okCat = !catFilter || (p.categoria || "").trim().toLowerCase() === catFilter.toLowerCase();
-    return okTerm && okCat;
+function deleteVenta(id){
+  confirmDialog('Eliminar venta', '¿Seguro que quieres eliminar este registro de venta?', ()=>{
+    db.ventas = db.ventas.filter(v => v.id !== id);
+    saveDB();
+    renderVentas();
+    toast('Venta eliminada', 'success');
   });
+}
 
-  tbody.innerHTML = "";
-  emptyState.style.display = list.length ? "none" : "block";
+function openVentaModal(producto){
+  document.getElementById('vCodigo').value = producto.codigo;
+  document.getElementById('vNombreDisplay').textContent = producto.nombre;
+  document.getElementById('vNombre').value = producto.nombre;
+  document.getElementById('vCantidad').value = 1;
+  document.getElementById('vPrecio').value = producto.precioVenta || 0;
+  document.querySelectorAll('[data-payment-method]').forEach(btn=>{
+    btn.classList.toggle('active', btn.dataset.paymentMethod === 'efectivo');
+  });
+  document.getElementById('vMetodoPago').value = 'efectivo';
+  openModal('modalVenta');
+}
 
-  let bajo = 0, cero = 0, valor = 0;
+function handleVentaSubmit(e){
+  e.preventDefault();
+  const cantidad = parseFloat(document.getElementById('vCantidad').value);
+  const precio = parseFloat(document.getElementById('vPrecio').value);
+  const metodoPago = document.getElementById('vMetodoPago').value;
 
-  list.forEach(p => {
-    const stock = Number(p.stock) || 0;
-    const minimo = Number(p.minimo) || 0;
-    const precio = Number(p.precio) || 0;
-    const costo = Number(p.costo) || 0;
-    const precioRef = Number(p.precioReferencia) || 0;
-    valor += stock * costo;
-    if (stock === 0) cero++;
-    else if (stock <= minimo) bajo++;
+  if(!cantidad || cantidad <= 0){
+    toast('Ingresa una cantidad válida', 'error');
+    return;
+  }
+  if(precio === null || isNaN(precio) || precio < 0){
+    toast('Ingresa un precio válido', 'error');
+    return;
+  }
+  if(!metodoPago){
+    toast('Selecciona un método de pago', 'error');
+    return;
+  }
 
-    const { pct, color } = nivelDe(stock, minimo);
+  saveVenta({
+    codigo: document.getElementById('vCodigo').value,
+    nombre: document.getElementById('vNombre').value,
+    cantidad, precio, metodoPago
+  });
+  closeAllModals();
+  toast('Venta registrada', 'success');
+}
 
-    const tr = document.createElement("tr");
-    tr.innerHTML = `
-      <td class="sku">${escapeHtml(p.sku || "—")}</td>
-      <td style="font-weight:600;">${escapeHtml(p.nombre)}</td>
-      <td>${escapeHtml(p.marca || "—")}</td>
-      <td>${escapeHtml(p.categoria || "—")}</td>
-      <td class="num">Bs ${costo.toFixed(2)}</td>
-      <td class="num">Bs ${precioRef.toFixed(2)}</td>
-      <td class="num">Bs ${precio.toFixed(2)}</td>
-      <td class="num">${minimo}</td>
-      <td class="num">${stock}</td>
-      <td class="sku">${escapeHtml(p.codigoBarras || "—")}</td>
-      <td><div class="gauge"><i style="width:${pct}%; background:${color};"></i></div></td>
-      <td>
-        <div class="row-actions">
-          <button class="icon-btn" data-edit="${p.id}" title="Editar">✎</button>
-          <button class="icon-btn danger" data-del="${p.id}" title="Eliminar">🗑</button>
+/* -------------------------------------------------------------------------
+   4. VISTA: ESCÁNER / RESULTADO
+   ------------------------------------------------------------------------- */
+
+function renderScanResult(codigo){
+  const resultDiv = document.getElementById('scanResult');
+  const p = getProductoByCodigo(codigo);
+
+  if(!p){
+    resultDiv.innerHTML = `
+      <div class="scan-not-found">
+        ⚠️ No se encontró ningún producto con el código <strong>${escapeHtml(codigo)}</strong>.
+        <div style="margin-top:10px;">
+          <button class="btn btn-primary btn-sm" id="btnCreateFromScan">+ Crear producto con este código</button>
         </div>
-      </td>
-    `;
-    tbody.appendChild(tr);
+      </div>`;
+    document.getElementById('btnCreateFromScan').addEventListener('click', ()=>{
+      openProductModal(null, codigo);
+    });
+    return;
+  }
+
+  resultDiv.innerHTML = `
+    <div class="scan-result-card">
+      <h4>📦 ${escapeHtml(p.nombre)}</h4>
+      <div class="sr-row"><span>Código</span><strong>${escapeHtml(p.codigo)}</strong></div>
+      <div class="sr-row"><span>Marca</span><strong>${escapeHtml(p.marca || '-')}</strong></div>
+      <div class="sr-row"><span>Categoría</span><strong>${escapeHtml(p.categoria || '-')}</strong></div>
+      <div class="sr-row"><span>Precio de compra</span><strong>${fmtMoney(p.precioCompra)}</strong></div>
+      <div class="sr-row"><span>Precio de marca</span><strong>${fmtMoney(p.precioMarca)}</strong></div>
+      <div class="sr-row"><span>Precio de venta</span><strong>${fmtMoney(p.precioVenta)}</strong></div>
+      <div style="margin-top:12px; display:flex; gap:8px; flex-wrap:wrap;">
+        <button class="btn btn-secondary btn-sm" id="btnEditFromScan">✏️ Editar producto</button>
+        <button class="btn btn-success btn-sm" id="btnSellFromScan">💰 Venderlo</button>
+      </div>
+    </div>`;
+  document.getElementById('btnEditFromScan').addEventListener('click', ()=>{
+    openProductModal(p);
   });
+  document.getElementById('btnSellFromScan').addEventListener('click', ()=>{
+    openVentaModal(p);
+  });
+}
 
-  statTotal.textContent = allProducts.length;
-  statBajo.textContent = bajo;
-  statCero.textContent = cero;
-  statValor.textContent = "Bs " + valor.toLocaleString("es-BO", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+// scanContext: 'lookup' (pestaña Escanear normal) o 'inventario' (registro de
+// cantidad desde la pestaña Inventario) — cambia qué pasa al detectar un código
+let scanContext = 'lookup';
 
-  renderStockView();
+function handleScannedCode(codigo){
+  codigo = String(codigo).trim();
+  if(!codigo) return;
+  if(scanContext === 'inventario'){
+    handleInventoryScan(codigo);
+    return;
+  }
+  renderScanResult(codigo);
+  logScanHistory(codigo);
+}
+
+const HISTORY_MAX = 300;
+
+function logScanHistory(codigo){
+  const p = getProductoByCodigo(codigo);
+  db.historialEscaneos.unshift({
+    codigo,
+    encontrado: !!p,
+    nombre: p ? p.nombre : '',
+    fecha: todayISO()
+  });
+  if(db.historialEscaneos.length > HISTORY_MAX){
+    db.historialEscaneos.length = HISTORY_MAX;
+  }
+  saveDB();
+}
+
+function logSearchHistory(query){
+  query = String(query||'').trim();
+  if(!query) return;
+  // Evita registrar la misma búsqueda repetida justo seguida
+  const last = db.historialBusquedas[0];
+  if(last && normalize(last.query) === normalize(query)) return;
+  db.historialBusquedas.unshift({ query, fecha: todayISO() });
+  if(db.historialBusquedas.length > HISTORY_MAX){
+    db.historialBusquedas.length = HISTORY_MAX;
+  }
+  saveDB();
+}
+
+function fmtHistoryDate(iso){
+  try{
+    const d = new Date(iso);
+    return d.toLocaleString('es-BO', { day:'2-digit', month:'2-digit', year:'2-digit', hour:'2-digit', minute:'2-digit' });
+  }catch(e){ return ''; }
+}
+
+function renderHistorial(){
+  const scanBody = document.querySelector('#scanHistoryTable tbody');
+  if(db.historialEscaneos.length === 0){
+    scanBody.innerHTML = `<tr class="empty-row"><td colspan="4">Todavía no escaneaste ningún código.</td></tr>`;
+  }else{
+    scanBody.innerHTML = db.historialEscaneos.map(h => `
+      <tr>
+        <td><strong>${escapeHtml(h.codigo)}</strong></td>
+        <td>${h.encontrado ? escapeHtml(h.nombre) : '-'}</td>
+        <td>${h.encontrado ? '<span class="badge badge-success-soft">Encontrado</span>' : '<span class="badge badge-danger-soft">No encontrado</span>'}</td>
+        <td>${fmtHistoryDate(h.fecha)}</td>
+      </tr>
+    `).join('');
+  }
+
+  const searchList = document.getElementById('searchHistoryList');
+  if(db.historialBusquedas.length === 0){
+    searchList.innerHTML = `<p class="hint">Todavía no hiciste ninguna búsqueda en Productos.</p>`;
+  }else{
+    searchList.innerHTML = db.historialBusquedas.map(h => `
+      <div class="history-search-row">
+        <span>🔍 ${escapeHtml(h.query)}</span>
+        <small>${fmtHistoryDate(h.fecha)}</small>
+      </div>
+    `).join('');
+  }
+}
+
+const PAYMENT_LABELS = { efectivo: '💵 Efectivo', qr: '📱 QR' };
+
+function renderVentas(){
+  const tbody = document.querySelector('#ventasTable tbody');
+  const summary = document.getElementById('ventasSummary');
+
+  if(db.ventas.length === 0){
+    tbody.innerHTML = `<tr class="empty-row"><td colspan="7">Todavía no registraste ninguna venta.</td></tr>`;
+    summary.textContent = '0 ventas';
+    return;
+  }
+
+  tbody.innerHTML = db.ventas.map(v => `
+    <tr>
+      <td>${fmtHistoryDate(v.fecha)}</td>
+      <td><strong>${escapeHtml(v.codigo)}</strong></td>
+      <td>${escapeHtml(v.nombre)}</td>
+      <td>${v.cantidad}</td>
+      <td>${fmtMoney(v.precioUnitario)}</td>
+      <td><strong>${fmtMoney(v.total)}</strong></td>
+      <td>${PAYMENT_LABELS[v.metodoPago] || v.metodoPago}</td>
+      <td><button class="btn-icon" title="Eliminar" data-delete-venta="${v.id}">🗑️</button></td>
+    </tr>
+  `).join('');
+
+  const totalMonto = db.ventas.reduce((sum, v) => sum + v.total, 0);
+  summary.textContent = `${db.ventas.length} venta${db.ventas.length === 1 ? '' : 's'} · ${fmtMoney(totalMonto)} en total`;
+}
+
+/* -------------------------------------------------------------------------
+   4c. INVENTARIO (stock por producto, escaneo de cantidades, export CSV)
+   ------------------------------------------------------------------------- */
+
+function renderInventario(){
+  const tbody = document.querySelector('#inventarioTable tbody');
+  if(db.productos.length === 0){
+    tbody.innerHTML = `<tr class="empty-row"><td colspan="5">Todavía no hay productos.</td></tr>`;
+    return;
+  }
+  const list = db.productos.slice().sort((a,b)=> a.nombre.localeCompare(b.nombre, 'es'));
+  tbody.innerHTML = list.map(p => `
+    <tr>
+      <td><strong>${escapeHtml(p.codigo)}</strong></td>
+      <td>${escapeHtml(p.codigoBarras || '-')}</td>
+      <td>${escapeHtml(p.nombre)}</td>
+      <td>${p.categoria ? `<span class="badge badge-muted">${escapeHtml(p.categoria)}</span>` : '-'}</td>
+      <td><strong>${p.stock || 0}</strong></td>
+    </tr>
+  `).join('');
+}
+
+// Mueve el bloque real del escáner (cámara, worker, botones) dentro de un
+// contenedor destino, sin duplicar ni reiniciar nada — así "el escáner mismo"
+// funciona igual en la pestaña Escanear y en el registro de inventario.
+function moveScannerBlockTo(containerId){
+  const block = document.getElementById('scannerBlock');
+  const container = document.getElementById(containerId);
+  if(block && container) container.appendChild(block);
+}
+function restoreScannerBlockHome(){
+  const block = document.getElementById('scannerBlock');
+  const home = document.getElementById('scannerBlockHome');
+  if(block && home) home.appendChild(block);
+}
+
+function openInventarioScan(){
+  scanContext = 'inventario';
+  moveScannerBlockTo('scannerBlockPlaceholder');
+  openModal('modalInventarioScan');
+  if(!ocrActive) startOcrScanner();
+}
+
+function closeInventarioScan(){
+  stopOcrScanner();
+  restoreScannerBlockHome();
+  closeAllModals();
+}
+
+function handleInventoryScan(codigo){
+  closeInventarioScan();
+  const p = getProductoByCodigo(codigo);
+
+  document.getElementById('invCodigo').value = codigo;
+  if(p){
+    document.getElementById('invNoEncontrado').style.display = 'none';
+    document.getElementById('formInventario').style.display = '';
+    document.getElementById('invNombreDisplay').textContent = p.nombre;
+    document.getElementById('invStockActualDisplay').textContent = `Stock actual: ${p.stock || 0}`;
+    document.getElementById('invCantidad').value = 1;
+    document.getElementById('invCodigoBarras').value = p.codigoBarras || '';
+  }else{
+    document.getElementById('invNoEncontrado').style.display = '';
+    document.getElementById('formInventario').style.display = 'none';
+    document.getElementById('invCodigoNoEncontrado').textContent = codigo;
+  }
+  openModal('modalInventarioDetalle');
+}
+
+function handleInventarioSubmit(e){
+  e.preventDefault();
+  const codigo = document.getElementById('invCodigo').value;
+  const cantidad = parseFloat(document.getElementById('invCantidad').value);
+  const codigoBarras = document.getElementById('invCodigoBarras').value.trim();
+
+  if(!cantidad || cantidad <= 0){
+    toast('Ingresa una cantidad válida', 'error');
+    return;
+  }
+  const p = getProductoByCodigo(codigo);
+  if(!p) return;
+
+  p.stock = (p.stock || 0) + cantidad;
+  if(codigoBarras) p.codigoBarras = codigoBarras;
+  saveDB();
   renderInventario();
-  renderCategorias();
+  renderProductos();
+  closeAllModals();
+  toast(`Stock actualizado: ${p.nombre} → ${p.stock}`, 'success');
+
+  // Sigue escaneando el siguiente producto sin que el usuario tenga que
+  // volver a tocar el botón (pensado para hacer un conteo físico seguido)
+  openInventarioScan();
 }
 
-searchInput.addEventListener("input", renderProducts);
-searchInput.addEventListener("change", () => logSearchHistory(searchInput.value));
-document.getElementById("search-categoria").addEventListener("change", renderProducts);
-
-// ---------------- Vista Stock ----------------
-const stockTbody = document.getElementById("stock-tbody");
-const stockEmpty = document.getElementById("stock-empty");
-const stockSearchInput = document.getElementById("stock-search-input");
-
-function renderStockView() {
-  if (!stockTbody) return;
-  const term = stockSearchInput.value.trim().toLowerCase();
-  const list = allProducts
-    .filter(p => !term || p.nombre.toLowerCase().includes(term) || (p.sku || "").toLowerCase().includes(term))
-    .slice()
-    .sort((a, b) => (Number(a.stock) || 0) - (Number(b.stock) || 0));
-
-  stockTbody.innerHTML = "";
-  stockEmpty.style.display = list.length ? "none" : "block";
-
-  let bajo = 0, cero = 0, valor = 0;
-  list.forEach(p => {
-    const stock = Number(p.stock) || 0;
-    const minimo = Number(p.minimo) || 0;
-    const costo = Number(p.costo) || 0;
-    valor += stock * costo;
-    if (stock === 0) cero++;
-    else if (stock <= minimo) bajo++;
-
-    let badge = `<span class="badge ok">OK</span>`;
-    if (stock === 0) badge = `<span class="badge bad">Sin stock</span>`;
-    else if (stock <= minimo) badge = `<span class="badge warn">Stock bajo</span>`;
-
-    const tr = document.createElement("tr");
-    tr.innerHTML = `
-      <td class="sku">${escapeHtml(p.sku || "—")}</td>
-      <td style="font-weight:600;">${escapeHtml(p.nombre)}</td>
-      <td class="num">${minimo}</td>
-      <td class="num">${stock}</td>
-      <td>${badge}</td>
-      <td><button class="icon-btn" data-stock-edit="${p.id}" title="Editar">✎</button></td>
-    `;
-    stockTbody.appendChild(tr);
-  });
-
-  document.getElementById("stock-stat-total").textContent = allProducts.length;
-  document.getElementById("stock-stat-bajo").textContent = bajo;
-  document.getElementById("stock-stat-cero").textContent = cero;
-  document.getElementById("stock-stat-valor").textContent = "Bs " + valor.toLocaleString("es-BO", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-}
-stockSearchInput?.addEventListener("input", renderStockView);
-stockTbody?.addEventListener("click", (e) => {
-  const id = e.target.closest("[data-stock-edit]")?.dataset.stockEdit;
-  if (id) openProductModal(allProducts.find(p => p.id === id));
-});
-
-tbody.addEventListener("click", async (e) => {
-  const editId = e.target.closest("[data-edit]")?.dataset.edit;
-  const delId = e.target.closest("[data-del]")?.dataset.del;
-  if (editId) openProductModal(allProducts.find(p => p.id === editId));
-  if (delId) {
-    const prod = allProducts.find(p => p.id === delId);
-    if (confirm(`¿Eliminar "${prod?.nombre}" del inventario?`)) {
-      await deleteDoc(doc(db, "productos", delId));
-      showToast("Producto eliminado");
-    }
-  }
-});
-
-// ---------------- Modal producto ----------------
-const modalBg = document.getElementById("product-modal-bg");
-const modalTitle = document.getElementById("product-modal-title");
-const productForm = document.getElementById("product-form");
-const fId = document.getElementById("product-id");
-const fNombre = document.getElementById("p-nombre");
-const fSku = document.getElementById("p-sku");
-const fCodigoBarras = document.getElementById("p-codigobarras");
-const fMarca = document.getElementById("p-marca");
-const fCategoria = document.getElementById("p-categoria");
-const fPrecio = document.getElementById("p-precio");
-const fRefPrecio = document.getElementById("p-refprecio");
-const fCosto = document.getElementById("p-costo");
-const fStock = document.getElementById("p-stock");
-const fMinimo = document.getElementById("p-minimo");
-
-document.getElementById("open-add-product").addEventListener("click", () => openProductModal(null));
-document.getElementById("product-cancel").addEventListener("click", closeProductModal);
-modalBg.addEventListener("click", (e) => { if (e.target === modalBg) closeProductModal(); });
-
-function openProductModal(product, prefillCodigo) {
-  productForm.reset();
-  if (product) {
-    modalTitle.textContent = "Editar producto";
-    fId.value = product.id;
-    fNombre.value = product.nombre || "";
-    fSku.value = product.sku || "";
-    fCodigoBarras.value = product.codigoBarras || "";
-    fMarca.value = product.marca || "";
-    fCategoria.value = product.categoria || "";
-    fPrecio.value = product.precio ?? "";
-    fRefPrecio.value = product.precioReferencia ?? "";
-    fCosto.value = product.costo ?? "";
-    fStock.value = product.stock ?? 0;
-    fMinimo.value = product.minimo ?? 5;
-  } else {
-    modalTitle.textContent = "Nuevo producto";
-    fId.value = "";
-    fMinimo.value = 5;
-    if (prefillCodigo) fSku.value = prefillCodigo;
-  }
-  modalBg.classList.add("active");
-  fNombre.focus();
-}
-function closeProductModal() { modalBg.classList.remove("active"); }
-
-productForm.addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const saveBtn = document.getElementById("product-save");
-  saveBtn.disabled = true;
-  saveBtn.textContent = "Guardando...";
-
-  const data = {
-    nombre: fNombre.value.trim(),
-    sku: fSku.value.trim(),
-    codigoBarras: fCodigoBarras.value.trim(),
-    marca: fMarca.value.trim(),
-    categoria: fCategoria.value.trim(),
-    precio: Number(fPrecio.value),
-    precioReferencia: Number(fRefPrecio.value) || 0,
-    costo: Number(fCosto.value),
-    stock: Number(fStock.value),
-    minimo: Number(fMinimo.value),
-    actualizadoEn: serverTimestamp()
-  };
-
-  // Validación: no se pueden duplicar productos por código.
-  // Si el código ya existe, el stock y el código de barras se actualizan desde Inventario.
-  if (!fId.value && data.sku) {
-    const dup = allProducts.find(p => (p.sku || "").trim().toUpperCase() === data.sku.toUpperCase());
-    if (dup) {
-      showToast("Ya existe un producto con ese código. Actualiza su cantidad desde Inventario.");
-      saveBtn.disabled = false;
-      saveBtn.textContent = "Guardar";
-      return;
-    }
-  }
-
-  try {
-    if (fId.value) {
-      await updateDoc(doc(db, "productos", fId.value), data);
-      showToast("Producto actualizado");
-    } else {
-      data.creadoEn = serverTimestamp();
-      await addDoc(collection(db, "productos"), data);
-      showToast("Producto agregado");
-    }
-    closeProductModal();
-  } catch (err) {
-    console.error(err);
-    showToast("Error al guardar: " + err.message);
-  } finally {
-    saveBtn.disabled = false;
-    saveBtn.textContent = "Guardar";
-  }
-});
-
-// ---------------- Compras (tiempo real) ----------------
-let allCompras = [];
-
-const comprasTbody = document.getElementById("compras-tbody");
-const comprasEmpty = document.getElementById("compras-empty");
-const statComprasMes = document.getElementById("stat-compras-mes");
-const statComprasValor = document.getElementById("stat-compras-valor");
-
-function startComprasListener() {
-  const q = query(collection(db, "compras"), orderBy("fecha", "desc"));
-  unsubCompras = onSnapshot(q, (snapshot) => {
-    allCompras = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
-    renderCompras();
-  }, (err) => {
-    console.error(err);
-    showToast("Error leyendo compras: " + err.message);
-  });
-}
-
-function renderCompras() {
-  comprasTbody.innerHTML = "";
-  comprasEmpty.style.display = allCompras.length ? "none" : "block";
-
-  const now = new Date();
-  let mesCount = 0, mesValor = 0;
-
-  allCompras.forEach(c => {
-    const fecha = c.fecha?.toDate ? c.fecha.toDate() : new Date();
-    const total = (Number(c.cantidad) || 0) * (Number(c.costoUnitario) || 0);
-    if (fecha.getMonth() === now.getMonth() && fecha.getFullYear() === now.getFullYear()) {
-      mesCount++;
-      mesValor += total;
-    }
-    const tr = document.createElement("tr");
-    tr.innerHTML = `
-      <td>${fecha.toLocaleDateString("es-BO")}</td>
-      <td class="mono">${fecha.toLocaleTimeString("es-BO", { hour: "2-digit", minute: "2-digit" })}</td>
-      <td style="font-weight:600;">${escapeHtml(c.productoNombre)}</td>
-      <td>${escapeHtml(c.proveedor || "—")}</td>
-      <td class="num">${c.cantidad}</td>
-      <td class="num">Bs ${Number(c.costoUnitario).toFixed(2)}</td>
-      <td class="num">Bs ${total.toFixed(2)}</td>
-      <td class="sku">${escapeHtml(c.registradoPor || "—")}</td>
-    `;
-    comprasTbody.appendChild(tr);
-  });
-
-  statComprasMes.textContent = mesCount;
-  statComprasValor.textContent = "Bs " + mesValor.toLocaleString("es-BO", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-}
-
-// ---------------- Modal compra ----------------
-const compraModalBg = document.getElementById("compra-modal-bg");
-const compraForm = document.getElementById("compra-form");
-const cProducto = document.getElementById("c-producto");
-const cProveedor = document.getElementById("c-proveedor");
-const cCantidad = document.getElementById("c-cantidad");
-const cCosto = document.getElementById("c-costo");
-const cPrecioRef = document.getElementById("c-precio-ref");
-const cPrecioVenta = document.getElementById("c-precio-venta");
-const cActualizarCosto = document.getElementById("c-actualizar-costo");
-const cActualizarRef = document.getElementById("c-actualizar-ref");
-const cActualizarVenta = document.getElementById("c-actualizar-venta");
-
-function fillCompraFieldsFromProducto(productoId) {
-  const p = allProducts.find(pr => pr.id === productoId);
-  if (!p) return;
-  cCosto.value = p.costo ?? 0;
-  cPrecioRef.value = p.precioReferencia ?? 0;
-  cPrecioVenta.value = p.precio ?? 0;
-}
-cProducto.addEventListener("change", () => fillCompraFieldsFromProducto(cProducto.value));
-
-function openCompraModal(prefillProductId) {
-  if (!allProducts.length) {
-    showToast("Primero agrega al menos un producto en la sección Productos");
+function exportInventarioCSV(){
+  if(db.productos.length === 0){
+    toast('No hay productos para exportar', 'error');
     return;
   }
-  compraForm.reset();
-  cActualizarCosto.checked = true;
-  cActualizarRef.checked = false;
-  cActualizarVenta.checked = false;
-  cProducto.innerHTML = allProducts.map(p => `<option value="${p.id}">${escapeHtml(p.sku ? p.sku + " · " : "")}${escapeHtml(p.nombre)}</option>`).join("");
-  if (prefillProductId) cProducto.value = prefillProductId;
-  fillCompraFieldsFromProducto(cProducto.value);
-  compraModalBg.classList.add("active");
-}
-
-document.getElementById("open-add-compra").addEventListener("click", () => openCompraModal());
-document.getElementById("compra-cancel").addEventListener("click", () => compraModalBg.classList.remove("active"));
-compraModalBg.addEventListener("click", (e) => { if (e.target === compraModalBg) compraModalBg.classList.remove("active"); });
-
-compraForm.addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const saveBtn = document.getElementById("compra-save");
-  saveBtn.disabled = true;
-  saveBtn.textContent = "Registrando...";
-
-  const productoId = cProducto.value;
-  const producto = allProducts.find(p => p.id === productoId);
-  const cantidad = Number(cCantidad.value);
-  const costoUnitario = Number(cCosto.value);
-  const precioRefNuevo = Number(cPrecioRef.value) || 0;
-  const precioVentaNuevo = Number(cPrecioVenta.value) || 0;
-
-  try {
-    // 1. Registrar la compra en el historial
-    await addDoc(collection(db, "compras"), {
-      productoId,
-      productoNombre: producto.nombre,
-      proveedor: cProveedor.value.trim(),
-      cantidad,
-      costoUnitario,
-      precioReferencia: precioRefNuevo,
-      precioVenta: precioVentaNuevo,
-      fecha: serverTimestamp(),
-      registradoPor: currentUser?.email || "—"
-    });
-
-    // 2. Sumar el stock del producto (y opcionalmente actualizar sus precios)
-    const updateData = { stock: increment(cantidad) };
-    if (cActualizarCosto.checked) updateData.costo = costoUnitario;
-    if (cActualizarRef.checked) updateData.precioReferencia = precioRefNuevo;
-    if (cActualizarVenta.checked) updateData.precio = precioVentaNuevo;
-    await updateDoc(doc(db, "productos", productoId), updateData);
-
-    showToast(`Stock de "${producto.nombre}" actualizado (+${cantidad})`);
-    compraModalBg.classList.remove("active");
-  } catch (err) {
-    console.error(err);
-    showToast("Error al registrar la compra: " + err.message);
-  } finally {
-    saveBtn.disabled = false;
-    saveBtn.textContent = "Registrar";
-  }
-});
-
-// ---------------- Caja (turno activo en tiempo real) ----------------
-let currentTurno = null; // {id, ...data}
-let allMovimientos = [];
-
-const cajaCerradaView = document.getElementById("caja-cerrada-view");
-const cajaAbiertaView = document.getElementById("caja-abierta-view");
-const cajaCerradaBanner = document.getElementById("caja-cerrada-banner");
-const ventasContent = document.getElementById("ventas-content");
-
-function startTurnoListener() {
-  const q = query(collection(db, "caja_turnos"), where("estado", "==", "abierta"));
-  unsubTurno = onSnapshot(q, (snapshot) => {
-    if (snapshot.empty) {
-      currentTurno = null;
-      cajaCerradaView.style.display = "block";
-      cajaAbiertaView.style.display = "none";
-      cajaCerradaBanner.style.display = "block";
-      ventasContent.style.display = "none";
-      if (unsubMovimientos) { unsubMovimientos(); unsubMovimientos = null; allMovimientos = []; }
-    } else {
-      const d = snapshot.docs[0];
-      currentTurno = { id: d.id, ...d.data() };
-      cajaCerradaView.style.display = "none";
-      cajaAbiertaView.style.display = "block";
-      cajaCerradaBanner.style.display = "none";
-      ventasContent.style.display = "block";
-      document.getElementById("caja-inicial").textContent = "Bs " + Number(currentTurno.montoInicial).toFixed(2);
-      if (!unsubMovimientos) startMovimientosListener();
-    }
-  });
-}
-
-function startMovimientosListener() {
-  const q = query(collection(db, "caja_movimientos"), where("turnoId", "==", currentTurno.id), orderBy("fecha", "desc"));
-  unsubMovimientos = onSnapshot(q, (snapshot) => {
-    allMovimientos = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
-    renderCajaTotales();
-  });
-}
-
-function renderCajaTotales() {
-  const tbodyMov = document.getElementById("movimientos-tbody");
-  const empty = document.getElementById("movimientos-empty");
-  tbodyMov.innerHTML = "";
-
-  let ventasEfectivo = 0, ingresos = 0, egresos = 0;
-  const manuales = allMovimientos.filter(m => m.tipo === "ingreso" || m.tipo === "egreso");
-  empty.style.display = manuales.length ? "none" : "block";
-
-  allMovimientos.forEach(m => {
-    const hora = m.fecha?.toDate ? m.fecha.toDate() : new Date();
-    if (m.tipo === "venta") { ventasEfectivo += Number(m.monto); return; }
-    if (m.tipo === "ingreso") ingresos += Number(m.monto);
-    if (m.tipo === "egreso") egresos += Number(m.monto);
-    const tr = document.createElement("tr");
-    tr.innerHTML = `
-      <td>${hora.toLocaleTimeString("es-BO", { hour: "2-digit", minute: "2-digit" })}</td>
-      <td style="text-transform:capitalize;">${m.tipo}</td>
-      <td>${escapeHtml(m.motivo || "—")}</td>
-      <td class="num" style="color:${m.tipo === "egreso" ? "var(--red)" : "var(--green)"};">${m.tipo === "egreso" ? "-" : "+"}Bs ${Number(m.monto).toFixed(2)}</td>
-      <td class="sku">${escapeHtml(m.registradoPor || "—")}</td>
-    `;
-    tbodyMov.appendChild(tr);
-  });
-
-  const inicial = Number(currentTurno?.montoInicial) || 0;
-  const esperado = inicial + ventasEfectivo + ingresos - egresos;
-
-  document.getElementById("caja-ventas").textContent = "Bs " + ventasEfectivo.toFixed(2);
-  document.getElementById("caja-ingresos").textContent = "Bs " + ingresos.toFixed(2);
-  document.getElementById("caja-egresos").textContent = "Bs " + egresos.toFixed(2);
-  document.getElementById("caja-esperado").textContent = "Bs " + esperado.toFixed(2);
-}
-
-// abrir caja
-document.getElementById("open-abrir-caja").addEventListener("click", () => {
-  document.getElementById("abrir-caja-form").reset();
-  document.getElementById("abrir-caja-modal-bg").classList.add("active");
-});
-document.getElementById("abrir-caja-cancel").addEventListener("click", () => document.getElementById("abrir-caja-modal-bg").classList.remove("active"));
-document.getElementById("abrir-caja-form").addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const monto = Number(document.getElementById("ac-monto").value);
-  await addDoc(collection(db, "caja_turnos"), {
-    estado: "abierta",
-    montoInicial: monto,
-    abiertaPor: currentUser?.email || "—",
-    fechaApertura: serverTimestamp()
-  });
-  document.getElementById("abrir-caja-modal-bg").classList.remove("active");
-  showToast("Caja abierta");
-});
-
-// movimiento manual
-document.getElementById("open-movimiento").addEventListener("click", () => {
-  document.getElementById("movimiento-form").reset();
-  document.getElementById("movimiento-modal-bg").classList.add("active");
-});
-document.getElementById("movimiento-cancel").addEventListener("click", () => document.getElementById("movimiento-modal-bg").classList.remove("active"));
-document.getElementById("movimiento-form").addEventListener("submit", async (e) => {
-  e.preventDefault();
-  await addDoc(collection(db, "caja_movimientos"), {
-    turnoId: currentTurno.id,
-    tipo: document.getElementById("mv-tipo").value,
-    motivo: document.getElementById("mv-motivo").value.trim(),
-    monto: Number(document.getElementById("mv-monto").value),
-    fecha: serverTimestamp(),
-    registradoPor: currentUser?.email || "—"
-  });
-  document.getElementById("movimiento-modal-bg").classList.remove("active");
-  showToast("Movimiento registrado");
-});
-
-// cerrar caja
-document.getElementById("open-cerrar-caja").addEventListener("click", () => {
-  document.getElementById("cerrar-caja-form").reset();
-  document.getElementById("cc-esperado-txt").textContent = document.getElementById("caja-esperado").textContent;
-  document.getElementById("cerrar-caja-modal-bg").classList.add("active");
-});
-document.getElementById("cerrar-caja-cancel").addEventListener("click", () => document.getElementById("cerrar-caja-modal-bg").classList.remove("active"));
-document.getElementById("cerrar-caja-form").addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const esperado = Number(document.getElementById("caja-esperado").textContent.replace("Bs ", "").replace(/,/g, ""));
-  const contado = Number(document.getElementById("cc-contado").value);
-  await updateDoc(doc(db, "caja_turnos", currentTurno.id), {
-    estado: "cerrada",
-    montoFinalEsperado: esperado,
-    montoFinalContado: contado,
-    diferencia: contado - esperado,
-    fechaCierre: serverTimestamp(),
-    cerradaPor: currentUser?.email || "—"
-  });
-  document.getElementById("cerrar-caja-modal-bg").classList.remove("active");
-  showToast("Caja cerrada");
-});
-
-// ---------------- Ventas ----------------
-let cart = []; // {productoId, nombre, precio, cantidad, stockDisponible}
-
-const ventaSearch = document.getElementById("venta-search");
-const ventaResults = document.getElementById("venta-search-results");
-const cartTbody = document.getElementById("cart-tbody");
-const cartEmpty = document.getElementById("cart-empty");
-const cartTotalEl = document.getElementById("cart-total");
-
-ventaSearch.addEventListener("input", () => {
-  const term = ventaSearch.value.trim().toLowerCase();
-  ventaResults.innerHTML = "";
-  if (!term) return;
-  const matches = allProducts.filter(p =>
-    p.nombre.toLowerCase().includes(term) || (p.sku || "").toLowerCase().includes(term)
-  ).slice(0, 8);
-  matches.forEach(p => {
-    const row = document.createElement("div");
-    row.style.cssText = "display:flex; justify-content:space-between; align-items:center; padding:10px 18px; border-bottom:1px solid #F0EEE7; cursor:pointer;";
-    row.innerHTML = `<div><b>${escapeHtml(p.nombre)}</b> <span class="sku">${escapeHtml(p.sku || "")}</span></div><div class="mono">Bs ${Number(p.precio).toFixed(2)} · stock ${p.stock}</div>`;
-    row.addEventListener("click", () => { addToCart(p); ventaSearch.value = ""; ventaResults.innerHTML = ""; });
-    row.addEventListener("mouseenter", () => row.style.background = "#FAF9F5");
-    row.addEventListener("mouseleave", () => row.style.background = "transparent");
-    ventaResults.appendChild(row);
-  });
-});
-
-function addToCart(product) {
-  if (Number(product.stock) <= 0) { showToast("Sin stock disponible"); return; }
-  const existing = cart.find(i => i.productoId === product.id);
-  if (existing) {
-    if (existing.cantidad >= product.stock) { showToast("No hay más stock de este producto"); return; }
-    existing.cantidad++;
-  } else {
-    cart.push({
-      productoId: product.id,
-      nombre: product.nombre,
-      precio: Number(product.precio),
-      costoUnit: Number(product.costo) || 0,
-      cantidad: 1,
-      stockDisponible: Number(product.stock)
-    });
-  }
-  renderCart();
-}
-
-function renderCart() {
-  cartTbody.innerHTML = "";
-  cartEmpty.style.display = cart.length ? "none" : "block";
-  let total = 0;
-  cart.forEach((item, idx) => {
-    const subtotal = item.precio * item.cantidad;
-    total += subtotal;
-    const tr = document.createElement("tr");
-    tr.innerHTML = `
-      <td style="font-weight:600;">${escapeHtml(item.nombre)}</td>
-      <td class="num"><input type="number" min="1" max="${item.stockDisponible}" value="${item.cantidad}" data-qty="${idx}" style="width:60px; padding:5px; border-radius:5px; border:1px solid var(--line); font-family:inherit;"></td>
-      <td class="num"><input type="number" min="0" step="0.01" value="${item.precio}" data-price="${idx}" style="width:80px; padding:5px; border-radius:5px; border:1px solid var(--line); font-family:inherit;"></td>
-      <td class="num">Bs ${subtotal.toFixed(2)}</td>
-      <td><button class="icon-btn danger" data-rm="${idx}">🗑</button></td>
-    `;
-    cartTbody.appendChild(tr);
-  });
-  cartTotalEl.textContent = "Bs " + total.toFixed(2);
-}
-
-cartTbody.addEventListener("click", (e) => {
-  const rm = e.target.closest("[data-rm]")?.dataset.rm;
-  if (rm !== undefined) { cart.splice(Number(rm), 1); renderCart(); }
-});
-cartTbody.addEventListener("change", (e) => {
-  const qtyIdx = e.target.dataset.qty;
-  const priceIdx = e.target.dataset.price;
-  if (qtyIdx !== undefined) {
-    let val = Number(e.target.value);
-    const item = cart[qtyIdx];
-    if (val > item.stockDisponible) { val = item.stockDisponible; showToast("Stock máximo disponible: " + val); }
-    if (val < 1) val = 1;
-    item.cantidad = val;
-    renderCart();
-  }
-  if (priceIdx !== undefined) {
-    let val = Number(e.target.value);
-    if (val < 0 || isNaN(val)) val = 0;
-    cart[priceIdx].precio = val;
-    renderCart();
-  }
-});
-
-document.getElementById("confirm-venta-btn").addEventListener("click", async () => {
-  if (!cart.length) { showToast("El carrito está vacío"); return; }
-  if (!currentTurno) { showToast("Abre la caja antes de vender"); return; }
-  const btn = document.getElementById("confirm-venta-btn");
-  btn.disabled = true; btn.textContent = "Procesando...";
-
-  const metodo = document.getElementById("venta-metodo").value;
-  const total = cart.reduce((s, i) => s + i.precio * i.cantidad, 0);
-  const ganancia = cart.reduce((s, i) => s + (i.precio - (i.costoUnit || 0)) * i.cantidad, 0);
-
-  try {
-    await addDoc(collection(db, "ventas"), {
-      items: cart.map(i => ({ productoId: i.productoId, nombre: i.nombre, precio: i.precio, costoUnit: i.costoUnit || 0, cantidad: i.cantidad })),
-      total,
-      ganancia,
-      metodoPago: metodo,
-      turnoId: currentTurno.id,
-      vendedor: currentUser?.email || "—",
-      fecha: serverTimestamp()
-    });
-
-    for (const item of cart) {
-      await updateDoc(doc(db, "productos", item.productoId), { stock: increment(-item.cantidad) });
-    }
-
-    if (metodo === "efectivo") {
-      await addDoc(collection(db, "caja_movimientos"), {
-        turnoId: currentTurno.id,
-        tipo: "venta",
-        motivo: "Venta en efectivo",
-        monto: total,
-        fecha: serverTimestamp(),
-        registradoPor: currentUser?.email || "—"
-      });
-    }
-
-    cart = [];
-    renderCart();
-    showToast("Venta registrada por Bs " + total.toFixed(2));
-  } catch (err) {
-    console.error(err);
-    showToast("Error al registrar la venta: " + err.message);
-  } finally {
-    btn.disabled = false; btn.textContent = "Cobrar venta";
-  }
-});
-
-// ---------------- Historial de ventas (tiempo real) ----------------
-let allVentas = [];
-const ventasTbody = document.getElementById("ventas-tbody");
-const ventasEmpty = document.getElementById("ventas-empty");
-
-function startVentasListener() {
-  const q = query(collection(db, "ventas"), orderBy("fecha", "desc"));
-  unsubVentas = onSnapshot(q, (snapshot) => {
-    allVentas = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
-    renderVentasHistorial();
-  }, (err) => {
-    console.error(err);
-    showToast("Error leyendo ventas: " + err.message);
-  });
-}
-
-function renderVentasHistorial() {
-  if (!ventasTbody) return;
-  ventasTbody.innerHTML = "";
-  ventasEmpty.style.display = allVentas.length ? "none" : "block";
-
-  const now = new Date();
-  let mesCount = 0, mesTotal = 0, mesGanancia = 0;
-
-  allVentas.forEach(v => {
-    const fecha = v.fecha?.toDate ? v.fecha.toDate() : new Date();
-    const total = Number(v.total) || 0;
-    const ganancia = v.ganancia !== undefined
-      ? Number(v.ganancia)
-      : (v.items || []).reduce((s, i) => s + (Number(i.precio) - Number(i.costoUnit || 0)) * Number(i.cantidad), 0);
-
-    if (fecha.getMonth() === now.getMonth() && fecha.getFullYear() === now.getFullYear()) {
-      mesCount++;
-      mesTotal += total;
-      mesGanancia += ganancia;
-    }
-
-    const itemsResumen = (v.items || []).map(i => `${i.cantidad}× ${i.nombre}`).join(", ");
-    const tr = document.createElement("tr");
-    tr.innerHTML = `
-      <td>${fecha.toLocaleDateString("es-BO")}</td>
-      <td class="mono">${fecha.toLocaleTimeString("es-BO", { hour: "2-digit", minute: "2-digit" })}</td>
-      <td style="max-width:260px;">${escapeHtml(itemsResumen)}</td>
-      <td class="num">Bs ${total.toFixed(2)}</td>
-      <td class="num" style="color:var(--green);">Bs ${ganancia.toFixed(2)}</td>
-      <td style="text-transform:capitalize;">${escapeHtml(v.metodoPago || "—")}</td>
-      <td class="sku">${escapeHtml(v.vendedor || "—")}</td>
-    `;
-    ventasTbody.appendChild(tr);
-  });
-
-  const elMes = document.getElementById("stat-ventas-mes");
-  const elTotal = document.getElementById("stat-ventas-total");
-  const elGan = document.getElementById("stat-ventas-ganancia");
-  if (elMes) elMes.textContent = mesCount;
-  if (elTotal) elTotal.textContent = "Bs " + mesTotal.toLocaleString("es-BO", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-  if (elGan) elGan.textContent = "Bs " + mesGanancia.toLocaleString("es-BO", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-}
-
-// ---------------- Gastos extra (tiempo real) ----------------
-let allGastos = [];
-const gastosTbody = document.getElementById("gastos-tbody");
-const gastosEmpty = document.getElementById("gastos-empty");
-
-function startGastosListener() {
-  const q = query(collection(db, "gastos"), orderBy("fecha", "desc"));
-  unsubGastos = onSnapshot(q, (snapshot) => {
-    allGastos = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
-    renderGastos();
-  }, (err) => {
-    console.error(err);
-    showToast("Error leyendo gastos: " + err.message);
-  });
-}
-
-function renderGastos() {
-  if (!gastosTbody) return;
-  gastosTbody.innerHTML = "";
-  gastosEmpty.style.display = allGastos.length ? "none" : "block";
-
-  const now = new Date();
-  let mesCount = 0, mesValor = 0;
-
-  allGastos.forEach(g => {
-    const fecha = g.fecha?.toDate ? g.fecha.toDate() : new Date();
-    const monto = Number(g.monto) || 0;
-    if (fecha.getMonth() === now.getMonth() && fecha.getFullYear() === now.getFullYear()) {
-      mesCount++;
-      mesValor += monto;
-    }
-    const tr = document.createElement("tr");
-    tr.innerHTML = `
-      <td>${fecha.toLocaleDateString("es-BO")}</td>
-      <td class="mono">${fecha.toLocaleTimeString("es-BO", { hour: "2-digit", minute: "2-digit" })}</td>
-      <td>${escapeHtml(g.observacion || "—")}</td>
-      <td class="num" style="color:var(--red);">Bs ${monto.toFixed(2)}</td>
-      <td class="sku">${escapeHtml(g.registradoPor || "—")}</td>
-      <td><button class="icon-btn danger" data-del-gasto="${g.id}" title="Eliminar">🗑</button></td>
-    `;
-    gastosTbody.appendChild(tr);
-  });
-
-  document.getElementById("stat-gastos-mes").textContent = mesCount;
-  document.getElementById("stat-gastos-valor").textContent = "Bs " + mesValor.toLocaleString("es-BO", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-}
-
-gastosTbody?.addEventListener("click", async (e) => {
-  const delId = e.target.closest("[data-del-gasto]")?.dataset.delGasto;
-  if (delId && confirm("¿Eliminar este gasto?")) {
-    await deleteDoc(doc(db, "gastos", delId));
-    showToast("Gasto eliminado");
-  }
-});
-
-const gastoModalBg = document.getElementById("gasto-modal-bg");
-const gastoForm = document.getElementById("gasto-form");
-document.getElementById("open-add-gasto").addEventListener("click", () => {
-  gastoForm.reset();
-  gastoModalBg.classList.add("active");
-});
-document.getElementById("gasto-cancel").addEventListener("click", () => gastoModalBg.classList.remove("active"));
-gastoModalBg.addEventListener("click", (e) => { if (e.target === gastoModalBg) gastoModalBg.classList.remove("active"); });
-gastoForm.addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const saveBtn = document.getElementById("gasto-save");
-  saveBtn.disabled = true;
-  saveBtn.textContent = "Registrando...";
-  try {
-    await addDoc(collection(db, "gastos"), {
-      observacion: document.getElementById("g-obs").value.trim(),
-      monto: Number(document.getElementById("g-monto").value),
-      fecha: serverTimestamp(),
-      registradoPor: currentUser?.email || "—"
-    });
-    gastoModalBg.classList.remove("active");
-    showToast("Gasto registrado");
-  } catch (err) {
-    console.error(err);
-    showToast("Error al registrar el gasto: " + err.message);
-  } finally {
-    saveBtn.disabled = false;
-    saveBtn.textContent = "Registrar";
-  }
-});
-
-// ---------------- Categorías ----------------
-let allCategorias = [];
-
-function startCategoriasListener() {
-  const q = query(collection(db, "categorias"), orderBy("nombre"));
-  unsubCategorias = onSnapshot(q, (snapshot) => {
-    allCategorias = snapshot.docs.map(d => d.data().nombre).filter(Boolean);
-    renderProducts();
-  }, (err) => {
-    console.error(err);
-  });
-}
-
-function renderCategorias() {
-  const grid = document.getElementById("categorias-grid");
-  if (!grid) return;
-  const cats = getAllCategoryNames();
-  if (!cats.length) {
-    grid.innerHTML = `<p style="color:var(--ink-soft);">Aún no hay categorías. Crea productos con categoría o agrega una arriba.</p>`;
-    return;
-  }
-  grid.innerHTML = cats.map(c => {
-    const count = allProducts.filter(p => (p.categoria || "").trim().toLowerCase() === c.toLowerCase()).length;
-    return `
-      <div class="cat-card" data-cat="${escapeHtml(c)}">
-        <div class="label">${escapeHtml(c)}</div>
-        <div class="value">${count}</div>
-      </div>`;
-  }).join("");
-  grid.querySelectorAll("[data-cat]").forEach(el => {
-    el.addEventListener("click", () => {
-      const sel = document.getElementById("search-categoria");
-      if (sel) sel.value = el.dataset.cat;
-      switchView("productos");
-      renderProducts();
-    });
-  });
-}
-
-document.getElementById("btn-add-categoria").addEventListener("click", async () => {
-  const input = document.getElementById("nueva-categoria-input");
-  const val = input.value.trim();
-  if (!val) { showToast("Escribe un nombre de categoría"); return; }
-  try {
-    await addDoc(collection(db, "categorias"), { nombre: val, creadoEn: serverTimestamp() });
-    input.value = "";
-    showToast("Categoría agregada");
-  } catch (err) {
-    console.error(err);
-    showToast("Error: " + err.message);
-  }
-});
-
-// ---------------- Historial (escaneos y búsquedas) ----------------
-let allScans = [];
-let allBuscados = [];
-
-function startHistorialListeners() {
-  unsubHistorial = onSnapshot(
-    query(collection(db, "historial_escaneos"), orderBy("fecha", "desc"), limit(300)),
-    (snap) => { allScans = snap.docs.map(d => ({ id: d.id, ...d.data() })); renderScanHistory(); },
-    (err) => console.error(err)
-  );
-  unsubHistorialBusquedas = onSnapshot(
-    query(collection(db, "historial_busquedas"), orderBy("fecha", "desc"), limit(200)),
-    (snap) => { allBuscados = snap.docs.map(d => ({ id: d.id, ...d.data() })); renderSearchHistory(); },
-    (err) => console.error(err)
-  );
-}
-
-async function logScanHistory(codigo) {
-  const p = findProductByCodigo(codigo);
-  try {
-    await addDoc(collection(db, "historial_escaneos"), {
-      codigo: String(codigo),
-      encontrado: !!p,
-      nombre: p ? p.nombre : "",
-      fecha: serverTimestamp(),
-      userId: currentUser?.uid || "",
-      usuario: currentUser?.email || ""
-    });
-  } catch (err) { console.error(err); }
-}
-
-async function logSearchHistory(query) {
-  query = (query || "").trim();
-  if (!query) return;
-  try {
-    await addDoc(collection(db, "historial_busquedas"), {
-      query,
-      fecha: serverTimestamp(),
-      userId: currentUser?.uid || "",
-      usuario: currentUser?.email || ""
-    });
-  } catch (err) { console.error(err); }
-}
-
-function renderScanHistory() {
-  const tbodyH = document.getElementById("scan-history-tbody");
-  const empty = document.getElementById("scan-history-empty");
-  if (!tbodyH) return;
-  const mine = allScans.filter(h => h.userId === currentUser?.uid);
-  tbodyH.innerHTML = "";
-  empty.style.display = mine.length ? "none" : "block";
-  mine.slice(0, 100).forEach(h => {
-    const fecha = h.fecha?.toDate ? h.fecha.toDate() : new Date();
-    const tr = document.createElement("tr");
-    tr.innerHTML = `
-      <td><strong class="mono">${escapeHtml(h.codigo)}</strong></td>
-      <td>${escapeHtml(h.nombre || "—")}</td>
-      <td>${h.encontrado ? '<span class="badge ok">Encontrado</span>' : '<span class="badge bad">No encontrado</span>'}</td>
-      <td>${fecha.toLocaleString("es-BO", { day: "2-digit", month: "2-digit", year: "2-digit", hour: "2-digit", minute: "2-digit" })}</td>
-    `;
-    tbodyH.appendChild(tr);
-  });
-}
-
-function renderSearchHistory() {
-  const list = document.getElementById("search-history-list");
-  const empty = document.getElementById("search-history-empty");
-  if (!list) return;
-  const mine = allBuscados.filter(h => h.userId === currentUser?.uid);
-  list.innerHTML = "";
-  empty.style.display = mine.length ? "none" : "block";
-  mine.slice(0, 80).forEach(h => {
-    const fecha = h.fecha?.toDate ? h.fecha.toDate() : new Date();
-    const row = document.createElement("div");
-    row.style.cssText = "display:flex; justify-content:space-between; align-items:center; gap:10px; padding:11px 18px; border-bottom:1px dashed var(--line); font-size:13.5px;";
-    row.innerHTML = `<span>🔍 ${escapeHtml(h.query)}</span><small style="color:var(--ink-soft); white-space:nowrap;">${fecha.toLocaleString("es-BO", { day: "2-digit", month: "2-digit", year: "2-digit", hour: "2-digit", minute: "2-digit" })}</small>`;
-    list.appendChild(row);
-  });
-}
-
-document.getElementById("btn-clear-scan-history").addEventListener("click", async () => {
-  const mine = allScans.filter(h => h.userId === currentUser?.uid);
-  if (!mine.length) { showToast("No hay escaneos que borrar"); return; }
-  if (!confirm("¿Borrar tu historial de escaneos?")) return;
-  const batch = writeBatch(db);
-  mine.forEach(h => batch.delete(doc(db, "historial_escaneos", h.id)));
-  await batch.commit();
-  showToast("Historial de escaneos borrado");
-});
-
-document.getElementById("btn-clear-search-history").addEventListener("click", async () => {
-  const mine = allBuscados.filter(h => h.userId === currentUser?.uid);
-  if (!mine.length) { showToast("No hay búsquedas que borrar"); return; }
-  if (!confirm("¿Borrar tu historial de búsquedas?")) return;
-  const batch = writeBatch(db);
-  mine.forEach(h => batch.delete(doc(db, "historial_busquedas", h.id)));
-  await batch.commit();
-  showToast("Historial de búsquedas borrado");
-});
-
-// ---------------- Vista Inventario ----------------
-const invTbody = document.getElementById("inventario-tbody");
-const invEmpty = document.getElementById("inventario-empty");
-const invSearch = document.getElementById("inv-search");
-
-function renderInventario() {
-  if (!invTbody) return;
-  const term = invSearch.value.trim().toLowerCase();
-  const list = allProducts.filter(p =>
-    !term || (p.sku || "").toLowerCase().includes(term) || p.nombre.toLowerCase().includes(term)
-  ).slice().sort((a, b) => (a.sku || "").localeCompare(b.sku || "", "es"));
-
-  invTbody.innerHTML = "";
-  invEmpty.style.display = list.length ? "none" : "block";
-
-  list.forEach(p => {
-    const stock = Number(p.stock) || 0;
-    const tr = document.createElement("tr");
-    tr.innerHTML = `
-      <td class="sku">${escapeHtml(p.sku || "—")}</td>
-      <td style="font-weight:600;">${escapeHtml(p.nombre)}</td>
-      <td class="num">${stock}</td>
-      <td class="sku">${escapeHtml(p.codigoBarras || "—")}</td>
-      <td><div class="row-actions"><button class="icon-btn" data-inv-edit="${p.id}" title="Registrar cantidad">✎</button></div></td>
-    `;
-    invTbody.appendChild(tr);
-  });
-}
-
-invSearch.addEventListener("input", renderInventario);
-invTbody.addEventListener("click", (e) => {
-  const id = e.target.closest("[data-inv-edit]")?.dataset.invEdit;
-  if (id) openInventoryModal(allProducts.find(p => p.id === id), null);
-});
-
-document.getElementById("open-registrar-inventario").addEventListener("click", () => openScanner("inventario"));
-document.getElementById("open-export-inventario").addEventListener("click", exportInventarioCSV);
-
-// ---------------- Modal registrar cantidad de inventario ----------------
-let invTargetProduct = null;
-let invScannedCode = "";
-
-const inventoryModalBg = document.getElementById("inventory-modal-bg");
-const inventoryForm = document.getElementById("inventory-form");
-const inventoryModalTitle = document.getElementById("inventory-modal-title");
-const inventoryProductInfo = document.getElementById("inventory-product-info");
-const invCantidad = document.getElementById("inv-cantidad");
-const invCodigoBarras = document.getElementById("inv-codigo-barras");
-
-function openInventoryModal(product, codigo) {
-  invTargetProduct = product || null;
-  invScannedCode = codigo || (product ? (product.sku || "") : "");
-  inventoryForm.reset();
-  const crearWrap = document.getElementById("inv-crear-nuevo-wrap");
-  const fields = document.getElementById("inv-fields");
-  const saveBtn = document.getElementById("inventory-save");
-
-  if (product) {
-    inventoryModalTitle.textContent = "Registrar cantidad de inventario";
-    inventoryProductInfo.innerHTML = `
-      <div class="scan-result-card">
-        <div class="rc-title">✔ Producto encontrado</div>
-        <dl>
-          <dt>Código</dt><dd>${escapeHtml(product.sku || "—")}</dd>
-          <dt>Descripción</dt><dd style="font-family:inherit;">${escapeHtml(product.nombre)}</dd>
-          <dt>Marca</dt><dd style="font-family:inherit;">${escapeHtml(product.marca || "—")}</dd>
-          <dt>Categoría</dt><dd style="font-family:inherit;">${escapeHtml(product.categoria || "—")}</dd>
-          <dt>Stock actual</dt><dd>${Number(product.stock) || 0}</dd>
-        </dl>
-      </div>`;
-    invCantidad.value = product.stock ?? 0;
-    invCodigoBarras.value = product.codigoBarras || "";
-    fields.style.display = "";
-    saveBtn.style.display = "";
-    crearWrap.style.display = "none";
-  } else {
-    inventoryModalTitle.textContent = "Código no encontrado";
-    inventoryProductInfo.innerHTML = `
-      <div class="scan-result-card">
-        <div class="rc-title">⚠️ Código no encontrado</div>
-        <p style="margin:0 0 6px; font-size:13px; color:var(--ink-soft);">No hay ningún producto con el código:</p>
-        <span class="scan-code-pill">${escapeHtml(invScannedCode)}</span>
-      </div>`;
-    invCantidad.value = 0;
-    fields.style.display = "none";
-    saveBtn.style.display = "none";
-    crearWrap.style.display = "block";
-  }
-  inventoryModalBg.classList.add("active");
-}
-
-function closeInventoryModal() { inventoryModalBg.classList.remove("active"); }
-
-document.getElementById("inventory-cancel").addEventListener("click", closeInventoryModal);
-inventoryModalBg.addEventListener("click", (e) => { if (e.target === inventoryModalBg) closeInventoryModal(); });
-
-document.getElementById("inv-crear-nuevo").addEventListener("click", () => {
-  closeInventoryModal();
-  switchView("productos");
-  openProductModal(null, invScannedCode);
-});
-
-inventoryForm.addEventListener("submit", async (e) => {
-  e.preventDefault();
-  if (!invTargetProduct) { showToast("Primero crea el producto"); return; }
-  const saveBtn = document.getElementById("inventory-save");
-  saveBtn.disabled = true;
-  saveBtn.textContent = "Guardando...";
-  const cantidad = Number(invCantidad.value);
-  const codigoBarras = invCodigoBarras.value.trim();
-  try {
-    await updateDoc(doc(db, "productos", invTargetProduct.id), {
-      stock: cantidad,
-      codigoBarras: codigoBarras || invTargetProduct.codigoBarras || "",
-      actualizadoEn: serverTimestamp()
-    });
-    showToast(`Stock de "${invTargetProduct.nombre}" actualizado a ${cantidad}`);
-    closeInventoryModal();
-  } catch (err) {
-    console.error(err);
-    showToast("Error al guardar: " + err.message);
-  } finally {
-    saveBtn.disabled = false;
-    saveBtn.textContent = "Guardar";
-  }
-});
-
-// ---------------- Exportar CSV ----------------
-document.getElementById("open-export-products").addEventListener("click", exportProductsCSV);
-
-function downloadCSV(cols, rows, baseName) {
-  const escape = (v) => {
-    const s = String(v ?? "");
-    return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+  const header = ['CODIGO','DESCRIPCION','MARCA','CATEGORIA','CODIGO DE BARRAS','STOCK'];
+  const rows = db.productos.map(p => [
+    p.codigo, p.nombre, p.marca||'', p.categoria||'', p.codigoBarras||'', p.stock||0
+  ]);
+  const csvEscape = v => {
+    v = String(v ?? '');
+    return /[",\n]/.test(v) ? '"' + v.replace(/"/g,'""') + '"' : v;
   };
-  const csv = "\uFEFF" + [cols.join(","), ...rows.map(r => r.map(escape).join(","))].join("\r\n");
-  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+  const csv = [header, ...rows].map(r => r.map(csvEscape).join(',')).join('\n');
+  const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
   const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
+  const a = document.createElement('a');
   a.href = url;
-  a.download = `${baseName}_${new Date().toISOString().slice(0, 10)}.csv`;
+  a.download = `stockferre_inventario_${todayISO().slice(0,10)}.csv`;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
+  toast('Inventario exportado', 'success');
 }
 
-function exportProductsCSV() {
-  const cols = ["CODIGO", "DESCRIPCION", "MARCA", "CATEGORIA", "PRECIO COMPRA", "PRECIO REFERENCIA", "PRECIO VENTA", "STOCK MINIMO", "STOCK ACTUAL", "CODIGO BARRAS"];
-  const rows = allProducts.map(p => [
-    p.sku || "", p.nombre || "", p.marca || "", p.categoria || "",
-    p.costo ?? 0, p.precioReferencia ?? 0, p.precio ?? 0,
-    p.minimo ?? 0, p.stock ?? 0, p.codigoBarras || ""
-  ]);
-  downloadCSV(cols, rows, "productos");
+/* -------------------------------------------------------------------------
+   5. VISTA: PRODUCTOS (tabla, búsqueda, filtro por categoría)
+   ------------------------------------------------------------------------- */
+
+function populateCategoryFilter(){
+  const sel = document.getElementById('prodFilterCategoria');
+  const current = sel.value;
+  const cats = getAllCategoryNames();
+  sel.innerHTML = '<option value="">Todas las categorías</option>' +
+    cats.map(c => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join('');
+  if(cats.includes(current)) sel.value = current;
 }
 
-function exportInventarioCSV() {
-  const cols = ["CODIGO", "DESCRIPCION", "MARCA", "CATEGORIA", "CANTIDAD", "CODIGO BARRAS"];
-  const rows = allProducts.map(p => [
-    p.sku || "", p.nombre || "", p.marca || "", p.categoria || "",
-    p.stock ?? 0, p.codigoBarras || ""
-  ]);
-  downloadCSV(cols, rows, "inventario");
+function populateCategoryDatalist(){
+  const dl = document.getElementById('categoriasList');
+  dl.innerHTML = getAllCategoryNames().map(c => `<option value="${escapeHtml(c)}">`).join('');
 }
 
-// ---------------- Importar productos desde Excel ----------------
-const importModalBg = document.getElementById("import-modal-bg");
-const importFile = document.getElementById("import-file");
-const importStockInicial = document.getElementById("import-stock-inicial");
-const importPreview = document.getElementById("import-preview");
-const importProgress = document.getElementById("import-progress");
-const btnAnalizar = document.getElementById("import-analizar");
-const btnConfirmar = document.getElementById("import-confirmar");
-let parsedImportRows = null;
-
-document.getElementById("open-import-excel").addEventListener("click", () => {
-  importFile.value = "";
-  importPreview.style.display = "none";
-  importProgress.style.display = "none";
-  btnAnalizar.style.display = "inline-block";
-  btnConfirmar.style.display = "none";
-  parsedImportRows = null;
-  importModalBg.classList.add("active");
-});
-document.getElementById("import-cancel").addEventListener("click", () => importModalBg.classList.remove("active"));
-importModalBg.addEventListener("click", (e) => { if (e.target === importModalBg) importModalBg.classList.remove("active"); });
-
-// Normaliza encabezados: quita tildes, mayúsculas, espacios extra
-function normalizarHeader(h) {
-  return String(h || "")
-    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
-    .trim().toUpperCase().replace(/\s+/g, " ");
+function getAllCategoryNames(){
+  const set = new Set(db.categorias.map(c => c.trim()).filter(Boolean));
+  db.productos.forEach(p => { if(p.categoria) set.add(p.categoria.trim()); });
+  return Array.from(set).sort((a,b)=> a.localeCompare(b, 'es'));
 }
 
-btnAnalizar.addEventListener("click", () => {
-  const file = importFile.files[0];
-  if (!file) { showToast("Selecciona un archivo primero"); return; }
-  btnAnalizar.disabled = true;
-  btnAnalizar.textContent = "Leyendo...";
+function renderProductos(){
+  populateCategoryFilter();
+  populateCategoryDatalist();
 
+  const search = normalize(document.getElementById('prodSearch').value);
+  const catFilter = document.getElementById('prodFilterCategoria').value;
+
+  let list = db.productos.slice();
+  if(catFilter){
+    list = list.filter(p => normalize(p.categoria) === normalize(catFilter));
+  }
+  if(search){
+    list = list.filter(p =>
+      normalize(p.nombre).includes(search) ||
+      normalize(p.codigo).includes(search) ||
+      normalize(p.marca).includes(search)
+    );
+  }
+  list.sort((a,b)=> a.nombre.localeCompare(b.nombre, 'es'));
+
+  const tbody = document.querySelector('#productsTable tbody');
+  if(list.length === 0){
+    tbody.innerHTML = `<tr class="empty-row"><td colspan="9">No hay productos que coincidan.</td></tr>`;
+  }else{
+    tbody.innerHTML = list.map(p => `
+      <tr>
+        <td><strong>${escapeHtml(p.codigo)}</strong></td>
+        <td>${escapeHtml(p.codigoBarras || '-')}</td>
+        <td>${escapeHtml(p.nombre)}</td>
+        <td>${escapeHtml(p.marca || '-')}</td>
+        <td>${p.categoria ? `<span class="badge badge-muted">${escapeHtml(p.categoria)}</span>` : '-'}</td>
+        <td>${fmtMoney(p.precioCompra)}</td>
+        <td>${fmtMoney(p.precioMarca)}</td>
+        <td>${fmtMoney(p.precioVenta)}</td>
+        <td>
+          <button class="btn-icon" title="Editar" data-edit-product="${p.id}">✏️</button>
+          <button class="btn-icon" title="Eliminar" data-delete-product="${p.id}">🗑️</button>
+        </td>
+      </tr>
+    `).join('');
+  }
+
+  updateSidebarProductCount();
+}
+
+function updateSidebarProductCount(){
+  const el = document.getElementById('sidebarProductCount');
+  if(el) el.textContent = `${db.productos.length} producto${db.productos.length === 1 ? '' : 's'}`;
+}
+
+/* -------------------------------------------------------------------------
+   6. VISTA: CATEGORÍAS (botones para filtrar)
+   ------------------------------------------------------------------------- */
+
+function renderCategorias(){
+  const grid = document.getElementById('categoriesGrid');
+  const cats = getAllCategoryNames();
+
+  if(cats.length === 0){
+    grid.innerHTML = `<p class="hint">Aún no hay categorías. Agrega una arriba o crea productos con categoría.</p>`;
+    return;
+  }
+
+  grid.innerHTML = cats.map(c => {
+    const count = db.productos.filter(p => normalize(p.categoria) === normalize(c)).length;
+    return `
+      <button class="stat-card" style="text-align:left; cursor:pointer; border:none;" data-filter-category="${escapeHtml(c)}">
+        <div class="stat-label">${escapeHtml(c)}</div>
+        <div class="stat-value">${count}</div>
+      </button>`;
+  }).join('');
+
+  grid.querySelectorAll('[data-filter-category]').forEach(btn=>{
+    btn.addEventListener('click', ()=>{
+      const cat = btn.dataset.filterCategory;
+      showView('productos');
+      document.getElementById('prodFilterCategoria').value = cat;
+      renderProductos();
+    });
+  });
+}
+
+/* -------------------------------------------------------------------------
+   7. MODAL DE PRODUCTO
+   ------------------------------------------------------------------------- */
+
+function openProductModal(producto, prefillCodigo){
+  const form = document.getElementById('formProducto');
+  form.reset();
+  populateCategoryDatalist();
+
+  if(producto){
+    document.getElementById('modalProductoTitle').textContent = 'Editar producto';
+    document.getElementById('pId').value = producto.id;
+    document.getElementById('pCodigo').value = producto.codigo;
+    document.getElementById('pCodigoBarras').value = producto.codigoBarras || '';
+    document.getElementById('pNombre').value = producto.nombre;
+    document.getElementById('pMarca').value = producto.marca || '';
+    document.getElementById('pCategoria').value = producto.categoria || '';
+    document.getElementById('pPrecioCompra').value = producto.precioCompra || '';
+    document.getElementById('pPrecioMarca').value = producto.precioMarca || '';
+    document.getElementById('pPrecioVenta').value = producto.precioVenta || '';
+  }else{
+    document.getElementById('modalProductoTitle').textContent = 'Nuevo producto';
+    document.getElementById('pId').value = '';
+    if(prefillCodigo) document.getElementById('pCodigo').value = prefillCodigo;
+  }
+  openModal('modalProducto');
+}
+
+function handleProductSubmit(e){
+  e.preventDefault();
+  const data = {
+    id: document.getElementById('pId').value || null,
+    codigo: document.getElementById('pCodigo').value,
+    codigoBarras: document.getElementById('pCodigoBarras').value,
+    nombre: document.getElementById('pNombre').value,
+    marca: document.getElementById('pMarca').value,
+    categoria: document.getElementById('pCategoria').value,
+    precioCompra: document.getElementById('pPrecioCompra').value,
+    precioMarca: document.getElementById('pPrecioMarca').value,
+    precioVenta: document.getElementById('pPrecioVenta').value
+  };
+  if(!data.codigo.trim() || !data.nombre.trim()){
+    toast('Código y descripción son obligatorios', 'error');
+    return;
+  }
+  // Evitar duplicar código en otro producto distinto
+  const dup = getProductoByCodigo(data.codigo);
+  if(dup && dup.id !== data.id){
+    toast('Ya existe otro producto con ese código', 'error');
+    return;
+  }
+  const saved = saveProducto(data);
+  closeAllModals();
+  renderProductos();
+  renderCategorias();
+  toast('Producto guardado', 'success');
+  // Si venimos del escáner, refresca el resultado mostrado
+  if(saved) renderScanResult(saved.codigo);
+}
+
+/* -------------------------------------------------------------------------
+   8. IMPORTAR CSV DE PRODUCTOS
+   ------------------------------------------------------------------------- */
+
+// Excel en español guarda "CSV separado por comas" usando en realidad punto y
+// coma (porque usa la coma como separador decimal de los precios). Detectamos
+// el delimitador real mirando la primera línea del archivo.
+function detectDelimiter(text){
+  const firstLine = text.split(/\r\n|\r|\n/, 1)[0] || '';
+  const candidates = [',', ';', '\t'];
+  let best = ',', bestCount = 0;
+  candidates.forEach(d=>{
+    const count = firstLine.split(d).length - 1;
+    if(count > bestCount){ bestCount = count; best = d; }
+  });
+  return best;
+}
+
+// Parser CSV: soporta coma, punto y coma o tabulador como delimitador,
+// y campos entre comillas.
+function parseCSV(text, delimiter){
+  // Quita el BOM (marca de orden de bytes) que Excel agrega al guardar "CSV UTF-8"
+  text = text.replace(/^\uFEFF/, '');
+  text = text.replace(/\r\n/g,'\n').replace(/\r/g,'\n');
+  delimiter = delimiter || detectDelimiter(text);
+
+  const rows = [];
+  let row = [], field = '', inQuotes = false;
+
+  for(let i = 0; i < text.length; i++){
+    const ch = text[i];
+    if(inQuotes){
+      if(ch === '"'){
+        if(text[i+1] === '"'){ field += '"'; i++; }
+        else{ inQuotes = false; }
+      }else{
+        field += ch;
+      }
+    }else{
+      if(ch === '"'){ inQuotes = true; }
+      else if(ch === delimiter){ row.push(field); field = ''; }
+      else if(ch === '\n'){ row.push(field); rows.push(row); row = []; field = ''; }
+      else{ field += ch; }
+    }
+  }
+  if(field.length || row.length){ row.push(field); rows.push(row); }
+  return rows.filter(r => r.some(c => String(c).trim() !== ''));
+}
+
+function normalizeHeader(h){
+  return String(h||'')
+    .trim().toUpperCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g,'') // quita acentos
+    .replace(/\s+/g,' ');
+}
+
+function parsePrecio(raw){
+  if(raw === undefined || raw === null) return 0;
+  const cleaned = String(raw).trim().replace(/[^\d.,-]/g,'');
+  if(!cleaned) return 0;
+  // Si usa coma como decimal y no hay punto, conviértela
+  const normalized = (cleaned.includes(',') && !cleaned.includes('.'))
+    ? cleaned.replace(',', '.')
+    : cleaned.replace(/,/g,'');
+  const n = parseFloat(normalized);
+  return isNaN(n) ? 0 : n;
+}
+
+function importProductsCSV(file){
   const reader = new FileReader();
-  reader.onload = (e) => {
-    try {
-      const wb = window.XLSX.read(e.target.result, { type: "array" });
-      const sheet = wb.Sheets[wb.SheetNames[0]];
-      const rows = window.XLSX.utils.sheet_to_json(sheet, { defval: "" });
+  reader.onload = (e)=>{
+    try{
+      const rows = parseCSV(e.target.result);
+      if(rows.length < 2){
+        toast('El archivo CSV no tiene datos', 'error');
+        return;
+      }
+      const headers = rows[0].map(normalizeHeader);
+      const idx = {
+        codigo: headers.indexOf('CODIGO'),
+        codigoBarras: headers.findIndex(h => h.includes('BARRA') || h.includes('BARCODE')),
+        nombre: headers.findIndex(h => h.includes('DESCRIPCION') || h === 'NOMBRE'),
+        marca: headers.indexOf('MARCA'),
+        categoria: headers.indexOf('CATEGORIA'),
+        // Acepta "PRECIO COMPRA", "PRECIO DE COMPRA", "PRECIO_COMPRA", etc.
+        precioCompra: headers.findIndex(h => h.includes('PRECIO') && h.includes('COMPRA')),
+        precioMarca: headers.findIndex(h => h.includes('PRECIO') && h.includes('MARCA') && !h.includes('BARRA')),
+        precioVenta: headers.findIndex(h => h.includes('PRECIO') && h.includes('VENTA'))
+      };
+      if(idx.codigo === -1 || idx.nombre === -1){
+        toast('El CSV debe tener al menos columnas CODIGO y DESCRIPCION', 'error');
+        return;
+      }
+      if(idx.precioCompra === -1 || idx.precioVenta === -1){
+        toast('No se encontraron las columnas de precio (se importarán los productos, pero revisa los precios manualmente)', 'warning');
+      }
 
-      const skuExistente = new Map(allProducts.filter(p => p.sku).map(p => [String(p.sku).trim().toUpperCase(), p.id]));
-      let nuevos = 0, actualizados = 0, invalidos = 0;
-      const stockInicial = Number(importStockInicial.value) || 0;
-      parsedImportRows = [];
+      let creados = 0, actualizados = 0;
+      for(let i = 1; i < rows.length; i++){
+        const r = rows[i];
+        const codigo = String(r[idx.codigo] || '').trim();
+        if(!codigo) continue;
+        const codigoBarras = idx.codigoBarras > -1 ? String(r[idx.codigoBarras] || '').trim() : '';
+        const nombre = String(r[idx.nombre] || '').trim();
+        const marca = idx.marca > -1 ? String(r[idx.marca] || '').trim() : '';
+        const categoria = idx.categoria > -1 ? String(r[idx.categoria] || '').trim() : '';
+        const precioCompra = idx.precioCompra > -1 ? parsePrecio(r[idx.precioCompra]) : 0;
+        const precioMarca = idx.precioMarca > -1 ? parsePrecio(r[idx.precioMarca]) : 0;
+        const precioVenta = idx.precioVenta > -1 ? parsePrecio(r[idx.precioVenta]) : 0;
 
-      rows.forEach(row => {
-        const norm = {};
-        Object.keys(row).forEach(k => norm[normalizarHeader(k)] = row[k]);
+        if(categoria) upsertCategoria(categoria);
 
-        const codigo = String(norm["CODIGO"] ?? "").trim();
-        const nombre = String(norm["DESCRIPCION"] ?? "").trim();
-        if (!nombre) { invalidos++; return; }
-
-        const marca = String(norm["MARCA"] ?? "").trim();
-        const categoria = String(norm["CATEGORIA"] ?? "").trim();
-        const costo = Number(norm["PRECIO COMPRA"]) || 0;
-        const precioReferencia = Number(norm["PRECIO REFERENCIA"]) || 0;
-        const precio = Number(norm["PRECIO VENTA"]) || 0;
-        const codigoBarras = String(norm["CODIGO BARRAS"] ?? norm["CODIGOBARRAS"] ?? norm["BARCODE"] ?? "").trim();
-        const minimoRaw = norm["STOCK MINIMO"];
-        const stockRaw = norm["STOCK ACTUAL"] ?? norm["STOCK"];
-        const minimo = minimoRaw !== undefined && minimoRaw !== "" ? Number(minimoRaw) : 5;
-        const stockDelArchivo = stockRaw !== undefined && stockRaw !== "" ? Number(stockRaw) : null;
-
-        const existingId = codigo ? skuExistente.get(codigo.toUpperCase()) : null;
-        if (existingId) actualizados++; else nuevos++;
-
-        parsedImportRows.push({
-          existingId, sku: codigo, nombre, marca, categoria, costo, precioReferencia, precio, minimo, codigoBarras,
-          stockInicial: stockDelArchivo !== null ? stockDelArchivo : stockInicial
-        });
-      });
-
-      importPreview.style.display = "block";
-      importPreview.innerHTML = `
-        <b>${rows.length}</b> filas leídas del archivo.<br>
-        🟢 <b>${nuevos}</b> productos nuevos se crearán (stock inicial: ${stockInicial}).<br>
-        🟡 <b>${actualizados}</b> productos existentes se actualizarán (por código).<br>
-        ${invalidos ? `🔴 <b>${invalidos}</b> filas se omiten por no tener descripción.` : ""}
-      `;
-      btnAnalizar.style.display = "none";
-      btnConfirmar.style.display = "inline-block";
-    } catch (err) {
+        const existing = getProductoByCodigo(codigo);
+        if(existing){
+          existing.nombre = nombre || existing.nombre;
+          existing.marca = marca || existing.marca;
+          existing.categoria = categoria || existing.categoria;
+          existing.codigoBarras = codigoBarras || existing.codigoBarras;
+          existing.precioCompra = precioCompra || existing.precioCompra;
+          existing.precioMarca = precioMarca || existing.precioMarca;
+          existing.precioVenta = precioVenta || existing.precioVenta;
+          actualizados++;
+        }else{
+          db.productos.push({
+            id: uid(),
+            codigo, codigoBarras, nombre, marca, categoria,
+            precioCompra, precioMarca, precioVenta,
+            stock: 0,
+            fechaCreacion: todayISO()
+          });
+          creados++;
+        }
+      }
+      saveDB();
+      renderProductos();
+      renderCategorias();
+      toast(`Importación completa: ${creados} nuevos, ${actualizados} actualizados`, 'success');
+    }catch(err){
       console.error(err);
-      showToast("No se pudo leer el archivo: " + err.message);
-    } finally {
-      btnAnalizar.disabled = false;
-      btnAnalizar.textContent = "Analizar archivo";
+      toast('No se pudo leer el archivo CSV. Verifica el formato.', 'error');
     }
   };
-  reader.readAsArrayBuffer(file);
-});
+  reader.onerror = ()=> toast('Error al leer el archivo', 'error');
+  reader.readAsText(file, 'UTF-8');
+}
 
-btnConfirmar.addEventListener("click", async () => {
-  if (!parsedImportRows || !parsedImportRows.length) return;
-  btnConfirmar.disabled = true;
-  btnConfirmar.textContent = "Importando...";
-  importProgress.style.display = "block";
+/* -------------------------------------------------------------------------
+   9. BACKUP / RESTAURAR (JSON)
+   ------------------------------------------------------------------------- */
 
-  const CHUNK = 400;
-  let hechos = 0;
-  try {
-    for (let i = 0; i < parsedImportRows.length; i += CHUNK) {
-      const chunk = parsedImportRows.slice(i, i + CHUNK);
-      const batch = writeBatch(db);
-      chunk.forEach(r => {
-        if (r.existingId) {
-          batch.update(doc(db, "productos", r.existingId), {
-            nombre: r.nombre, sku: r.sku, marca: r.marca, categoria: r.categoria,
-            costo: r.costo, precioReferencia: r.precioReferencia, precio: r.precio,
-            minimo: r.minimo, codigoBarras: r.codigoBarras, actualizadoEn: serverTimestamp()
-          });
-        } else {
-          batch.set(doc(collection(db, "productos")), {
-            nombre: r.nombre, sku: r.sku, marca: r.marca, categoria: r.categoria,
-            costo: r.costo, precioReferencia: r.precioReferencia, precio: r.precio,
-            stock: r.stockInicial, minimo: r.minimo, codigoBarras: r.codigoBarras,
-            creadoEn: serverTimestamp()
-          });
-        }
+function exportBackup(){
+  const blob = new Blob([JSON.stringify(db, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `stockferre_backup_${todayISO().slice(0,10)}.json`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+  toast('Backup exportado', 'success');
+}
+
+function importBackup(file){
+  const reader = new FileReader();
+  reader.onload = (e)=>{
+    try{
+      const parsed = JSON.parse(e.target.result);
+      if(!parsed || !Array.isArray(parsed.productos)){
+        toast('El archivo no tiene un formato de backup válido', 'error');
+        return;
+      }
+      confirmDialog('Restaurar backup', 'Esto reemplazará todos los productos y categorías actuales. ¿Continuar?', ()=>{
+        db = normalizeDB({
+          productos: parsed.productos || [],
+          categorias: parsed.categorias || [],
+          contador: parsed.contador || { producto: (parsed.productos.length || 0) + 1, venta: 1 },
+          ventas: parsed.ventas || []
+        });
+        saveDB();
+        renderProductos();
+        renderCategorias();
+        toast('Backup restaurado correctamente', 'success');
       });
-      await batch.commit();
-      hechos += chunk.length;
-      importProgress.textContent = `Importando... ${hechos} / ${parsedImportRows.length}`;
+    }catch(err){
+      console.error(err);
+      toast('No se pudo leer el archivo de backup', 'error');
     }
-    showToast(`Importación completa: ${hechos} productos procesados`);
-    importModalBg.classList.remove("active");
-  } catch (err) {
-    console.error(err);
-    showToast("Error durante la importación: " + err.message);
-  } finally {
-    btnConfirmar.disabled = false;
-    btnConfirmar.textContent = "Confirmar importación";
-  }
-});
+  };
+  reader.readAsText(file, 'UTF-8');
+}
 
-// ---------------- Escáner OCR (Tesseract.js) ----------------
+function factoryReset(){
+  confirmDialog('Borrar todos los datos', 'Esto eliminará permanentemente todos los productos y categorías guardados en este dispositivo. ¿Estás seguro?', ()=>{
+    db = defaultDB();
+    saveDB();
+    renderProductos();
+    renderCategorias();
+    document.getElementById('scanResult').innerHTML = '';
+    toast('Datos borrados', 'success');
+  });
+}
+
+/* -------------------------------------------------------------------------
+   10. NAVEGACIÓN / VISTAS
+   ------------------------------------------------------------------------- */
+
+const VIEW_TITLES = {
+  escaner: 'Escanear',
+  productos: 'Productos',
+  categorias: 'Categorías',
+  ventas: 'Ventas',
+  inventario: 'Inventario',
+  historial: 'Historial',
+  config: 'Configuración'
+};
+
+function showView(name){
+  document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+  document.getElementById('view-' + name).classList.add('active');
+  document.querySelectorAll('.nav-item[data-view]').forEach(btn=>{
+    btn.classList.toggle('active', btn.dataset.view === name);
+  });
+  document.getElementById('viewTitle').textContent = VIEW_TITLES[name] || '';
+  closeSidebarMobile();
+  closeAllModals(); // por si venías con el escáner de inventario u otro modal abierto
+  restoreScannerBlockHome();
+  scanContext = 'lookup';
+
+  if(name === 'productos') renderProductos();
+  if(name === 'categorias') renderCategorias();
+  if(name === 'ventas') renderVentas();
+  if(name === 'inventario') renderInventario();
+  if(name === 'historial') renderHistorial();
+  if(name === 'escaner'){
+    document.getElementById('scanResult').innerHTML = '';
+    if(!ocrActive) startOcrScanner();
+  }else{
+    stopOcrScanner();
+  }
+}
+
+function closeSidebarMobile(){
+  document.getElementById('sidebar').classList.remove('open');
+  document.getElementById('sidebarOverlay').classList.remove('open');
+}
+
+/* -------------------------------------------------------------------------
+   11. MODALES / TOASTS / CONFIRMACIÓN
+   ------------------------------------------------------------------------- */
+
+function openModal(id){
+  document.getElementById('modalBackdrop').classList.add('open');
+  document.getElementById(id).classList.add('open');
+}
+function closeAllModals(){
+  const inventarioScanWasOpen = document.getElementById('modalInventarioScan').classList.contains('open');
+  document.querySelectorAll('.modal.open').forEach(m => m.classList.remove('open'));
+  document.getElementById('modalBackdrop').classList.remove('open');
+  if(inventarioScanWasOpen){
+    stopOcrScanner();
+    restoreScannerBlockHome();
+    scanContext = 'lookup';
+  }
+}
+
+let confirmCallback = null;
+function confirmDialog(title, message, onAccept){
+  document.getElementById('confirmTitle').textContent = title;
+  document.getElementById('confirmMessage').textContent = message;
+  confirmCallback = onAccept;
+  openModal('modalConfirm');
+}
+
+function toast(message, type){
+  const container = document.getElementById('toastContainer');
+  const el = document.createElement('div');
+  el.className = 'toast' + (type ? ' ' + type : '');
+  el.textContent = message;
+  container.appendChild(el);
+  setTimeout(()=>{ el.remove(); }, 3200);
+}
+
+/* -------------------------------------------------------------------------
+   12. ESCÁNER DE TEXTO / OCR (Tesseract.js)
+   Lee códigos numéricos (12345) y alfanuméricos (HNV3445, TR1223, TR23-23)
+   impresos en etiquetas, en tiempo real, sin tomar fotos.
+   ------------------------------------------------------------------------- */
+
 // Palabras que suelen aparecer junto al código en las etiquetas y deben ignorarse
 const OCR_IGNORE_WORDS = [
   'NUEVO','NEW','OFERTA','DESCUENTO','EXCELENTE','EXC','IMPORTADO','IMPORT',
@@ -1457,8 +1088,10 @@ const OCR_IGNORE_WORDS = [
   'FERRETERIA','BOLIVIA','MARCA','MODELO','PROD','PRODUCTO'
 ];
 
-// Dos modos de escaneo: numérico puro (más preciso para códigos como 12399)
+// Dos modos de escaneo: numérico puro (más preciso para códigos como 17736)
 // y alfanumérico (2-4 letras + 2-5 números, guion opcional, ej: HNV3445)
+// Incluimos el espacio en el whitelist para que Tesseract separe correctamente
+// el código de otros números/textos cercanos en la etiqueta (precio, marca, etc.)
 const OCR_MODES = {
   numerico: {
     pattern: /^[0-9]{3,8}$/,
@@ -1472,100 +1105,26 @@ const OCR_MODES = {
 
 let scanCodeMode = 'numerico';
 
-// El recuadro punteado en pantalla (#ocr-guide) está definido en porcentajes
-// del contenedor visible, pero el <video> se muestra con object-fit:cover
-// (recorta y escala la imagen nativa de la cámara). Esta función calcula
-// qué parte del video nativo es la que realmente se ve, y recién ahí aplica
-// los porcentajes del recuadro.
-// IMPORTANTE: deben coincidir con #ocr-guide en el CSS.
+// El recuadro punteado en pantalla (CSS .ocr-guide) está definido como
+// porcentajes del contenedor visible, pero el <video> se muestra con
+// object-fit:cover (recorta y escala la imagen nativa de la cámara para
+// llenar el contenedor). Si calculamos el recorte a analizar usando
+// porcentajes directos sobre videoWidth/videoHeight, NO coincide con lo que
+// el recuadro punteado muestra en pantalla — por eso "escaneaba todo lo que
+// la cámara ve". Esta función calcula primero qué parte del video nativo es
+// la que realmente se ve en el contenedor, y recién ahí aplica el porcentaje
+// del recuadro sobre esa parte visible.
+// IMPORTANTE: estos porcentajes deben coincidir con los de .ocr-guide en styles.css
 const GUIDE_BOX = { left: 0.15, right: 0.15, top: 0.35, bottom: 0.35 };
 
-let ocrWorker = null;
-let ocrStream = null;
-let ocrTimer = null;
-let ocrBusy = false;
-let ocrActive = false;
-let ocrPaused = false;
-let ocrStarting = false;
-let scannerContext = "general";
-
-const OCR_INTERVAL_MS = 600;
-
-function findProductByCodigo(codigo) {
-  if (!codigo) return null;
-  const c = String(codigo).trim().toUpperCase();
-  return allProducts.find(p => (p.sku || "").trim().toUpperCase() === c) || null;
-}
-
-function cleanOcrToken(raw) {
-  return raw.toUpperCase().replace(/[^A-Z0-9-]/g, '').trim();
-}
-
-function extractCandidateCodes(text) {
-  if (!text) return [];
-  const pattern = OCR_MODES[scanCodeMode].pattern;
-  const tokens = text.split(/[\s\n\r,;:|]+/).map(cleanOcrToken).filter(Boolean);
-  const seen = new Set();
-  const candidates = [];
-  tokens.forEach(tok => {
-    if (seen.has(tok)) return;
-    seen.add(tok);
-    if (OCR_IGNORE_WORDS.includes(tok)) return;
-    if (pattern.test(tok)) candidates.push(tok);
-  });
-  return candidates;
-}
-
-function pickBestCandidate(candidates) {
-  if (candidates.length === 0) return null;
-  const existing = candidates.find(c => findProductByCodigo(c));
-  if (existing) return existing;
-  return candidates[0];
-}
-
-// Normaliza confusiones típicas de OCR entre letras y números parecidos
-// (O/0, I/1, S/5, B/8, Z/2, G/6) para comparar contra códigos guardados
-// aunque el OCR haya leído mal algún carácter.
-function normalizeForFuzzyMatch(str) {
-  return String(str || '').toUpperCase().replace(/[^A-Z0-9]/g, '')
-    .replace(/O/g, '0').replace(/I/g, '1').replace(/S/g, '5')
-    .replace(/B/g, '8').replace(/Z/g, '2').replace(/G/g, '6');
-}
-
-function findProductoFuzzy(token) {
-  if (!token || token.length < 3) return null;
-  const norm = normalizeForFuzzyMatch(token);
-  return allProducts.find(p => normalizeForFuzzyMatch(p.sku || '') === norm) || null;
-}
-
-function resolveScannedText(text) {
-  const candidates = extractCandidateCodes(text);
-  const exactExisting = candidates.find(c => findProductByCodigo(c));
-  if (exactExisting) return exactExisting;
-
-  if (scanCodeMode === 'alfanumerico') {
-    const tokens = String(text || '').split(/[\s\n\r,;:|]+/).map(cleanOcrToken).filter(Boolean);
-    for (const tok of tokens) {
-      if (OCR_IGNORE_WORDS.includes(tok)) continue;
-      const fuzzyMatch = findProductoFuzzy(tok);
-      if (fuzzyMatch) return fuzzyMatch.codigo;
-    }
-  }
-
-  return candidates[0] || null;
-}
-
-function setOcrStatus(msg) {
-  const el = document.getElementById('ocrStatus');
-  if (el) el.textContent = msg;
-}
-
-function getGuideBoxCropRect(videoEl, box) {
+function getGuideBoxCropRect(videoEl, box){
   box = box || GUIDE_BOX;
   const vw = videoEl.videoWidth, vh = videoEl.videoHeight;
   const containerW = videoEl.clientWidth || vw;
   const containerH = videoEl.clientHeight || vh;
 
+  // object-fit:cover -> la imagen se escala para cubrir el contenedor,
+  // recortando el excedente en un solo eje
   const coverScale = Math.max(containerW / vw, containerH / vh);
   const visibleW = containerW / coverScale;
   const visibleH = containerH / coverScale;
@@ -1580,34 +1139,89 @@ function getGuideBoxCropRect(videoEl, box) {
   return { x: boxX, y: boxY, w: boxW, h: boxH };
 }
 
-function preprocessCanvas(canvas) {
-  const ctx = canvas.getContext('2d');
-  const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-  const d = imgData.data;
-  const n = canvas.width * canvas.height;
+const OCR_INTERVAL_MS = 600;
 
-  const gray = new Uint8ClampedArray(n);
-  let min = 255, max = 0;
-  for (let i = 0, j = 0; i < d.length; i += 4, j++) {
-    const g = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
-    gray[j] = g;
-    if (g < min) min = g;
-    if (g > max) max = g;
-  }
+let ocrWorker = null;
+let ocrStream = null;
+let ocrTimer = null;
+let ocrBusy = false;
+let ocrActive = false;
+let ocrPaused = false; // true mientras se muestra/analiza una foto congelada
 
-  const range = Math.max(max - min, 1);
-  for (let i = 0, j = 0; i < d.length; i += 4, j++) {
-    const stretched = ((gray[j] - min) / range) * 255;
-    d[i] = d[i + 1] = d[i + 2] = stretched;
-  }
-  ctx.putImageData(imgData, 0, 0);
+function cleanOcrToken(raw){
+  return raw.toUpperCase().replace(/[^A-Z0-9-]/g,'').trim();
 }
 
-async function startOcrScanner() {
-  if (ocrActive || ocrStarting) return;
+function extractCandidateCodes(text){
+  if(!text) return [];
+  const pattern = OCR_MODES[scanCodeMode].pattern;
+  const tokens = text.split(/[\s\n\r,;:|]+/).map(cleanOcrToken).filter(Boolean);
+  const seen = new Set();
+  const candidates = [];
+  tokens.forEach(tok=>{
+    if(seen.has(tok)) return;
+    seen.add(tok);
+    if(OCR_IGNORE_WORDS.includes(tok)) return;
+    if(pattern.test(tok)) candidates.push(tok);
+  });
+  return candidates;
+}
+
+function pickBestCandidate(candidates){
+  if(candidates.length === 0) return null;
+  const existing = candidates.find(c => getProductoByCodigo(c));
+  if(existing) return existing;
+  return candidates[0];
+}
+
+// Normaliza confusiones típicas de OCR entre letras y números parecidos
+// (O/0, I/1, S/5, B/8, Z/2, G/6) para poder comparar "a ojo" contra los
+// códigos ya guardados, incluso si el OCR leyó mal alguno de esos caracteres.
+function normalizeForFuzzyMatch(str){
+  return String(str||'').toUpperCase().replace(/[^A-Z0-9]/g,'')
+    .replace(/O/g,'0').replace(/I/g,'1').replace(/S/g,'5')
+    .replace(/B/g,'8').replace(/Z/g,'2').replace(/G/g,'6');
+}
+
+function findProductoFuzzy(token){
+  if(!token || token.length < 3) return null;
+  const norm = normalizeForFuzzyMatch(token);
+  return db.productos.find(p => normalizeForFuzzyMatch(p.codigo) === norm) || null;
+}
+
+// Resuelve el mejor código a partir del texto leído por el OCR:
+// 1) un candidato con forma válida que ya existe en la base
+// 2) una corrección por confusión de caracteres (solo modo alfanumérico)
+// 3) el primer candidato con forma válida (para poder crear el producto)
+function resolveScannedText(text){
+  const candidates = extractCandidateCodes(text);
+  const exactExisting = candidates.find(c => getProductoByCodigo(c));
+  if(exactExisting) return exactExisting;
+
+  if(scanCodeMode === 'alfanumerico'){
+    const tokens = String(text||'').split(/[\s\n\r,;:|]+/).map(cleanOcrToken).filter(Boolean);
+    for(const tok of tokens){
+      if(OCR_IGNORE_WORDS.includes(tok)) continue;
+      const fuzzyMatch = findProductoFuzzy(tok);
+      if(fuzzyMatch) return fuzzyMatch.codigo;
+    }
+  }
+
+  return candidates[0] || null;
+}
+
+function setOcrStatus(msg){
+  const el = document.getElementById('ocrStatus');
+  if(el) el.textContent = msg;
+}
+
+let ocrStarting = false;
+
+async function startOcrScanner(){
+  if(ocrActive || ocrStarting) return;
   ocrStarting = true;
 
-  if (typeof Tesseract === 'undefined') {
+  if(typeof Tesseract === 'undefined'){
     setOcrStatus('No se pudo cargar Tesseract.js. Verifica tu conexión a internet o usa la búsqueda manual.');
     ocrStarting = false;
     return;
@@ -1615,7 +1229,7 @@ async function startOcrScanner() {
 
   const videoEl = document.getElementById('ocrVideo');
 
-  try {
+  try{
     setOcrStatus('Iniciando cámara...');
     ocrStream = await navigator.mediaDevices.getUserMedia({
       video: {
@@ -1627,14 +1241,14 @@ async function startOcrScanner() {
     });
     videoEl.srcObject = ocrStream;
     await videoEl.play();
-  } catch (err) {
+  }catch(err){
     console.warn(err);
     setOcrStatus('No se pudo acceder a la cámara. Verifica los permisos del navegador o usa la búsqueda manual.');
     ocrStarting = false;
     return;
   }
 
-  try {
+  try{
     setOcrStatus('Preparando el lector de texto...');
     ocrWorker = await Tesseract.createWorker('eng');
     await ocrWorker.setParameters({
@@ -1642,7 +1256,7 @@ async function startOcrScanner() {
       tessedit_pageseg_mode: '6',
       preserve_interword_spaces: '1'
     });
-  } catch (err) {
+  }catch(err){
     console.warn(err);
     setOcrStatus('No se pudo iniciar el motor de lectura de texto. Verifica tu conexión a internet.');
     ocrStarting = false;
@@ -1655,20 +1269,53 @@ async function startOcrScanner() {
   scheduleNextOcrCapture();
 }
 
-function scheduleNextOcrCapture() {
-  if (!ocrActive || ocrPaused) return;
+function scheduleNextOcrCapture(){
+  if(!ocrActive || ocrPaused) return;
   ocrTimer = setTimeout(runOcrCapture, OCR_INTERVAL_MS);
 }
 
-async function runOcrCapture() {
-  if (!ocrActive || ocrBusy || ocrPaused) return;
+// Convierte el recorte a blanco y negro (umbral) para que Tesseract lea
+// mucho mejor las etiquetas fotografiadas con la cámara del celular.
+// Escala de grises + realce de contraste (sin forzar blanco/negro puro).
+// Un umbral fijo puede "borrar" el texto por completo con luz de tienda
+// desigual; Tesseract ya aplica su propia binarización adaptativa internamente,
+// así que aquí solo le damos una imagen de mayor contraste para ayudarlo.
+function preprocessCanvas(canvas){
+  const ctx = canvas.getContext('2d');
+  const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const d = imgData.data;
+  const n = canvas.width * canvas.height;
+
+  const gray = new Uint8ClampedArray(n);
+  let min = 255, max = 0;
+  for(let i = 0, j = 0; i < d.length; i += 4, j++){
+    const g = 0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2];
+    gray[j] = g;
+    if(g < min) min = g;
+    if(g > max) max = g;
+  }
+
+  const range = Math.max(max - min, 1); // evita división por cero en imágenes planas
+  for(let i = 0, j = 0; i < d.length; i += 4, j++){
+    const stretched = ((gray[j] - min) / range) * 255;
+    d[i] = d[i+1] = d[i+2] = stretched;
+  }
+  ctx.putImageData(imgData, 0, 0);
+}
+
+async function runOcrCapture(){
+  if(!ocrActive || ocrBusy || ocrPaused) return;
   const videoEl = document.getElementById('ocrVideo');
   const canvasEl = document.getElementById('ocrCanvas');
-  if (!videoEl || !videoEl.videoWidth) { scheduleNextOcrCapture(); return; }
+  if(!videoEl || !videoEl.videoWidth){ scheduleNextOcrCapture(); return; }
 
   ocrBusy = true;
-  try {
+  try{
+    // Recorta exactamente lo que se ve dentro del recuadro punteado (~5cm de distancia)
     const crop = getGuideBoxCropRect(videoEl);
+
+    // Escala x2 el recorte: los códigos son pequeños en la imagen original
+    // y una imagen más grande mejora mucho la precisión del OCR.
     const scale = 2;
     canvasEl.width = crop.w * scale;
     canvasEl.height = crop.h * scale;
@@ -1679,43 +1326,54 @@ async function runOcrCapture() {
 
     setOcrStatus('🔎 Analizando etiqueta...');
     const { data: { text } } = await ocrWorker.recognize(canvasEl);
-    if (ocrPaused) return;
+    if(ocrPaused) return; // se tomó una foto manual mientras se analizaba este fotograma: descartar
     const best = resolveScannedText(text);
 
-    if (best) {
+    if(best){
       const now = Date.now();
-      if (!(window.__lastOcrCode === best && now - (window.__lastOcrTime || 0) < 3000)) {
+      if(!(window.__lastOcrCode === best && now - (window.__lastOcrTime||0) < 3000)){
         window.__lastOcrCode = best;
         window.__lastOcrTime = now;
-        onCodeScanned(best);
+        handleScannedCode(best);
       }
-      if (ocrActive) setOcrStatus('✅ Código detectado: ' + best);
-    } else if (ocrActive) {
-      const raw = String(text || '').replace(/\s+/g, ' ').trim();
-      if (raw) {
-        setOcrStatus('🔎 Leyendo: "' + raw.slice(0, 28) + '" — buscando código...');
-      } else {
+      if(ocrActive) setOcrStatus('✅ Código detectado: ' + best);
+    }else if(ocrActive){
+      // Muestra lo último que "vio" el OCR (aunque no coincida) para poder
+      // ajustar el encuadre o diagnosticar si el motor no está leyendo nada.
+      const raw = String(text||'').replace(/\s+/g,' ').trim();
+      if(raw){
+        setOcrStatus('🔎 Leyendo: "' + raw.slice(0,28) + '" — buscando código...');
+      }else{
         setOcrStatus('🔎 Buscando código... (acerca más la etiqueta o mejora la luz)');
       }
     }
-  } catch (err) {
+  }catch(err){
     console.warn('Error de OCR', err);
-  } finally {
+  }finally{
     ocrBusy = false;
     scheduleNextOcrCapture();
   }
 }
 
-async function captureShot() {
-  if (!ocrActive || !ocrWorker) return;
+// Captura un único fotograma (más grande y con más margen que el recorte
+// continuo) y lo analiza con calma. Al tocar el botón, el usuario deja de
+// mover el celular justo en ese instante, así que sale mucho más nítido
+// que un fotograma tomado en movimiento durante el escaneo continuo.
+async function captureShot(){
+  if(!ocrActive || !ocrWorker) return;
   const videoEl = document.getElementById('ocrVideo');
   const canvasEl = document.getElementById('ocrCanvas');
   const frozenImg = document.getElementById('ocrFrozenImg');
-  if (!videoEl || !videoEl.videoWidth) return;
+  if(!videoEl || !videoEl.videoWidth) return;
 
+  // Pausa el escaneo continuo y congela la imagen DE INMEDIATO, sin esperar
+  // a que termine un análisis en curso (si lo había) — así el botón responde
+  // al instante en vez de parecer que "no hace nada".
   ocrPaused = true;
-  if (ocrTimer) { clearTimeout(ocrTimer); ocrTimer = null; }
+  if(ocrTimer){ clearTimeout(ocrTimer); ocrTimer = null; }
 
+  // Usa el mismo recuadro punteado que se ve en pantalla: lo que captura
+  // debe ser exactamente lo que el usuario ve encuadrado, ni más ni menos.
   const crop = getGuideBoxCropRect(videoEl);
   const scale = 2.2;
   canvasEl.width = crop.w * scale;
@@ -1724,6 +1382,7 @@ async function captureShot() {
   ctx.imageSmoothingEnabled = true;
   ctx.drawImage(videoEl, crop.x, crop.y, crop.w, crop.h, 0, 0, canvasEl.width, canvasEl.height);
 
+  // Muestra la foto congelada (antes del preprocesamiento) para dar la sensación de "captura"
   frozenImg.src = canvasEl.toDataURL('image/jpeg', 0.85);
   frozenImg.classList.add('visible');
   document.getElementById('btnCaptureShot').style.display = 'none';
@@ -1731,222 +1390,224 @@ async function captureShot() {
   setOcrStatus('📸 Foto capturada. Analizando...');
 
   ocrBusy = true;
-  try {
+  try{
     preprocessCanvas(canvasEl);
+    // recognize() se encola automáticamente si el motor todavía estaba
+    // procesando un fotograma del escaneo continuo; no hace falta esperar aquí.
     const { data: { text } } = await ocrWorker.recognize(canvasEl);
     const best = resolveScannedText(text);
 
-    if (best) {
-      onCodeScanned(best);
+    if(best){
+      handleScannedCode(best);
       setOcrStatus('✅ Código detectado: ' + best);
-    } else {
-      const raw = String(text || '').replace(/\s+/g, ' ').trim();
+    }else{
+      const raw = String(text || '').replace(/\s+/g,' ').trim();
       setOcrStatus(raw
-        ? '⚠️ No coincide ningún código. Se leyó: "' + raw.slice(0, 28) + '"'
+        ? '⚠️ No coincide ningún código. Se leyó: "' + raw.slice(0,28) + '"'
         : '⚠️ No se detectó texto legible. Intenta de nuevo o cambia de modo (numérico/alfanumérico).');
     }
-  } catch (err) {
+  }catch(err){
     console.warn('Error al capturar foto', err);
     setOcrStatus('No se pudo analizar la foto. Intenta de nuevo.');
-  } finally {
+  }finally{
     ocrBusy = false;
   }
 }
 
-function resumeLiveScan() {
+function resumeLiveScan(){
   ocrPaused = false;
   const frozenImg = document.getElementById('ocrFrozenImg');
   frozenImg.classList.remove('visible');
   frozenImg.removeAttribute('src');
   document.getElementById('btnCaptureShot').style.display = '';
   document.getElementById('btnResumeLive').style.display = 'none';
-  if (ocrActive) {
+  if(ocrActive){
     setOcrStatus('🔎 Buscando código...');
     scheduleNextOcrCapture();
   }
 }
 
-function stopOcrScanner() {
+function stopOcrScanner(){
   ocrActive = false;
   ocrStarting = false;
   ocrPaused = false;
-  if (ocrTimer) { clearTimeout(ocrTimer); ocrTimer = null; }
-  if (ocrStream) {
+  if(ocrTimer){ clearTimeout(ocrTimer); ocrTimer = null; }
+  if(ocrStream){
     ocrStream.getTracks().forEach(t => t.stop());
     ocrStream = null;
   }
   const videoEl = document.getElementById('ocrVideo');
-  if (videoEl) videoEl.srcObject = null;
-  if (ocrWorker) {
+  if(videoEl) videoEl.srcObject = null;
+  if(ocrWorker){
     const w = ocrWorker;
     ocrWorker = null;
-    w.terminate().catch(() => {});
+    w.terminate().catch(()=>{});
   }
   const frozenImg = document.getElementById('ocrFrozenImg');
-  if (frozenImg) { frozenImg.classList.remove('visible'); frozenImg.removeAttribute('src'); }
+  if(frozenImg){ frozenImg.classList.remove('visible'); frozenImg.removeAttribute('src'); }
   const btnCapture = document.getElementById('btnCaptureShot');
   const btnResume = document.getElementById('btnResumeLive');
-  if (btnCapture) btnCapture.style.display = '';
-  if (btnResume) btnResume.style.display = 'none';
+  if(btnCapture) btnCapture.style.display = '';
+  if(btnResume) btnResume.style.display = 'none';
   setOcrStatus('Iniciando cámara...');
 }
 
-async function setScanCodeMode(mode) {
-  if (!OCR_MODES[mode] || mode === scanCodeMode) return;
+async function setScanCodeMode(mode){
+  if(!OCR_MODES[mode] || mode === scanCodeMode) return;
   scanCodeMode = mode;
-  document.getElementById("scan-mode-numeric").classList.toggle("active", mode === "numerico");
-  document.getElementById("scan-mode-alpha").classList.toggle("active", mode === "alfanumerico");
-  if (ocrWorker) {
-    try {
-      await ocrWorker.setParameters({ tessedit_char_whitelist: OCR_MODES[mode].whitelist });
-    } catch (err) { console.warn(err); }
-  }
-}
-
-function openScanner(context) {
-  scannerContext = context || "general";
-  const resultEl = document.getElementById("scanner-result");
-  resultEl.style.display = "none";
-  resultEl.innerHTML = "";
-  document.getElementById("scan-manual-input").value = "";
-  document.getElementById("scanner-modal-bg").classList.add("active");
-  startOcrScanner();
-}
-
-document.getElementById("global-scan-btn").addEventListener("click", () => openScanner("general"));
-document.getElementById("open-scanner-btn").addEventListener("click", () => openScanner("ventas"));
-document.getElementById("scan-mode-numeric").addEventListener("click", () => setScanCodeMode("numerico"));
-document.getElementById("scan-mode-alpha").addEventListener("click", () => setScanCodeMode("alfanumerico"));
-
-document.getElementById("scan-manual-go").addEventListener("click", () => {
-  const val = document.getElementById("scan-manual-input").value.trim();
-  if (val) onCodeScanned(val);
-});
-document.getElementById("scan-manual-input").addEventListener("keydown", (e) => {
-  if (e.key === "Enter") {
-    e.preventDefault();
-    const val = e.target.value.trim();
-    if (val) onCodeScanned(val);
-  }
-});
-document.getElementById("btnCaptureShot").addEventListener("click", captureShot);
-document.getElementById("btnResumeLive").addEventListener("click", resumeLiveScan);
-
-async function stopScanner() {
-  stopOcrScanner();
-  document.getElementById("scanner-modal-bg").classList.remove("active");
-}
-document.getElementById("scanner-cancel").addEventListener("click", stopScanner);
-document.getElementById("scanner-modal-bg").addEventListener("click", (e) => {
-  if (e.target === document.getElementById("scanner-modal-bg")) stopScanner();
-});
-
-function onCodeScanned(codigo) {
-  codigo = String(codigo).trim();
-  if (!codigo) return;
-  logScanHistory(codigo);
-  const product = findProductByCodigo(codigo);
-
-  if (scannerContext === "inventario") {
-    stopScanner();
-    openInventoryModal(product, codigo);
-    return;
-  }
-
-  if (scannerContext === "ventas") {
-    if (product) {
-      stopScanner();
-      addToCart(product);
-      showToast("Agregado a la venta: " + product.nombre);
-      return;
-    }
-    renderScanResult(codigo, null);
-    return;
-  }
-
-  renderScanResult(codigo, product);
-}
-
-function renderScanResult(codigo, product) {
-  const el = document.getElementById("scanner-result");
-  el.style.display = "block";
-  if (product) {
-    const stock = Number(product.stock) || 0;
-    const minimo = Number(product.minimo) || 0;
-    let badge = `<span class="badge ok">OK</span>`;
-    if (stock === 0) badge = `<span class="badge bad">Sin stock</span>`;
-    else if (stock <= minimo) badge = `<span class="badge warn">Stock bajo</span>`;
-
-    el.innerHTML = `
-      <div class="scan-result-card">
-        <div class="rc-title">✔ Producto encontrado</div>
-        <dl>
-          <dt>Código</dt><dd>${escapeHtml(product.sku || "—")}</dd>
-          <dt>Descripción</dt><dd style="font-family:inherit;">${escapeHtml(product.nombre)}</dd>
-          <dt>Marca</dt><dd style="font-family:inherit;">${escapeHtml(product.marca || "—")}</dd>
-          <dt>Categoría</dt><dd style="font-family:inherit;">${escapeHtml(product.categoria || "—")}</dd>
-          <dt>Cód. barras</dt><dd>${escapeHtml(product.codigoBarras || "—")}</dd>
-          <dt>Precio compra</dt><dd>Bs ${(Number(product.costo) || 0).toFixed(2)}</dd>
-          <dt>Precio referencia</dt><dd>Bs ${(Number(product.precioReferencia) || 0).toFixed(2)}</dd>
-          <dt>Precio venta</dt><dd>Bs ${(Number(product.precio) || 0).toFixed(2)}</dd>
-          <dt>Stock mínimo</dt><dd>${minimo}</dd>
-          <dt>Stock actual</dt><dd>${stock} ${badge}</dd>
-        </dl>
-      </div>
-      <div class="scan-actions">
-        <button type="button" class="btn btn-primary" id="scan-act-venta">🛒 Registrar venta</button>
-        <button type="button" class="btn btn-secondary" id="scan-act-compra">📦 Registrar compra</button>
-        <button type="button" class="btn btn-secondary" id="scan-act-inventario">📦 Registrar cantidad de inventario</button>
-        <button type="button" class="btn btn-secondary" id="scan-act-editar">✎ Ver / editar información</button>
-        <button type="button" class="btn btn-secondary" id="scan-act-otro">🔁 Escanear otro código</button>
-      </div>
-    `;
-    document.getElementById("scan-act-venta").addEventListener("click", () => {
-      addToCart(product);
-      showToast(`Agregado a la venta: ${product.nombre}`);
-      stopScanner();
-      switchView("ventas");
-    });
-    document.getElementById("scan-act-compra").addEventListener("click", () => {
-      stopScanner();
-      switchView("compras");
-      openCompraModal(product.id);
-    });
-    document.getElementById("scan-act-inventario").addEventListener("click", () => {
-      stopScanner();
-      openInventoryModal(product, null);
-    });
-    document.getElementById("scan-act-editar").addEventListener("click", () => {
-      stopScanner();
-      switchView("productos");
-      openProductModal(product);
-    });
-  } else {
-    el.innerHTML = `
-      <div class="scan-result-card">
-        <div class="rc-title">⚠️ Código no encontrado</div>
-        <p style="margin:0 0 6px; font-size:13px; color:var(--ink-soft);">No hay ningún producto con el código:</p>
-        <span class="scan-code-pill">${escapeHtml(codigo)}</span>
-      </div>
-      <div class="scan-actions">
-        <button type="button" class="btn btn-primary" id="scan-act-nuevo">+ Nuevo producto con este código</button>
-        <button type="button" class="btn btn-secondary" id="scan-act-otro">🔁 Escanear otro código</button>
-      </div>
-    `;
-    document.getElementById("scan-act-nuevo").addEventListener("click", () => {
-      stopScanner();
-      switchView("productos");
-      openProductModal(null, codigo);
-    });
-  }
-  document.getElementById("scan-act-otro").addEventListener("click", () => {
-    el.style.display = "none";
-    el.innerHTML = "";
+  document.querySelectorAll('[data-scan-code-mode]').forEach(btn=>{
+    btn.classList.toggle('active', btn.dataset.scanCodeMode === mode);
   });
+  // Si el lector ya está activo, actualiza el whitelist de caracteres sin reiniciar la cámara
+  if(ocrWorker){
+    try{
+      await ocrWorker.setParameters({ tessedit_char_whitelist: OCR_MODES[mode].whitelist });
+    }catch(err){ console.warn(err); }
+  }
 }
 
-function escapeHtml(str) {
-  return String(str ?? "").replace(/[&<>"']/g, m => ({
-    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
-  }[m]));
+/* -------------------------------------------------------------------------
+   13. EVENTOS / INICIALIZACIÓN
+   ------------------------------------------------------------------------- */
+
+function setupEventListeners(){
+  // Navegación
+  document.querySelectorAll('.nav-item[data-view]').forEach(btn=>{
+    btn.addEventListener('click', ()=> showView(btn.dataset.view));
+  });
+
+  // Sidebar móvil
+  document.getElementById('hamburgerBtn').addEventListener('click', ()=>{
+    document.getElementById('sidebar').classList.add('open');
+    document.getElementById('sidebarOverlay').classList.add('open');
+  });
+  document.getElementById('sidebarOverlay').addEventListener('click', closeSidebarMobile);
+
+  // Cerrar modales
+  document.querySelectorAll('[data-close-modal]').forEach(btn=>{
+    btn.addEventListener('click', closeAllModals);
+  });
+  document.getElementById('modalBackdrop').addEventListener('click', closeAllModals);
+
+  // Confirm modal
+  document.getElementById('confirmAcceptBtn').addEventListener('click', ()=>{
+    if(confirmCallback) confirmCallback();
+    confirmCallback = null;
+    closeAllModals();
+  });
+
+  // Escáner
+  document.querySelectorAll('[data-scan-code-mode]').forEach(btn=>{
+    btn.addEventListener('click', ()=> setScanCodeMode(btn.dataset.scanCodeMode));
+  });
+  document.getElementById('btnCaptureShot').addEventListener('click', captureShot);
+  document.getElementById('btnResumeLive').addEventListener('click', resumeLiveScan);
+  document.getElementById('btnManualCodeGo').addEventListener('click', ()=>{
+    const val = document.getElementById('manualCodeInput').value.trim();
+    if(val) handleScannedCode(val);
+  });
+  document.getElementById('manualCodeInput').addEventListener('keydown', (e)=>{
+    if(e.key === 'Enter'){
+      e.preventDefault();
+      const val = e.target.value.trim();
+      if(val) handleScannedCode(val);
+    }
+  });
+
+  // Productos
+  document.getElementById('btnNewProduct').addEventListener('click', ()=> openProductModal());
+  document.getElementById('formProducto').addEventListener('submit', handleProductSubmit);
+  document.getElementById('prodSearch').addEventListener('input', renderProductos);
+  document.getElementById('prodSearch').addEventListener('change', (e)=>{
+    logSearchHistory(e.target.value);
+  });
+  document.getElementById('prodFilterCategoria').addEventListener('change', renderProductos);
+  document.querySelector('#productsTable tbody').addEventListener('click', (e)=>{
+    const editId = e.target.closest('[data-edit-product]')?.dataset.editProduct;
+    const delId = e.target.closest('[data-delete-product]')?.dataset.deleteProduct;
+    if(editId) openProductModal(getProductoById(editId));
+    if(delId) deleteProducto(delId);
+  });
+
+  // Categorías
+  document.getElementById('btnAddCategory').addEventListener('click', ()=>{
+    const input = document.getElementById('newCategoryInput');
+    const val = input.value.trim();
+    if(!val){ toast('Escribe un nombre de categoría', 'error'); return; }
+    upsertCategoria(val);
+    saveDB();
+    input.value = '';
+    renderCategorias();
+    toast('Categoría agregada', 'success');
+  });
+
+  // Ventas
+  document.getElementById('formVenta').addEventListener('submit', handleVentaSubmit);
+  document.querySelectorAll('[data-payment-method]').forEach(btn=>{
+    btn.addEventListener('click', ()=>{
+      document.querySelectorAll('[data-payment-method]').forEach(b=>b.classList.remove('active'));
+      btn.classList.add('active');
+      document.getElementById('vMetodoPago').value = btn.dataset.paymentMethod;
+    });
+  });
+  document.querySelector('#ventasTable tbody').addEventListener('click', (e)=>{
+    const delId = e.target.closest('[data-delete-venta]')?.dataset.deleteVenta;
+    if(delId) deleteVenta(delId);
+  });
+
+  // Inventario
+  document.getElementById('btnRegistroInventario').addEventListener('click', openInventarioScan);
+  document.getElementById('btnCloseInventarioScan').addEventListener('click', closeInventarioScan);
+  document.getElementById('btnExportInventario').addEventListener('click', exportInventarioCSV);
+  document.getElementById('formInventario').addEventListener('submit', handleInventarioSubmit);
+  document.getElementById('btnCrearDesdeInventario').addEventListener('click', ()=>{
+    const codigo = document.getElementById('invCodigo').value;
+    closeAllModals();
+    openProductModal(null, codigo);
+  });
+
+  // Historial
+  document.getElementById('btnClearScanHistory').addEventListener('click', ()=>{
+    confirmDialog('Borrar historial de escaneos', '¿Seguro que quieres borrar todo el historial de códigos escaneados?', ()=>{
+      db.historialEscaneos = [];
+      saveDB();
+      renderHistorial();
+      toast('Historial de escaneos borrado', 'success');
+    });
+  });
+  document.getElementById('btnClearSearchHistory').addEventListener('click', ()=>{
+    confirmDialog('Borrar historial de búsquedas', '¿Seguro que quieres borrar todo el historial de búsquedas?', ()=>{
+      db.historialBusquedas = [];
+      saveDB();
+      renderHistorial();
+      toast('Historial de búsquedas borrado', 'success');
+    });
+  });
+
+  // Importaciones CSV (desde Productos y desde Configuración)
+  document.getElementById('btnImportProducts').addEventListener('click', ()=> document.getElementById('fileImportProducts').click());
+  document.getElementById('btnImportProductsConfig').addEventListener('click', ()=> document.getElementById('fileImportProducts').click());
+  document.getElementById('fileImportProducts').addEventListener('change', (e)=>{
+    if(e.target.files[0]) importProductsCSV(e.target.files[0]);
+    e.target.value = '';
+  });
+
+  // Backup / Configuración
+  document.getElementById('btnExportBackup').addEventListener('click', exportBackup);
+  document.getElementById('btnImportBackup').addEventListener('click', ()=> document.getElementById('fileImportBackup').click());
+  document.getElementById('fileImportBackup').addEventListener('change', (e)=>{
+    if(e.target.files[0]) importBackup(e.target.files[0]);
+    e.target.value = '';
+  });
+  document.getElementById('btnFactoryReset').addEventListener('click', factoryReset);
 }
+
+function init(){
+  loadDB();
+  setupEventListeners();
+  showView('escaner');
+  updateSidebarProductCount();
+  connectFirebase(); // no bloquea el arranque; si no está configurado, sigue todo local
+}
+
+document.addEventListener('DOMContentLoaded', init);

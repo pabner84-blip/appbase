@@ -2,1000 +2,344 @@
 <html lang="es">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1">
-<title>Ferretería · Control de Inventario</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700;800&family=Work+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet">
-<style>
-  :root{
-    --bg:#EDEAE3;
-    --panel:#FFFFFF;
-    --ink:#1C1F26;
-    --ink-soft:#5B6169;
-    --steel:#3A4048;
-    --line:#DAD5C9;
-    --orange:#E8621A;
-    --orange-dark:#C44E10;
-    --yellow:#F4B400;
-    --green:#3E8F60;
-    --red:#C33B2E;
-    --radius:10px;
-    --shadow:0 1px 2px rgba(28,31,38,.06), 0 6px 20px rgba(28,31,38,.06);
-  }
-  *{box-sizing:border-box;}
-  html,body{margin:0;padding:0;}
-  body{
-    background:var(--bg);
-    color:var(--ink);
-    font-family:'Work Sans',sans-serif;
-    min-height:100vh;
-  }
-  h1,h2,h3,.display{
-    font-family:'Barlow Condensed',sans-serif;
-    text-transform:uppercase;
-    letter-spacing:.02em;
-    font-weight:800;
-  }
-  .mono{ font-family:'IBM Plex Mono',monospace; }
-
-  /* ---------- LOGIN ---------- */
-  #login-screen{
-    min-height:100vh;
-    display:flex;
-    align-items:center;
-    justify-content:center;
-    background:
-      linear-gradient(180deg, rgba(28,31,38,.94), rgba(28,31,38,.94)),
-      repeating-linear-gradient(45deg, #23262d 0 2px, #1c1f26 2px 14px);
-    padding:24px;
-  }
-  .login-card{
-    background:var(--panel);
-    width:100%;
-    max-width:380px;
-    border-radius:var(--radius);
-    padding:32px 28px 28px;
-    box-shadow:0 20px 60px rgba(0,0,0,.4);
-    position:relative;
-    overflow:hidden;
-  }
-  .login-card::before{
-    content:"";
-    position:absolute; top:0; left:0; right:0; height:6px;
-    background:repeating-linear-gradient(90deg, var(--orange) 0 18px, var(--yellow) 18px 36px);
-  }
-  .login-brand{
-    display:flex; align-items:center; gap:10px; margin-bottom:4px;
-  }
-  .login-brand .mark{
-    width:36px;height:36px;border-radius:8px;
-    background:var(--orange);
-    display:flex;align-items:center;justify-content:center;
-    color:#fff; font-family:'Barlow Condensed',sans-serif; font-weight:800; font-size:20px;
-    flex-shrink:0;
-  }
-  .login-brand h1{ font-size:22px; margin:0; color:var(--ink); }
-  .login-sub{ color:var(--ink-soft); font-size:13px; margin:0 0 24px; }
-  .field{ margin-bottom:14px; }
-  .field label{
-    display:block; font-size:11px; text-transform:uppercase; letter-spacing:.06em;
-    color:var(--ink-soft); margin-bottom:6px; font-weight:600;
-  }
-  .field input{
-    width:100%; padding:11px 12px; border-radius:7px; border:1.5px solid var(--line);
-    font-size:15px; font-family:inherit; background:#FBFAF7; color:var(--ink);
-  }
-  .field input:focus{ outline:none; border-color:var(--orange); background:#fff; }
-  .btn{
-    appearance:none; border:none; cursor:pointer;
-    font-family:'Barlow Condensed',sans-serif; font-weight:700; letter-spacing:.03em;
-    text-transform:uppercase; font-size:15px;
-    border-radius:7px; padding:12px 16px;
-    transition:transform .06s ease, background .15s ease;
-  }
-  .btn:active{ transform:scale(.98); }
-  .btn-primary{ background:var(--orange); color:#fff; width:100%; }
-  .btn-primary:hover{ background:var(--orange-dark); }
-  .btn-primary:disabled{ opacity:.6; cursor:default; }
-  #login-error{
-    color:var(--red); font-size:13px; margin-top:12px; display:none;
-    background:#FBEAE7; border:1px solid #F0C6BE; padding:8px 10px; border-radius:6px;
-  }
-
-  /* ---------- APP SHELL ---------- */
-  #app-shell{ display:none; min-height:100vh; }
-  #app-shell.active{ display:flex; }
-
-  .sidebar{
-    width:220px; flex-shrink:0; background:var(--ink); color:#fff;
-    display:flex; flex-direction:column; padding:20px 0;
-  }
-  .sidebar .brand{
-    display:flex; align-items:center; gap:10px; padding:0 18px 20px;
-    border-bottom:1px solid rgba(255,255,255,.08); margin-bottom:14px;
-  }
-  .sidebar .brand .mark{
-    width:30px;height:30px;border-radius:7px; background:var(--orange);
-    display:flex;align-items:center;justify-content:center; font-family:'Barlow Condensed'; font-weight:800;
-  }
-  .sidebar .brand span{ font-family:'Barlow Condensed'; text-transform:uppercase; font-weight:700; font-size:15px; letter-spacing:.02em;}
-  .nav-item{
-    display:flex; align-items:center; gap:10px;
-    padding:11px 18px; color:#C7CAD1; text-decoration:none;
-    font-size:14px; font-weight:500; cursor:pointer; border-left:3px solid transparent;
-  }
-  .nav-item .dot{ width:6px;height:6px;border-radius:50%; background:currentColor; opacity:.5; flex-shrink:0; }
-  .nav-item:hover{ background:rgba(255,255,255,.04); color:#fff; }
-  .nav-item.active{ background:rgba(232,98,26,.14); color:#fff; border-left-color:var(--orange); }
-  .nav-item.disabled{ opacity:.4; cursor:not-allowed; }
-  .nav-item.disabled:hover{ background:none; color:#C7CAD1; }
-  .sidebar-foot{ margin-top:auto; padding:14px 18px 0; border-top:1px solid rgba(255,255,255,.08); }
-  .who{ font-size:12px; color:#9aa0aa; margin-bottom:8px; line-height:1.4; }
-  .who b{ color:#fff; display:block; font-size:13px; }
-  .role-pill{
-    display:inline-block; font-family:'IBM Plex Mono'; font-size:10px; text-transform:uppercase;
-    background:rgba(232,98,26,.2); color:var(--orange); padding:2px 7px; border-radius:4px; margin-top:4px;
-  }
-  .logout-btn{
-    width:100%; background:transparent; border:1px solid rgba(255,255,255,.15); color:#C7CAD1;
-    padding:8px; border-radius:6px; font-family:'Work Sans'; font-size:12px; cursor:pointer;
-  }
-  .logout-btn:hover{ border-color:var(--orange); color:#fff; }
-
-  .main{ flex:1; padding:26px 32px 60px; max-width:1100px; }
-  .topbar{ display:flex; align-items:baseline; justify-content:space-between; margin-bottom:22px; flex-wrap:wrap; gap:10px;}
-  .topbar h2{ font-size:28px; margin:0; }
-  .topbar .sub{ color:var(--ink-soft); font-size:13px; }
-
-  .stat-row{ display:flex; gap:14px; margin-bottom:22px; flex-wrap:wrap; }
-  .stat-card{
-    background:var(--panel); border-radius:var(--radius); box-shadow:var(--shadow);
-    padding:14px 18px; min-width:140px; flex:1;
-  }
-  .stat-card .label{ font-size:11px; text-transform:uppercase; letter-spacing:.05em; color:var(--ink-soft); font-weight:600;}
-  .stat-card .value{ font-family:'IBM Plex Mono'; font-size:24px; font-weight:600; margin-top:4px;}
-  .stat-card.warn .value{ color:var(--yellow); }
-  .stat-card.bad .value{ color:var(--red); }
-
-  .panel{
-    background:var(--panel); border-radius:var(--radius); box-shadow:var(--shadow); overflow:hidden;
-  }
-  .panel-head{
-    display:flex; align-items:center; justify-content:between; gap:12px;
-    padding:16px 18px; border-bottom:1px solid var(--line); display:flex; justify-content:space-between; flex-wrap:wrap;
-  }
-  .panel-head h3{ margin:0; font-size:18px; }
-  .search-add{ display:flex; gap:8px; flex-wrap:wrap; }
-  .search-add input, .search-add select{
-    padding:9px 12px; border-radius:7px; border:1.5px solid var(--line); font-size:14px; font-family:inherit; min-width:180px;
-  }
-  .btn-add{ background:var(--orange); color:#fff; }
-  .btn-add:hover{ background:var(--orange-dark); }
-
-  table{ width:100%; border-collapse:collapse; font-size:14px; }
-  thead th{
-    text-align:left; font-size:11px; text-transform:uppercase; letter-spacing:.05em; color:var(--ink-soft);
-    padding:10px 18px; border-bottom:1px solid var(--line); font-weight:600;
-  }
-  tbody td{ padding:12px 18px; border-bottom:1px solid #F0EEE7; vertical-align:middle;}
-  tbody tr:hover{ background:#FAF9F5; }
-  td.num, th.num{ font-family:'IBM Plex Mono'; }
-  .sku{ color:var(--ink-soft); font-family:'IBM Plex Mono'; font-size:12px; }
-
-  .gauge{ width:70px; height:8px; border-radius:4px; background:#EEECE4; overflow:hidden; position:relative; }
-  .gauge > i{ display:block; height:100%; border-radius:4px; }
-  .row-actions{ display:flex; gap:6px; }
-  .icon-btn{
-    border:1px solid var(--line); background:#fff; border-radius:6px; width:30px; height:30px;
-    display:flex; align-items:center; justify-content:center; cursor:pointer; color:var(--ink-soft);
-  }
-  .icon-btn:hover{ border-color:var(--orange); color:var(--orange); }
-  .icon-btn.danger:hover{ border-color:var(--red); color:var(--red); }
-
-  .empty-state{ padding:50px 20px; text-align:center; color:var(--ink-soft); }
-  .empty-state b{ color:var(--ink); display:block; margin-bottom:4px; font-family:'Barlow Condensed'; text-transform:uppercase; font-size:18px;}
-
-  .coming-soon{
-    background:var(--panel); border-radius:var(--radius); box-shadow:var(--shadow);
-    padding:60px 30px; text-align:center; color:var(--ink-soft);
-  }
-  .coming-soon .tag{
-    display:inline-block; background:#F4EFE3; color:var(--orange-dark); font-family:'IBM Plex Mono'; font-size:11px;
-    padding:3px 10px; border-radius:20px; margin-bottom:14px; text-transform:uppercase; letter-spacing:.05em;
-  }
-
-  /* modal */
-  .modal-bg{
-    display:none; position:fixed; inset:0; background:rgba(28,31,38,.5); z-index:50;
-    align-items:center; justify-content:center; padding:20px;
-  }
-  .modal-bg.active{ display:flex; }
-  .modal{
-    background:#fff; border-radius:var(--radius); width:100%; max-width:420px; padding:24px;
-    box-shadow:0 20px 60px rgba(0,0,0,.3); max-height:92vh; overflow-y:auto;
-  }
-  .modal h3{ margin:0 0 16px; font-size:20px; }
-  .modal .field input, .modal .field select{
-    width:100%; padding:10px 12px; border-radius:7px; border:1.5px solid var(--line); font-size:14px; font-family:inherit;
-  }
-  .modal-actions{ display:flex; gap:10px; margin-top:18px; }
-  .btn-secondary{ background:#F0EEE7; color:var(--ink); flex:1; }
-  .btn-secondary:hover{ background:#E6E3D8; }
-  .modal .btn-primary{ flex:1; }
-
-  .toast{
-    position:fixed; bottom:20px; left:50%; transform:translateX(-50%);
-    background:var(--ink); color:#fff; padding:10px 18px; border-radius:8px; font-size:14px;
-    box-shadow:0 10px 30px rgba(0,0,0,.3); z-index:100; display:none;
-  }
-  .toast.show{ display:block; }
-
-  #products-table-wrap{ overflow-x:auto; }
-  #products-table-wrap table{ min-width:1040px; }
-  .sub2{ color:var(--ink-soft); font-size:11.5px; margin-top:2px; }
-
-  .badge{ display:inline-block; font-family:'IBM Plex Mono',monospace; font-size:10.5px; padding:2px 8px; border-radius:20px; text-transform:uppercase; letter-spacing:.03em; }
-  .badge.ok{ background:#E8F4EC; color:var(--green); }
-  .badge.warn{ background:#FDF3DC; color:#9C7100; }
-  .badge.bad{ background:#FBEAE7; color:var(--red); }
-
-  .scanner-launch{
-    width:100%; background:var(--orange); color:#fff; border:none; border-radius:7px;
-    padding:10px 12px; font-family:'Barlow Condensed'; font-weight:700; letter-spacing:.03em;
-    text-transform:uppercase; font-size:13px; cursor:pointer; margin-bottom:14px;
-  }
-  .scanner-launch:hover{ background:var(--orange-dark); }
-
-  .scan-mode-btns{ display:flex; gap:10px; margin-bottom:4px; }
-  .scan-mode-btns button{ flex:1; padding:14px 10px; border-radius:8px; border:1.5px solid var(--line); background:#FAF9F5; cursor:pointer; font-family:'Work Sans'; font-size:13px; color:var(--ink); text-align:center; }
-  .scan-mode-btns button b{ display:block; font-family:'Barlow Condensed'; text-transform:uppercase; font-size:16px; margin-bottom:4px; }
-  .scan-mode-btns button:hover{ border-color:var(--orange); background:#fff; }
-  .scan-mode-btns button.active{ border-color:var(--orange); background:var(--orange); color:#fff; }
-
-  .scan-manual{ display:flex; gap:8px; margin-bottom:12px; }
-  .scan-manual input{ flex:1; padding:10px 12px; border-radius:7px; border:1.5px solid var(--line); font-size:14px; font-family:inherit; }
-  .scan-manual .btn{ width:auto; }
-
-  .scan-result-card{ background:#FAF9F5; border:1px solid var(--line); border-radius:8px; padding:14px 16px; margin-bottom:14px; }
-  .scan-result-card .rc-title{ font-family:'Barlow Condensed'; font-weight:800; text-transform:uppercase; font-size:18px; margin-bottom:8px; }
-  .scan-result-card dl{ display:grid; grid-template-columns:auto 1fr; gap:5px 12px; margin:0; font-size:13px; }
-  .scan-result-card dt{ color:var(--ink-soft); }
-  .scan-result-card dd{ margin:0; font-family:'IBM Plex Mono'; }
-  .scan-actions{ display:flex; flex-direction:column; gap:8px; margin-top:6px; }
-  .scan-actions .btn{ width:100%; }
-  .scan-code-pill{ font-family:'IBM Plex Mono'; background:var(--ink); color:#fff; padding:3px 10px; border-radius:5px; font-size:13px; }
-
-  /* ---- OCR reader ---- */
-  #ocr-reader{ width:100%; height:260px; border-radius:8px; overflow:hidden; background:#000; position:relative; margin-bottom:10px; }
-  #ocr-reader video{ width:100%; height:100%; object-fit:cover; display:block; }
-  #ocrFrozenImg{ display:none; position:absolute; inset:0; width:100%; height:100%; object-fit:cover; background:#000; }
-  #ocrFrozenImg.visible{ display:block; }
-  #ocr-guide{ position:absolute; left:15%; right:15%; top:35%; bottom:35%; border:2px dashed rgba(255,255,255,.9); border-radius:6px; pointer-events:none; }
-  #ocr-status{ position:absolute; left:0; right:0; bottom:0; padding:8px 12px; background:rgba(28,31,38,.72); color:#fff; font-size:12.5px; text-align:center; }
-  .scan-capture-row{ display:flex; gap:8px; margin-bottom:4px; }
-  .scan-capture-row .btn{ width:auto; flex:1; }
-
-  /* ---- Inventario ---- */
-  #inventario-table-wrap{ overflow-x:auto; }
-  #inventario-table-wrap table{ min-width:640px; }
-
-  /* ---- Categorías ---- */
-  #categorias-grid{ display:grid; grid-template-columns:repeat(auto-fill,minmax(160px,1fr)); gap:14px; }
-  .cat-card{
-    background:var(--panel); border-radius:var(--radius); box-shadow:var(--shadow);
-    padding:16px 18px; cursor:pointer; border-left:4px solid var(--orange);
-    transition:transform .08s ease;
-  }
-  .cat-card:hover{ transform:translateY(-1px); }
-  .cat-card .label{ font-size:11px; text-transform:uppercase; letter-spacing:.05em; color:var(--ink-soft); font-weight:600; }
-  .cat-card .value{ font-family:'IBM Plex Mono'; font-size:24px; font-weight:600; margin-top:4px; }
-
-  .mobile-topbar{ display:none; }
-  @media(max-width:820px){
-    #app-shell.active{ flex-direction:column; }
-    .sidebar{ width:100%; flex-direction:row; align-items:center; padding:10px 14px; overflow-x:auto; }
-    .sidebar .brand{ border:none; margin:0; padding:0 10px 0 0; }
-    .sidebar-foot{ display:none; }
-    .main{ padding:18px; }
-    table{ font-size:13px; }
-    thead th, tbody td{ padding:9px 10px; }
-  }
-</style>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>StockFerre — Consulta de Productos</title>
+<link rel="stylesheet" href="styles.css">
 </head>
 <body>
 
-<!-- ================= LOGIN ================= -->
-<div id="login-screen">
-  <div class="login-card">
-    <div class="login-brand">
-      <div class="mark">F</div>
-      <h1>Ferretería</h1>
+<!-- ============ SIDEBAR ============ -->
+<aside class="sidebar" id="sidebar">
+  <div class="sidebar-brand">
+    <span class="brand-icon">🧰</span>
+    <div class="brand-text">
+      <strong>StockFerre</strong>
+      <small>Consulta de productos</small>
     </div>
-    <p class="login-sub">Control de inventario · ingresa con tu cuenta</p>
-    <form id="login-form">
-      <div class="field">
-        <label for="login-email">Correo</label>
-        <input type="email" id="login-email" required autocomplete="username">
-      </div>
-      <div class="field">
-        <label for="login-pass">Contraseña</label>
-        <input type="password" id="login-pass" required autocomplete="current-password">
-      </div>
-      <button type="submit" class="btn btn-primary" id="login-btn">Ingresar</button>
-      <div id="login-error"></div>
-    </form>
   </div>
-</div>
 
-<!-- ================= APP ================= -->
-<div id="app-shell">
-  <aside class="sidebar">
-    <div class="brand"><div class="mark">F</div><span>Ferretería</span></div>
-    <div style="padding:0 14px 4px;">
-      <button class="scanner-launch" id="global-scan-btn">📷 Escanear código</button>
-    </div>
-    <nav id="nav-list">
-      <div class="nav-item active" data-view="productos"><span class="dot"></span> Productos</div>
-      <div class="nav-item" data-view="stock"><span class="dot"></span> Stock</div>
-      <div class="nav-item" data-view="inventario"><span class="dot"></span> 📦 Inventario</div>
-      <div class="nav-item" data-view="categorias"><span class="dot"></span> 🗂️ Categorías</div>
-      <div class="nav-item" data-view="compras"><span class="dot"></span> Compras</div>
-      <div class="nav-item" data-view="ventas"><span class="dot"></span> Ventas</div>
-      <div class="nav-item" data-view="gastos"><span class="dot"></span> Gastos</div>
-      <div class="nav-item" data-view="caja"><span class="dot"></span> Caja</div>
-      <div class="nav-item" data-view="historial"><span class="dot"></span> 🕘 Historial</div>
-      <div class="nav-item disabled" data-view="reportes" title="Próximamente"><span class="dot"></span> Reportes</div>
-      <div class="nav-item disabled" data-view="usuarios" title="Próximamente"><span class="dot"></span> Usuarios</div>
-    </nav>
-    <div class="sidebar-foot">
-      <div class="who">Sesión<b id="who-email">—</b><span class="role-pill" id="who-role">—</span></div>
-      <button class="logout-btn" id="logout-btn">Cerrar sesión</button>
-    </div>
-  </aside>
+  <nav class="sidebar-nav">
+    <button class="nav-item active" data-view="escaner"><span>📷</span> Escanear</button>
+    <button class="nav-item" data-view="productos"><span>📦</span> Productos</button>
+    <button class="nav-item" data-view="categorias"><span>🗂️</span> Categorías</button>
+    <button class="nav-item" data-view="ventas"><span>💰</span> Ventas</button>
+    <button class="nav-item" data-view="inventario"><span>📋</span> Inventario</button>
+    <button class="nav-item" data-view="historial"><span>🕘</span> Historial</button>
+    <button class="nav-item" data-view="config"><span>⚙️</span> Configuración</button>
+  </nav>
 
-  <main class="main">
-    <!-- vista productos -->
-    <section id="view-productos">
-      <div class="topbar">
-        <div>
-          <h2>Productos &amp; Stock</h2>
-          <div class="sub">Inventario en tiempo real, sincronizado entre todos los dispositivos</div>
-        </div>
+  <div class="sidebar-footer">
+    <small id="sidebarProductCount">0 productos</small>
+    <small id="sidebarSyncStatus">💾 Solo en este dispositivo</small>
+  </div>
+</aside>
+
+<div class="sidebar-overlay" id="sidebarOverlay"></div>
+
+<!-- ============ MAIN ============ -->
+<div class="main-wrap">
+  <header class="topbar">
+    <button class="hamburger" id="hamburgerBtn" aria-label="Abrir menú">☰</button>
+    <h1 id="viewTitle">Escanear</h1>
+  </header>
+
+  <main class="content" id="content">
+
+    <!-- ---------- ESCÁNER (pantalla principal) ---------- -->
+    <section class="view active" id="view-escaner">
+      <div id="scannerBlockHome"><div id="scannerBlock">
+      <div class="scan-mode-tabs">
+        <button class="scan-tab active" data-scan-code-mode="numerico">🔢 Código numérico</button>
+        <button class="scan-tab" data-scan-code-mode="alfanumerico">🔤 Código alfanumérico</button>
       </div>
 
-      <div class="stat-row">
-        <div class="stat-card"><div class="label">Productos</div><div class="value mono" id="stat-total">0</div></div>
-        <div class="stat-card warn"><div class="label">Stock bajo</div><div class="value mono" id="stat-bajo">0</div></div>
-        <div class="stat-card bad"><div class="label">Sin stock</div><div class="value mono" id="stat-cero">0</div></div>
-        <div class="stat-card"><div class="label">Valor inventario</div><div class="value mono" id="stat-valor">Bs 0</div></div>
+      <div class="scan-manual">
+        <input type="text" id="manualCodeInput" class="input" placeholder="Escribe el código y presiona Enter (ej: HNV3445)" autocomplete="off">
+        <button class="btn btn-primary" id="btnManualCodeGo">Buscar</button>
       </div>
 
       <div class="panel">
-        <div class="panel-head">
-          <h3>Catálogo</h3>
-          <div class="search-add">
-            <input type="text" id="search-input" placeholder="Buscar por nombre, código o marca...">
-            <select id="search-categoria">
-              <option value="">Todas las categorías</option>
-            </select>
-            <button class="btn btn-secondary" id="open-import-excel" style="width:auto;">📥 Importar Excel</button>
-            <button class="btn btn-secondary" id="open-export-products" style="width:auto;">📤 Exportar CSV</button>
-            <button class="btn btn-add" id="open-add-product">+ Nuevo producto</button>
-          </div>
+        <div class="panel-header">
+          <h3>📷 Cámara</h3>
         </div>
-        <div id="products-table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Código</th>
-                <th>Descripción</th>
-                <th>Marca</th>
-                <th>Categoría</th>
-                <th class="num">P. Compra</th>
-                <th class="num">P. Referencia</th>
-                <th class="num">P. Venta</th>
-                <th class="num">Stock Mín.</th>
-                <th class="num">Stock Actual</th>
-                <th>Cód. Barras</th>
-                <th>Nivel</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody id="products-tbody"></tbody>
-          </table>
-          <div class="empty-state" id="products-empty" style="display:none;">
-            <b>Sin productos todavía</b>
-            Agrega el primero con "+ Nuevo producto" arriba.
+        <div class="panel-body">
+          <div id="ocr-reader" class="ocr-reader">
+            <video id="ocrVideo" autoplay playsinline muted></video>
+            <canvas id="ocrCanvas" style="display:none;"></canvas>
+            <img id="ocrFrozenImg" class="ocr-frozen" alt="Foto capturada">
+            <div class="ocr-guide"></div>
+            <div class="ocr-status" id="ocrStatus">Iniciando cámara...</div>
           </div>
+          <div class="scan-capture-row">
+            <button class="btn btn-secondary" id="btnCaptureShot">📸 Capturar foto</button>
+            <button class="btn btn-secondary" id="btnResumeLive" style="display:none;">🔄 Volver a cámara en vivo</button>
+          </div>
+          <p class="hint">Acerca el celular a ~5 cm del código y encájalo dentro del recuadro punteado (solo se lee lo que está adentro). Si se mueve y no lee bien, toca "Capturar foto" para congelar la imagen y analizarla con calma.</p>
         </div>
+      </div>
+      </div></div>
+
+      <div id="scanResult"></div>
+    </section>
+
+    <!-- ---------- PRODUCTOS ---------- -->
+    <section class="view" id="view-productos">
+      <div class="toolbar">
+        <input type="text" id="prodSearch" class="input" placeholder="🔍 Buscar por nombre, código o marca...">
+        <select id="prodFilterCategoria" class="input select"><option value="">Todas las categorías</option></select>
+        <button class="btn btn-primary" id="btnNewProduct">+ Nuevo producto</button>
+        <button class="btn btn-secondary" id="btnImportProducts">📥 Importar CSV</button>
+      </div>
+      <div class="table-wrap">
+        <table class="table" id="productsTable">
+          <thead>
+            <tr>
+              <th>Código</th><th>Cód. Barras</th><th>Descripción</th><th>Marca</th><th>Categoría</th>
+              <th>P. Compra</th><th>P. Marca</th><th>P. Venta</th><th>Acciones</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
       </div>
     </section>
 
-    <!-- vista stock -->
-    <section id="view-stock" style="display:none;">
-      <div class="topbar">
-        <div>
-          <h2>Stock</h2>
-          <div class="sub">Vista rápida de niveles de inventario, ordenada de menor a mayor stock</div>
-        </div>
+    <!-- ---------- CATEGORÍAS ---------- -->
+    <section class="view" id="view-categorias">
+      <div class="toolbar">
+        <input type="text" id="newCategoryInput" class="input" placeholder="Nombre de nueva categoría...">
+        <button class="btn btn-primary" id="btnAddCategory">+ Agregar categoría</button>
       </div>
-      <div class="stat-row">
-        <div class="stat-card"><div class="label">Productos</div><div class="value mono" id="stock-stat-total">0</div></div>
-        <div class="stat-card warn"><div class="label">Stock bajo</div><div class="value mono" id="stock-stat-bajo">0</div></div>
-        <div class="stat-card bad"><div class="label">Sin stock</div><div class="value mono" id="stock-stat-cero">0</div></div>
-        <div class="stat-card"><div class="label">Valor inventario</div><div class="value mono" id="stock-stat-valor">Bs 0</div></div>
+      <div class="cards-grid" id="categoriesGrid"></div>
+    </section>
+
+    <!-- ---------- VENTAS ---------- -->
+    <section class="view" id="view-ventas">
+      <p class="hint" id="ventasSummary" style="margin-bottom:12px;">0 ventas</p>
+      <div class="table-wrap">
+        <table class="table" id="ventasTable">
+          <thead>
+            <tr>
+              <th>Fecha</th><th>Código</th><th>Producto</th><th>Cant.</th>
+              <th>Precio</th><th>Total</th><th>Pago</th><th>Acciones</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
       </div>
+    </section>
+
+    <!-- ---------- INVENTARIO ---------- -->
+    <section class="view" id="view-inventario">
+      <div class="toolbar">
+        <button class="btn btn-primary" id="btnRegistroInventario">📋 Registro de cantidad de inventario</button>
+        <button class="btn btn-secondary" id="btnExportInventario">📤 Exportar CSV</button>
+      </div>
+      <div class="table-wrap">
+        <table class="table" id="inventarioTable">
+          <thead>
+            <tr>
+              <th>Código</th><th>Cód. Barras</th><th>Descripción</th><th>Categoría</th><th>Stock</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ---------- HISTORIAL ---------- -->
+    <section class="view" id="view-historial">
       <div class="panel">
-        <div class="panel-head">
-          <h3>Niveles de stock</h3>
-          <div class="search-add"><input type="text" id="stock-search-input" placeholder="Buscar..."></div>
-        </div>
-        <div id="stock-table-wrap" style="overflow-x:auto;">
-          <table style="min-width:640px;">
-            <thead>
-              <tr><th>Código</th><th>Descripción</th><th class="num">Stock Mín.</th><th class="num">Stock Actual</th><th>Estado</th><th></th></tr>
-            </thead>
-            <tbody id="stock-tbody"></tbody>
-          </table>
-          <div class="empty-state" id="stock-empty" style="display:none;">
-            <b>Sin productos</b>
-            Agrega productos en la sección Productos.
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <!-- vista inventario -->
-    <section id="view-inventario" style="display:none;">
-      <div class="topbar">
-        <div>
-          <h2>📦 Inventario</h2>
-          <div class="sub">Registra la cantidad de stock de cada producto, escaneando su código</div>
-        </div>
-      </div>
-
-      <div class="panel">
-        <div class="panel-head">
-          <h3>Inventario actual</h3>
-          <div class="search-add">
-            <input type="text" id="inv-search" placeholder="Buscar por código o descripción...">
-            <button class="btn btn-add" id="open-registrar-inventario" style="width:auto;">📦 Registrar cantidad de inventario</button>
-            <button class="btn btn-secondary" id="open-export-inventario" style="width:auto;">📥 Exportar Inventario a CSV</button>
-          </div>
-        </div>
-        <div id="inventario-table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Código</th>
-                <th>Descripción</th>
-                <th class="num">Cantidad (stock)</th>
-                <th>Código de barras</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody id="inventario-tbody"></tbody>
-          </table>
-          <div class="empty-state" id="inventario-empty" style="display:none;">
-            <b>Sin productos</b>
-            Registra cantidades escaneando un código con el botón de arriba.
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <!-- vista categorías -->
-    <section id="view-categorias" style="display:none;">
-      <div class="topbar">
-        <div>
-          <h2>🗂️ Categorías</h2>
-          <div class="sub">Toca una categoría para ver sus productos</div>
-        </div>
-      </div>
-      <div class="search-add" style="margin-bottom:18px;">
-        <input type="text" id="nueva-categoria-input" placeholder="Nombre de la nueva categoría..." style="flex:1; min-width:220px;">
-        <button class="btn btn-add" id="btn-add-categoria" style="width:auto;">+ Agregar categoría</button>
-      </div>
-      <div id="categorias-grid"></div>
-    </section>
-
-    <!-- vista historial -->
-    <section id="view-historial" style="display:none;">
-      <div class="topbar">
-        <div>
-          <h2>🕘 Historial</h2>
-          <div class="sub">Códigos escaneados y búsquedas recientes</div>
-        </div>
-      </div>
-
-      <div class="panel" style="margin-bottom:18px;">
-        <div class="panel-head">
+        <div class="panel-header">
           <h3>📷 Códigos escaneados</h3>
-          <div class="search-add">
-            <button class="btn btn-secondary" id="btn-clear-scan-history" style="width:auto;">🗑 Borrar historial</button>
+          <button class="btn btn-sm btn-secondary" id="btnClearScanHistory">Borrar</button>
+        </div>
+        <div class="panel-body" style="padding:0;">
+          <div class="table-wrap" style="box-shadow:none; border-radius:0;">
+            <table class="table" id="scanHistoryTable">
+              <thead>
+                <tr><th>Código</th><th>Producto</th><th>Estado</th><th>Fecha</th></tr>
+              </thead>
+              <tbody></tbody>
+            </table>
           </div>
-        </div>
-        <div style="overflow-x:auto;">
-          <table style="min-width:560px;">
-            <thead>
-              <tr><th>Código</th><th>Producto</th><th>Estado</th><th>Fecha</th></tr>
-            </thead>
-            <tbody id="scan-history-tbody"></tbody>
-          </table>
-        </div>
-        <div class="empty-state" id="scan-history-empty" style="display:none;">
-          <b>Sin escaneos todavía</b>
-          Escanea un código desde el botón "📷 Escanear código" o desde Inventario.
         </div>
       </div>
 
       <div class="panel">
-        <div class="panel-head">
+        <div class="panel-header">
           <h3>🔍 Búsquedas en Productos</h3>
-          <div class="search-add">
-            <button class="btn btn-secondary" id="btn-clear-search-history" style="width:auto;">🗑 Borrar</button>
-          </div>
+          <button class="btn btn-sm btn-secondary" id="btnClearSearchHistory">Borrar</button>
         </div>
-        <div id="search-history-list"></div>
-        <div class="empty-state" id="search-history-empty" style="display:none;">
-          <b>Sin búsquedas</b>
-          Busca productos en la sección Productos.
+        <div class="panel-body">
+          <div id="searchHistoryList"></div>
         </div>
       </div>
     </section>
 
-    <!-- vista compras -->
-    <section id="view-compras" style="display:none;">
-      <div class="topbar">
-        <div>
-          <h2>Compras</h2>
-          <div class="sub">Cada compra registrada suma stock automáticamente al producto</div>
-        </div>
-      </div>
-
-      <div class="stat-row">
-        <div class="stat-card"><div class="label">Compras este mes</div><div class="value mono" id="stat-compras-mes">0</div></div>
-        <div class="stat-card"><div class="label">Invertido este mes</div><div class="value mono" id="stat-compras-valor">Bs 0</div></div>
-      </div>
-
-      <div class="panel">
-        <div class="panel-head">
-          <h3>Historial de compras</h3>
-          <div class="search-add">
-            <button class="btn btn-add" id="open-add-compra">+ Registrar compra</button>
-          </div>
-        </div>
-        <div id="compras-table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Fecha</th>
-                <th>Hora</th>
-                <th>Producto</th>
-                <th>Proveedor</th>
-                <th class="num">Cantidad</th>
-                <th class="num">Costo unit.</th>
-                <th class="num">Total</th>
-                <th>Registró</th>
-              </tr>
-            </thead>
-            <tbody id="compras-tbody"></tbody>
-          </table>
-          <div class="empty-state" id="compras-empty" style="display:none;">
-            <b>Sin compras registradas</b>
-            Registra la primera con "+ Registrar compra" arriba.
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <!-- vista ventas -->
-    <section id="view-ventas" style="display:none;">
-      <div class="topbar">
-        <div>
-          <h2>Ventas</h2>
-          <div class="sub">Busca o escanea un producto para agregarlo a la venta</div>
-        </div>
-      </div>
-
-      <div id="caja-cerrada-banner" class="coming-soon" style="display:none; padding:24px; margin-bottom:20px;">
-        <span class="tag" style="background:#FBEAE7; color:var(--red);">Caja cerrada</span><br>
-        Abre la caja en la sección <b>Caja</b> antes de registrar ventas.
-      </div>
-
-      <div id="ventas-content">
-        <div class="stat-row">
-          <div class="stat-card"><div class="label">Ventas este mes</div><div class="value mono" id="stat-ventas-mes">0</div></div>
-          <div class="stat-card"><div class="label">Vendido este mes</div><div class="value mono" id="stat-ventas-total">Bs 0</div></div>
-          <div class="stat-card"><div class="label">Ganancia neta este mes</div><div class="value mono" id="stat-ventas-ganancia">Bs 0</div></div>
-        </div>
-
-        <div class="panel" style="margin-bottom:18px;">
-          <div class="panel-head">
-            <h3>Buscar producto</h3>
-            <div class="search-add">
-              <input type="text" id="venta-search" placeholder="Nombre o código...">
-              <button class="btn btn-add" id="open-scanner-btn">📷 Escanear código</button>
-            </div>
-          </div>
-          <div id="venta-search-results" style="max-height:220px; overflow-y:auto;"></div>
-        </div>
-
-        <div class="panel" style="margin-bottom:18px;">
-          <div class="panel-head"><h3>Carrito</h3></div>
-          <table>
-            <thead>
-              <tr>
-                <th>Producto</th>
-                <th class="num">Cant.</th>
-                <th class="num">Precio</th>
-                <th class="num">Subtotal</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody id="cart-tbody"></tbody>
-          </table>
-          <div class="empty-state" id="cart-empty">
-            <b>Carrito vacío</b>
-            Busca un producto arriba para empezar la venta.
-          </div>
-          <div style="padding:18px; border-top:1px solid var(--line); display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:14px;">
-            <div class="field" style="margin:0; min-width:180px;">
-              <label>Método de pago</label>
-              <select id="venta-metodo">
-                <option value="efectivo">Efectivo</option>
-                <option value="tarjeta">Tarjeta</option>
-                <option value="transferencia">Transferencia</option>
-              </select>
-            </div>
-            <div style="text-align:right;">
-              <div class="label" style="font-size:11px; text-transform:uppercase; color:var(--ink-soft); font-weight:600;">Total</div>
-              <div class="mono" style="font-size:30px; font-weight:600;" id="cart-total">Bs 0.00</div>
-            </div>
-            <button class="btn btn-primary" id="confirm-venta-btn" style="width:auto; padding:14px 28px;">Cobrar venta</button>
+    <!-- ---------- CONFIGURACIÓN ---------- -->
+    <section class="view" id="view-config">
+      <div class="panels-grid">
+        <div class="panel">
+          <div class="panel-header"><h3>📂 Importar productos (CSV)</h3></div>
+          <div class="panel-body">
+            <p class="hint">Formato: <code>CODIGO,DESCRIPCION,MARCA,CATEGORIA,CODIGO DE BARRAS,PRECIO COMPRA,PRECIO VENTA</code> (código de barras es opcional). Acepta CSV separado por comas o por punto y coma (el que usa Excel en español).</p>
+            <button class="btn btn-secondary" id="btnImportProductsConfig">📥 Elegir archivo CSV</button>
           </div>
         </div>
 
         <div class="panel">
-          <div class="panel-head"><h3>Historial de ventas</h3></div>
-          <div style="overflow-x:auto;">
-            <table style="min-width:760px;">
-              <thead>
-                <tr>
-                  <th>Fecha</th>
-                  <th>Hora</th>
-                  <th>Productos</th>
-                  <th class="num">Total</th>
-                  <th class="num">Ganancia</th>
-                  <th>Pago</th>
-                  <th>Vendedor</th>
-                </tr>
-              </thead>
-              <tbody id="ventas-tbody"></tbody>
-            </table>
-          </div>
-          <div class="empty-state" id="ventas-empty" style="display:none;">
-            <b>Sin ventas registradas</b>
-            Las ventas cobradas aparecerán aquí con fecha y hora.
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <!-- vista caja -->
-    <section id="view-caja" style="display:none;">
-      <div class="topbar">
-        <div>
-          <h2>Caja</h2>
-          <div class="sub">Apertura, cierre y movimientos de efectivo del turno</div>
-        </div>
-      </div>
-
-      <!-- caja cerrada -->
-      <div id="caja-cerrada-view">
-        <div class="coming-soon">
-          <span class="tag">Caja cerrada</span><br>
-          No hay un turno de caja abierto en este momento.<br><br>
-          <button class="btn btn-primary" id="open-abrir-caja" style="width:auto; padding:12px 26px;">Abrir caja</button>
-        </div>
-      </div>
-
-      <!-- caja abierta -->
-      <div id="caja-abierta-view" style="display:none;">
-        <div class="stat-row">
-          <div class="stat-card"><div class="label">Monto inicial</div><div class="value mono" id="caja-inicial">Bs 0</div></div>
-          <div class="stat-card"><div class="label">Ventas efectivo</div><div class="value mono" id="caja-ventas">Bs 0</div></div>
-          <div class="stat-card"><div class="label">Ingresos manuales</div><div class="value mono" id="caja-ingresos">Bs 0</div></div>
-          <div class="stat-card bad"><div class="label">Egresos manuales</div><div class="value mono" id="caja-egresos">Bs 0</div></div>
-          <div class="stat-card warn"><div class="label">Total esperado</div><div class="value mono" id="caja-esperado">Bs 0</div></div>
-        </div>
-
-        <div class="panel" style="margin-bottom:18px;">
-          <div class="panel-head">
-            <h3>Movimientos del turno</h3>
-            <div class="search-add">
-              <button class="btn btn-add" id="open-movimiento">+ Registrar movimiento</button>
+          <div class="panel-header"><h3>💾 Backup (JSON)</h3></div>
+          <div class="panel-body">
+            <p class="hint">Exporta o restaura una copia completa de tus productos y categorías.</p>
+            <div class="toolbar" style="margin-bottom:0;">
+              <button class="btn btn-primary" id="btnExportBackup">📤 Exportar backup</button>
+              <button class="btn btn-secondary" id="btnImportBackup">📥 Restaurar backup</button>
             </div>
           </div>
-          <table>
-            <thead>
-              <tr><th>Hora</th><th>Tipo</th><th>Motivo</th><th class="num">Monto</th><th>Registró</th></tr>
-            </thead>
-            <tbody id="movimientos-tbody"></tbody>
-          </table>
-          <div class="empty-state" id="movimientos-empty" style="display:none;">
-            <b>Sin movimientos manuales</b>
-            Las ventas en efectivo se suman solas aquí.
-          </div>
         </div>
 
-        <div style="text-align:right;">
-          <button class="btn" style="background:var(--red); color:#fff; width:auto; padding:12px 26px;" id="open-cerrar-caja">Cerrar caja</button>
+        <div class="panel">
+          <div class="panel-header"><h3>⚠️ Zona de riesgo</h3></div>
+          <div class="panel-body">
+            <p class="hint">Esto borra todos los productos y categorías guardados en este dispositivo.</p>
+            <button class="btn btn-danger" id="btnFactoryReset">🗑️ Borrar todos los datos</button>
+          </div>
         </div>
       </div>
     </section>
 
-    <!-- modal abrir caja -->
-    <div class="modal-bg" id="abrir-caja-modal-bg">
-      <div class="modal">
-        <h3>Abrir caja</h3>
-        <form id="abrir-caja-form">
-          <div class="field"><label>Monto inicial en caja (Bs)</label><input type="number" step="0.01" min="0" id="ac-monto" required></div>
-          <div class="modal-actions">
-            <button type="button" class="btn btn-secondary" id="abrir-caja-cancel">Cancelar</button>
-            <button type="submit" class="btn btn-primary">Abrir</button>
-          </div>
-        </form>
-      </div>
-    </div>
-
-    <!-- modal movimiento -->
-    <div class="modal-bg" id="movimiento-modal-bg">
-      <div class="modal">
-        <h3>Registrar movimiento</h3>
-        <form id="movimiento-form">
-          <div class="field">
-            <label>Tipo</label>
-            <select id="mv-tipo">
-              <option value="ingreso">Ingreso (entra dinero)</option>
-              <option value="egreso">Egreso (sale dinero)</option>
-            </select>
-          </div>
-          <div class="field"><label>Motivo</label><input type="text" id="mv-motivo" placeholder="Ej: pago a proveedor, retiro..." required></div>
-          <div class="field"><label>Monto (Bs)</label><input type="number" step="0.01" min="0.01" id="mv-monto" required></div>
-          <div class="modal-actions">
-            <button type="button" class="btn btn-secondary" id="movimiento-cancel">Cancelar</button>
-            <button type="submit" class="btn btn-primary">Registrar</button>
-          </div>
-        </form>
-      </div>
-    </div>
-
-    <!-- modal cerrar caja -->
-    <div class="modal-bg" id="cerrar-caja-modal-bg">
-      <div class="modal">
-        <h3>Cerrar caja</h3>
-        <p style="color:var(--ink-soft); font-size:13px; margin-top:-8px;">Total esperado en caja: <b class="mono" id="cc-esperado-txt">Bs 0.00</b></p>
-        <form id="cerrar-caja-form">
-          <div class="field"><label>Monto contado físicamente (Bs)</label><input type="number" step="0.01" min="0" id="cc-contado" required></div>
-          <div class="modal-actions">
-            <button type="button" class="btn btn-secondary" id="cerrar-caja-cancel">Cancelar</button>
-            <button type="submit" class="btn" style="background:var(--red); color:#fff; flex:1;">Cerrar caja</button>
-          </div>
-        </form>
-      </div>
-    </div>
-
-    <!-- vista gastos -->
-    <section id="view-gastos" style="display:none;">
-      <div class="topbar">
-        <div>
-          <h2>Gastos</h2>
-          <div class="sub">Gastos extra del negocio (transporte, servicios, insumos, etc.)</div>
-        </div>
-      </div>
-      <div class="stat-row">
-        <div class="stat-card"><div class="label">Gastos este mes</div><div class="value mono" id="stat-gastos-mes">0</div></div>
-        <div class="stat-card bad"><div class="label">Total gastado este mes</div><div class="value mono" id="stat-gastos-valor">Bs 0</div></div>
-      </div>
-      <div class="panel">
-        <div class="panel-head">
-          <h3>Historial de gastos</h3>
-          <div class="search-add">
-            <button class="btn btn-add" id="open-add-gasto">+ Registrar gasto</button>
-          </div>
-        </div>
-        <div style="overflow-x:auto;">
-          <table style="min-width:560px;">
-            <thead>
-              <tr><th>Fecha</th><th>Hora</th><th>Observación</th><th class="num">Monto</th><th>Registró</th><th></th></tr>
-            </thead>
-            <tbody id="gastos-tbody"></tbody>
-          </table>
-        </div>
-        <div class="empty-state" id="gastos-empty" style="display:none;">
-          <b>Sin gastos registrados</b>
-          Registra el primero con "+ Registrar gasto" arriba.
-        </div>
-      </div>
-    </section>
-
-    <!-- modal gasto -->
-    <div class="modal-bg" id="gasto-modal-bg">
-      <div class="modal">
-        <h3>Registrar gasto</h3>
-        <form id="gasto-form">
-          <div class="field"><label>Observación / motivo</label><input type="text" id="g-obs" placeholder="Ej: transporte, alquiler, luz..." required></div>
-          <div class="field"><label>Monto (Bs)</label><input type="number" step="0.01" min="0.01" id="g-monto" required></div>
-          <div class="modal-actions">
-            <button type="button" class="btn btn-secondary" id="gasto-cancel">Cancelar</button>
-            <button type="submit" class="btn btn-primary" id="gasto-save">Registrar</button>
-          </div>
-        </form>
-      </div>
-    </div>
-
-    <section id="view-reportes" style="display:none;">
-      <div class="topbar"><h2>Reportes</h2></div>
-      <div class="coming-soon"><span class="tag">Fase 4</span><br>Reportes de ventas, ganancias y stock, próximamente.</div>
-    </section>
-    <section id="view-usuarios" style="display:none;">
-      <div class="topbar"><h2>Usuarios</h2></div>
-      <div class="coming-soon"><span class="tag">Fase 4</span><br>Gestión de usuarios y roles (admin / vendedor), próximamente.</div>
-    </section>
-
-    <!-- scanner modal (OCR) -->
-    <div class="modal-bg" id="scanner-modal-bg">
-      <div class="modal" style="max-width:480px;">
-        <h3>📷 Escanear código</h3>
-        <div class="scan-mode-btns" style="margin-bottom:12px;">
-          <button type="button" id="scan-mode-numeric" class="active"><b>🔢 Numérico</b>Ej: 12399</button>
-          <button type="button" id="scan-mode-alpha"><b>🔤 Alfanumérico</b>Ej: HNV3445</button>
-        </div>
-        <div class="scan-manual">
-          <input type="text" id="scan-manual-input" placeholder="Escribe el código y presiona Enter (ej: HNV3445)" autocomplete="off">
-          <button type="button" class="btn btn-add" id="scan-manual-go">Buscar</button>
-        </div>
-        <div id="ocr-reader">
-          <video id="ocrVideo" autoplay playsinline muted></video>
-          <canvas id="ocrCanvas" style="display:none;"></canvas>
-          <img id="ocrFrozenImg" alt="Foto capturada">
-          <div id="ocr-guide"></div>
-          <div id="ocrStatus">Iniciando cámara...</div>
-        </div>
-        <div class="scan-capture-row">
-          <button type="button" class="btn btn-secondary" id="btnCaptureShot">📸 Capturar foto</button>
-          <button type="button" class="btn btn-secondary" id="btnResumeLive" style="display:none;">🔄 Volver a cámara</button>
-        </div>
-        <p style="color:var(--ink-soft); font-size:12px; margin:8px 0 0;">Acerca el celular a ~5 cm del código y encájalo en el recuadro punteado. Si no lee bien, toca "Capturar foto".</p>
-        <div id="scanner-result" style="display:none;"></div>
-        <div class="modal-actions" style="margin-top:12px;">
-          <button type="button" class="btn btn-secondary" id="scanner-cancel" style="width:100%;">Cerrar</button>
-        </div>
-      </div>
-    </div>
-
-    <!-- modal registrar cantidad de inventario -->
-    <div class="modal-bg" id="inventory-modal-bg">
-      <div class="modal" style="max-width:440px;">
-        <h3 id="inventory-modal-title">Registrar cantidad de inventario</h3>
-        <div id="inventory-product-info"></div>
-        <form id="inventory-form">
-          <div id="inv-fields">
-            <div class="field"><label>Cantidad (stock actual)</label><input type="number" step="1" min="0" id="inv-cantidad" required></div>
-            <div class="field"><label>Código de barras del producto</label><input type="text" id="inv-codigo-barras" placeholder="Ej: 7701234567890 (opcional)"></div>
-          </div>
-          <div id="inv-crear-nuevo-wrap" style="display:none;">
-            <button type="button" class="btn btn-add" id="inv-crear-nuevo" style="width:100%; margin-bottom:10px;">+ Crear nuevo producto con este código</button>
-          </div>
-          <div class="modal-actions">
-            <button type="button" class="btn btn-secondary" id="inventory-cancel">Cancelar</button>
-            <button type="submit" class="btn btn-primary" id="inventory-save">Guardar</button>
-          </div>
-        </form>
-      </div>
-    </div>
   </main>
 </div>
 
-<!-- Modal producto -->
-<div class="modal-bg" id="product-modal-bg">
-  <div class="modal">
-    <h3 id="product-modal-title">Nuevo producto</h3>
-    <form id="product-form">
-      <input type="hidden" id="product-id">
-      <div class="field"><label>Código</label><input type="text" id="p-sku" placeholder="Ej: 12399 o ABND4433"></div>
-      <div class="field"><label>Código de barras</label><input type="text" id="p-codigobarras" placeholder="Ej: 7701234567890 (opcional)"></div>
-      <div class="field"><label>Descripción</label><input type="text" id="p-nombre" required></div>
-      <div class="field"><label>Marca</label><input type="text" id="p-marca"></div>
-      <div class="field"><label>Categoría</label><input type="text" id="p-categoria"></div>
-      <div class="field"><label>Precio compra (Bs)</label><input type="number" step="0.01" min="0" id="p-costo" required></div>
-      <div class="field"><label>Precio referencia (Bs)</label><input type="number" step="0.01" min="0" id="p-refprecio"></div>
-      <div class="field"><label>Precio venta (Bs)</label><input type="number" step="0.01" min="0" id="p-precio" required></div>
-      <div class="field"><label>Stock mínimo (alerta)</label><input type="number" step="1" min="0" id="p-minimo" value="5" required></div>
-      <div class="field"><label>Stock actual</label><input type="number" step="1" min="0" id="p-stock" required></div>
-      <div class="modal-actions">
-        <button type="button" class="btn btn-secondary" id="product-cancel">Cancelar</button>
-        <button type="submit" class="btn btn-primary" id="product-save">Guardar</button>
+<!-- ============ MODALS ============ -->
+<div class="modal-backdrop" id="modalBackdrop"></div>
+
+<!-- Product Form Modal -->
+<div class="modal" id="modalProducto">
+  <div class="modal-header">
+    <h3 id="modalProductoTitle">Nuevo producto</h3>
+    <button class="modal-close" data-close-modal>✕</button>
+  </div>
+  <div class="modal-body">
+    <form id="formProducto" class="form-grid">
+      <input type="hidden" id="pId">
+      <label>Código *<input type="text" id="pCodigo" class="input" required></label>
+      <label>Código de barras<input type="text" id="pCodigoBarras" class="input" placeholder="Opcional"></label>
+      <label>Descripción *<input type="text" id="pNombre" class="input" required></label>
+      <label>Marca<input type="text" id="pMarca" class="input"></label>
+      <label>Categoría<input type="text" id="pCategoria" class="input" list="categoriasList" placeholder="Elige o escribe una nueva"></label>
+      <datalist id="categoriasList"></datalist>
+      <label>Precio de compra<input type="number" id="pPrecioCompra" class="input" step="0.01" min="0"></label>
+      <label>Precio de marca<input type="number" id="pPrecioMarca" class="input" step="0.01" min="0"></label>
+      <label>Precio de venta<input type="number" id="pPrecioVenta" class="input" step="0.01" min="0"></label>
+      <div class="form-actions">
+        <button type="submit" class="btn btn-primary">Guardar</button>
+        <button type="button" class="btn btn-secondary" data-close-modal>Cancelar</button>
       </div>
     </form>
   </div>
 </div>
 
-<!-- Modal compra -->
-<div class="modal-bg" id="compra-modal-bg">
-  <div class="modal">
-    <h3>Registrar compra</h3>
-    <form id="compra-form">
-      <div class="field">
-        <label>Producto</label>
-        <select id="c-producto" required></select>
+<!-- Sale (Venta) Modal -->
+<div class="modal modal-sm" id="modalVenta">
+  <div class="modal-header">
+    <h3>💰 Registrar venta</h3>
+    <button class="modal-close" data-close-modal>✕</button>
+  </div>
+  <div class="modal-body">
+    <form id="formVenta" class="form-grid">
+      <input type="hidden" id="vCodigo">
+      <input type="hidden" id="vNombre">
+      <input type="hidden" id="vMetodoPago" value="efectivo">
+      <div class="product-info-box visible" style="grid-column:1/-1;">
+        📦 <strong id="vNombreDisplay"></strong>
       </div>
-      <div class="field"><label>Proveedor (opcional)</label><input type="text" id="c-proveedor"></div>
-      <div class="field"><label>Cantidad comprada</label><input type="number" step="1" min="1" id="c-cantidad" required></div>
-
-      <div class="field"><label>Costo unitario / precio compra (Bs)</label><input type="number" step="0.01" min="0" id="c-costo" required></div>
-      <div class="field">
-        <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
-          <input type="checkbox" id="c-actualizar-costo" style="width:auto;" checked>
-          Actualizar el precio de compra del producto con este valor
-        </label>
-      </div>
-
-      <div class="field"><label>Precio referencia (Bs)</label><input type="number" step="0.01" min="0" id="c-precio-ref"></div>
-      <div class="field">
-        <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
-          <input type="checkbox" id="c-actualizar-ref" style="width:auto;">
-          Actualizar precio de referencia del producto
-        </label>
-      </div>
-
-      <div class="field"><label>Precio venta (Bs)</label><input type="number" step="0.01" min="0" id="c-precio-venta"></div>
-      <div class="field">
-        <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
-          <input type="checkbox" id="c-actualizar-venta" style="width:auto;">
-          Actualizar precio de venta del producto
-        </label>
-      </div>
-
-      <div class="modal-actions">
-        <button type="button" class="btn btn-secondary" id="compra-cancel">Cancelar</button>
-        <button type="submit" class="btn btn-primary" id="compra-save">Registrar</button>
+      <label>Cantidad *<input type="number" id="vCantidad" class="input" step="1" min="1" value="1" required></label>
+      <label>Precio de venta *<input type="number" id="vPrecio" class="input" step="0.01" min="0" required></label>
+      <label style="grid-column:1/-1;">Método de pago
+        <div class="scan-mode-tabs" style="margin-top:4px;">
+          <button type="button" class="scan-tab active" data-payment-method="efectivo">💵 Efectivo</button>
+          <button type="button" class="scan-tab" data-payment-method="qr">📱 QR</button>
+        </div>
+      </label>
+      <div class="form-actions">
+        <button type="submit" class="btn btn-success">Registrar venta</button>
+        <button type="button" class="btn btn-secondary" data-close-modal>Cancelar</button>
       </div>
     </form>
   </div>
 </div>
 
-<!-- Modal importar excel -->
-<div class="modal-bg" id="import-modal-bg">
-  <div class="modal" style="max-width:480px;">
-    <h3>Importar productos desde Excel</h3>
-    <p style="color:var(--ink-soft); font-size:13px; margin-top:-10px;">
-      Reconoce las columnas <b>CODIGO, DESCRIPCION, MARCA, CATEGORIA, PRECIO COMPRA, PRECIO REFERENCIA, PRECIO VENTA, STOCK MINIMO, STOCK ACTUAL</b> y opcional <b>CODIGO BARRAS</b> (no importa el orden ni mayúsculas). Si el código ya existe en tu inventario, se actualiza en vez de duplicarse.
-    </p>
-    <div class="field">
-      <label>Archivo (.xlsx, .xls o .csv)</label>
-      <input type="file" id="import-file" accept=".xlsx,.xls,.csv">
+<!-- Modal: Escáner de Inventario (reutiliza el mismo bloque de escáner de la pestaña Escanear) -->
+<div class="modal" id="modalInventarioScan">
+  <div class="modal-header">
+    <h3>📋 Registro de cantidad de inventario</h3>
+    <button class="modal-close" data-close-modal id="btnCloseInventarioScan">✕</button>
+  </div>
+  <div class="modal-body">
+    <p class="hint" style="margin-top:0;">Escanea el código del producto para registrar cuánta cantidad tienes en stock.</p>
+    <div id="scannerBlockPlaceholder"></div>
+  </div>
+</div>
+
+<!-- Modal: Registrar cantidad / código de barras de un producto -->
+<div class="modal modal-sm" id="modalInventarioDetalle">
+  <div class="modal-header">
+    <h3>📋 Registrar inventario</h3>
+    <button class="modal-close" data-close-modal>✕</button>
+  </div>
+  <div class="modal-body">
+    <div id="invNoEncontrado" style="display:none;">
+      <div class="scan-not-found">
+        ⚠️ El código <strong id="invCodigoNoEncontrado"></strong> no está en tu inventario de productos.
+        <div style="margin-top:10px;">
+          <button class="btn btn-primary btn-sm" id="btnCrearDesdeInventario">+ Crear nuevo producto</button>
+        </div>
+      </div>
     </div>
-    <div class="field">
-      <label>Stock inicial para productos nuevos</label>
-      <input type="number" id="import-stock-inicial" value="0" min="0" step="1">
-    </div>
-    <div id="import-preview" style="display:none; background:#FAF9F5; border:1px solid var(--line); border-radius:8px; padding:12px 14px; font-size:13px; margin-bottom:8px;"></div>
-    <div id="import-progress" style="display:none; font-size:13px; color:var(--ink-soft); margin-bottom:8px;"></div>
-    <div class="modal-actions">
-      <button type="button" class="btn btn-secondary" id="import-cancel">Cancelar</button>
-      <button type="button" class="btn btn-primary" id="import-analizar">Analizar archivo</button>
-      <button type="button" class="btn btn-primary" id="import-confirmar" style="display:none;">Confirmar importación</button>
+    <form id="formInventario" class="form-grid">
+      <input type="hidden" id="invCodigo">
+      <div class="product-info-box visible" style="grid-column:1/-1;">
+        📦 <strong id="invNombreDisplay"></strong><br>
+        <span id="invStockActualDisplay" style="font-size:12px;"></span>
+      </div>
+      <label>Cantidad a agregar *<input type="number" id="invCantidad" class="input" step="1" min="1" value="1" required></label>
+      <label>Código de barras<input type="text" id="invCodigoBarras" class="input" placeholder="Opcional"></label>
+      <div class="form-actions">
+        <button type="submit" class="btn btn-success">Registrar</button>
+        <button type="button" class="btn btn-secondary" data-close-modal>Cancelar</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Confirm Modal (generic) -->
+<div class="modal modal-sm" id="modalConfirm">
+  <div class="modal-header">
+    <h3 id="confirmTitle">Confirmar</h3>
+    <button class="modal-close" data-close-modal>✕</button>
+  </div>
+  <div class="modal-body">
+    <p id="confirmMessage"></p>
+    <div class="form-actions">
+      <button class="btn btn-danger" id="confirmAcceptBtn">Confirmar</button>
+      <button class="btn btn-secondary" data-close-modal>Cancelar</button>
     </div>
   </div>
 </div>
 
-<div class="toast" id="toast"></div>
+<!-- Toast container -->
+<div class="toast-container" id="toastContainer"></div>
 
-<script src="https://cdn.sheetjs.com/xlsx-0.20.2/package/dist/xlsx.full.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
-<script type="module" src="app.js"></script>
+<!-- Hidden file inputs -->
+<input type="file" id="fileImportProducts" accept=".csv" hidden>
+<input type="file" id="fileImportBackup" accept=".json" hidden>
+
+<script src='https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js'></script>
+<!-- Firebase (opcional): si firebase-config.js está vacío, la app funciona 100% local -->
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js"></script>
+<script src="firebase-config.js"></script>
+<script src="app.js"></script>
 </body>
 </html>

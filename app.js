@@ -1898,12 +1898,60 @@ function enterModoAsGuest(){
 function enterModo(modo){
   switchModoData(modo);
   applyRoleUI();
-  showView('escaner');
+  showWelcomeForMode(modo);
   if(currentRole === 'guest'){
     toast('Entraste al modo invitado', 'success');
   }else{
     toast(`Entraste a ${MODO_LABELS[modo]}`, 'success');
   }
+}
+
+// Pantalla de bienvenida: se muestra al entrar a un modo, con el nombre en el
+// color de ese modo (rojo/azul/verde). Conserva el menú lateral para navegar.
+function showWelcomeForMode(modo){
+  document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+  document.getElementById('view-welcome').classList.add('active');
+  document.getElementById('welcomeTitle').textContent = 'BIENVENIDO';
+  const sub = modo === 'manual' ? 'Herramientas Manuales'
+    : modo === 'electrico' ? 'Herramientas Eléctricas'
+    : 'TIENDA 1';
+  document.getElementById('welcomeSubtitle').textContent = sub;
+  document.querySelectorAll('.nav-item[data-view]').forEach(btn=> btn.classList.remove('active'));
+  document.getElementById('viewTitle').textContent = sub;
+  document.body.classList.remove('inicio-theme');
+  closeSidebarMobile();
+  closeAllModals();
+  restoreScannerBlockHome();
+  scanContext = 'lookup';
+  // Voz de asistente al entrar a las pantallas de bienvenida
+  setTimeout(()=> speak('Bienvenido, ' + sub), 350);
+}
+
+// Voz de asistente (mujer en español si está disponible) usando la API de
+// síntesis de voz del navegador.
+function speak(text){
+  if(!('speechSynthesis' in window)) return;
+  try{
+    window.speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = 'es-ES';
+    u.rate = 0.95;
+    u.pitch = 1.05;
+    const pick = ()=>{
+      const voices = window.speechSynthesis.getVoices();
+      const es = voices.filter(v => (v.lang||'').toLowerCase().indexOf('es') === 0);
+      if(es.length){
+        const fem = es.find(v => /sabina|monica|paul|helena|laura|marcela|google/i.test(v.name)) || es.find(v => /female|femenina/i.test(v.name)) || es[0];
+        u.voice = fem;
+      }
+      window.speechSynthesis.speak(u);
+    };
+    if(window.speechSynthesis.getVoices().length) pick();
+    else{
+      window.speechSynthesis.onvoiceschanged = ()=>{ window.speechSynthesis.onvoiceschanged = null; pick(); };
+      setTimeout(pick, 300);
+    }
+  }catch(e){}
 }
 
 function openPasswordGate(modo){
@@ -2590,6 +2638,12 @@ function setupEventListeners(){
   document.getElementById('btnModoManual').addEventListener('click', ()=> attemptEnterModo('manual'));
   document.getElementById('btnModoElectrico').addEventListener('click', ()=> attemptEnterModo('electrico'));
   document.getElementById('btnModoInvitado').addEventListener('click', ()=> enterModoAsGuest());
+
+  // Botón "Volver al Inicio" del menú lateral: regresa a la pantalla principal
+  document.getElementById('btnVolverInicio').addEventListener('click', ()=>{
+    stopActiveScanner();
+    showView('inicio');
+  });
 
   // Puerta de contraseña al entrar a un modo que tiene contraseña puesta
   document.getElementById('formPasswordGate').addEventListener('submit', (e)=>{

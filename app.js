@@ -710,12 +710,21 @@ function handleInventoryScan(codigo){
   document.getElementById('invCodigo').value = codigo;
   if(p){
     document.getElementById('invNoEncontrado').style.display = 'none';
-    document.getElementById('formInventario').style.display = '';
+    document.getElementById('formInventario').style.display = 'none';
+
+    // Paso 1: mostrar los datos del producto detectado para confirmar
+    document.getElementById('invConfNombre').textContent = p.nombre;
+    document.getElementById('invConfCodigo').textContent = p.codigo;
+    document.getElementById('invConfCodigoBarras').textContent = p.codigoBarras || '(sin registrar)';
+    document.getElementById('invConfirmacion').style.display = '';
+
+    // Prepara el formulario del paso 2 (queda oculto hasta tocar "Registrar")
     document.getElementById('invNombreDisplay').textContent = p.nombre;
     document.getElementById('invStockActualDisplay').textContent = `Stock actual: ${p.stock || 0}`;
     document.getElementById('invCantidad').value = 1;
     document.getElementById('invCodigoBarras').value = p.codigoBarras || '';
   }else{
+    document.getElementById('invConfirmacion').style.display = 'none';
     document.getElementById('invNoEncontrado').style.display = '';
     document.getElementById('formInventario').style.display = 'none';
     document.getElementById('invCodigoNoEncontrado').textContent = codigo;
@@ -1190,6 +1199,7 @@ function factoryReset(){
    ------------------------------------------------------------------------- */
 
 const VIEW_TITLES = {
+  inicio: 'Inicio',
   escaner: 'Escanear',
   productos: 'Productos',
   categorias: 'Categorías',
@@ -1198,6 +1208,15 @@ const VIEW_TITLES = {
   historial: 'Historial',
   config: 'Configuración'
 };
+
+function updateInicioClock(){
+  const timeEl = document.getElementById('inicioTime');
+  const dateEl = document.getElementById('inicioDate');
+  if(!timeEl || !dateEl) return;
+  const now = new Date();
+  timeEl.textContent = now.toLocaleTimeString('es-BO', { hour:'2-digit', minute:'2-digit', second:'2-digit' });
+  dateEl.textContent = now.toLocaleDateString('es-BO', { weekday:'long', day:'numeric', month:'long', year:'numeric' });
+}
 
 function showView(name){
   document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
@@ -1211,6 +1230,7 @@ function showView(name){
   restoreScannerBlockHome();
   scanContext = 'lookup';
 
+  if(name === 'inicio') updateInicioClock();
   if(name === 'productos') renderProductos();
   if(name === 'categorias') renderCategorias();
   if(name === 'ventas') renderVentas();
@@ -1849,6 +1869,10 @@ function setupEventListeners(){
   });
   document.getElementById('formEditarInventario').addEventListener('submit', handleEditarInventarioSubmit);
   document.getElementById('btnScanBarcode').addEventListener('click', openBarcodeScanModal);
+  document.getElementById('btnInvConfirmarRegistro').addEventListener('click', ()=>{
+    document.getElementById('invConfirmacion').style.display = 'none';
+    document.getElementById('formInventario').style.display = '';
+  });
 
   // Historial
   document.getElementById('btnClearScanHistory').addEventListener('click', ()=>{
@@ -1890,7 +1914,9 @@ function init(){
   loadDB();
   loadInvUpdates();
   setupEventListeners();
-  showView('escaner');
+  showView('inicio');
+  updateInicioClock();
+  setInterval(updateInicioClock, 1000);
   updateSidebarProductCount();
   connectFirebase(); // no bloquea el arranque; si no está configurado, sigue todo local
 }

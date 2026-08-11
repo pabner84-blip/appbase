@@ -223,6 +223,17 @@ input,select{font-family:inherit;}
 /* ---------- STOCK NEGATIVO ---------- */
 .stock-negative{color:var(--danger);}
 
+/* ---------- INICIO: reloj y fecha ---------- */
+.inicio-clock-card{
+  background:var(--surface); border-radius:var(--radius); box-shadow:var(--shadow);
+  padding:40px 24px; text-align:center; max-width:420px; margin:24px auto 0;
+}
+.inicio-time{font-size:44px; font-weight:800; color:var(--text); letter-spacing:.02em; font-variant-numeric:tabular-nums;}
+.inicio-date{font-size:15px; color:var(--text-muted); margin-top:8px; text-transform:capitalize;}
+@media (max-width: 560px){
+  .inicio-time{font-size:34px;}
+}
+
 /* ---------- TOASTS ---------- */
 .toast-container{position:fixed; bottom:20px; right:20px; z-index:400; display:flex; flex-direction:column; gap:10px;}
 .toast{

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>StockFerre — Consulta de Productos</title>
+<title>TIENDA 1 — Consulta de Productos</title>
 <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -13,13 +13,14 @@
   <div class="sidebar-brand">
     <span class="brand-icon">🧰</span>
     <div class="brand-text">
-      <strong>StockFerre</strong>
+      <strong>TIENDA 1</strong>
       <small>Consulta de productos</small>
     </div>
   </div>
 
   <nav class="sidebar-nav">
-    <button class="nav-item active" data-view="escaner"><span>📷</span> Escanear</button>
+    <button class="nav-item active" data-view="inicio"><span>🏠</span> Inicio</button>
+    <button class="nav-item" data-view="escaner"><span>📷</span> Escanear</button>
     <button class="nav-item" data-view="productos"><span>📦</span> Productos</button>
     <button class="nav-item" data-view="categorias"><span>🗂️</span> Categorías</button>
     <button class="nav-item" data-view="ventas"><span>💰</span> Ventas</button>
@@ -45,8 +46,17 @@
 
   <main class="content" id="content">
 
+    <!-- ---------- INICIO ---------- -->
+    <section class="view active" id="view-inicio">
+      <div class="inicio-clock-card">
+        <div class="inicio-time" id="inicioTime">--:--:--</div>
+        <div class="inicio-date" id="inicioDate">-</div>
+        <p class="hint" style="margin-top:14px;">Bienvenido a TIENDA 1</p>
+      </div>
+    </section>
+
     <!-- ---------- ESCÁNER (pantalla principal) ---------- -->
-    <section class="view active" id="view-escaner">
+    <section class="view" id="view-escaner">
       <div id="scannerBlockHome"><div id="scannerBlock">
       <div class="scan-mode-tabs">
         <button class="scan-tab active" data-scan-code-mode="numerico">🔢 Código numérico</button>
@@ -319,7 +329,20 @@
         </div>
       </div>
     </div>
-    <form id="formInventario" class="form-grid">
+
+    <!-- Paso 1: confirmar que el producto detectado es el correcto -->
+    <div id="invConfirmacion" style="display:none;">
+      <div class="scan-result-card" style="margin-bottom:14px;">
+        <h4>📦 Producto encontrado</h4>
+        <div class="sr-row"><span>Descripción</span><strong id="invConfNombre"></strong></div>
+        <div class="sr-row"><span>Código</span><strong id="invConfCodigo"></strong></div>
+        <div class="sr-row"><span>Código de barras</span><strong id="invConfCodigoBarras"></strong></div>
+      </div>
+      <button type="button" class="btn btn-primary" id="btnInvConfirmarRegistro" style="width:100%;">📋 Registrar</button>
+    </div>
+
+    <!-- Paso 2: cantidad y código de barras (aparece después de confirmar) -->
+    <form id="formInventario" class="form-grid" style="display:none;">
       <input type="hidden" id="invCodigo">
       <div class="product-info-box visible" style="grid-column:1/-1;">
         📦 <strong id="invNombreDisplay"></strong><br>
@@ -402,7 +425,7 @@
 
 <script src='https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js'></script>
 <!-- ZXing: lector de códigos de barras (solo se usa en el botón 📷 de Código de barras) -->
-<script src='https://cdn.jsdelivr.net/npm/@zxing/library@0.20.0'></script>
+<script src='https://unpkg.com/@zxing/library@0.20.0'></script>
 <!-- Firebase (opcional): si firebase-config.js está vacío, la app funciona 100% local -->
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js"></script>

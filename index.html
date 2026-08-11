@@ -32,6 +32,7 @@
   <div class="sidebar-footer">
     <small id="sidebarProductCount">0 productos</small>
     <small id="sidebarSyncStatus">💾 Solo en este dispositivo</small>
+    <button id="btnAddPassword">🔒 Agregar contraseña</button>
   </div>
 </aside>
 
@@ -65,7 +66,14 @@
         <div class="inicio-welcome" id="inicioWelcome">Bienvenido a la Tienda 1</div>
         <div class="inicio-time" id="inicioTime">--:--:--</div>
         <div class="inicio-date" id="inicioDate">-</div>
+
+        <div class="inicio-modos">
+          <button class="inicio-modo-btn inicio-modo-manual" id="btnModoManual">🔧 Herramientas Manuales</button>
+          <button class="inicio-modo-btn inicio-modo-electrico" id="btnModoElectrico">⚡ Herramientas Eléctricas</button>
+          <button class="inicio-modo-btn inicio-modo-invitado" id="btnModoInvitado">👤 Entrar como invitado</button>
+        </div>
       </div>
+      <div class="inicio-footer">Creado por Abner Pérez</div>
     </section>
 
     <!-- ---------- ESCÁNER (pantalla principal) ---------- -->
@@ -120,7 +128,7 @@
           <thead>
             <tr>
               <th>Código</th><th>Cód. Barras</th><th>Descripción</th><th>Marca</th><th>Categoría</th>
-              <th>P. Compra</th><th>P. Marca</th><th>P. Venta</th><th>Acciones</th>
+              <th class="price-guest-hide">P. Compra</th><th class="price-guest-hide">P. Marca</th><th>P. Venta</th><th>Acciones</th>
             </tr>
           </thead>
           <tbody></tbody>
@@ -278,8 +286,8 @@
       <label>Marca<input type="text" id="pMarca" class="input"></label>
       <label>Categoría<input type="text" id="pCategoria" class="input" list="categoriasList" placeholder="Elige o escribe una nueva"></label>
       <datalist id="categoriasList"></datalist>
-      <label>Precio de compra<input type="number" id="pPrecioCompra" class="input" step="0.01" min="0"></label>
-      <label>Precio de marca<input type="number" id="pPrecioMarca" class="input" step="0.01" min="0"></label>
+      <label class="price-guest-hide">Precio de compra<input type="number" id="pPrecioCompra" class="input" step="0.01" min="0"></label>
+      <label class="price-guest-hide">Precio de marca<input type="number" id="pPrecioMarca" class="input" step="0.01" min="0"></label>
       <label>Precio de venta<input type="number" id="pPrecioVenta" class="input" step="0.01" min="0"></label>
       <div class="form-actions">
         <button type="submit" class="btn btn-primary">Guardar</button>
@@ -413,6 +421,63 @@
       <div class="form-actions">
         <button type="submit" class="btn btn-primary">Guardar cambios</button>
         <button type="button" class="btn btn-secondary" data-close-modal>Cancelar</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Modal: puerta de contraseña al elegir un modo desde Inicio -->
+<div class="modal modal-sm" id="modalPasswordGate">
+  <div class="modal-header">
+    <h3>🔒 Ingresar a <span id="gateModoLabel"></span></h3>
+    <button class="modal-close" data-close-modal>✕</button>
+  </div>
+  <div class="modal-body">
+    <form id="formPasswordGate" class="form-grid">
+      <label style="grid-column:1/-1;">Contraseña
+        <input type="password" id="gatePassInput" class="input" placeholder="Contraseña del dueño" autocomplete="off">
+      </label>
+      <div class="form-actions" style="justify-content:space-between;">
+        <button type="button" class="btn btn-secondary" id="btnGateAsGuest">👤 Entrar como invitado</button>
+        <button type="submit" class="btn btn-primary">Ingresar</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Modal: elegir a cuál app entrar como invitado -->
+<div class="modal modal-sm" id="modalGuestChoice">
+  <div class="modal-header">
+    <h3>👤 Entrar como invitado</h3>
+    <button class="modal-close" data-close-modal>✕</button>
+  </div>
+  <div class="modal-body">
+    <p class="hint" style="margin-top:0;">Como invitado puedes usar Productos, Ventas, Categorías e Historial, pero no verás precio de compra ni precio de marca, y no tendrás acceso a Inventario ni a Configuración.</p>
+    <div class="form-actions" style="justify-content:center; flex-wrap:wrap;">
+      <button type="button" class="btn" style="background:var(--success); color:#fff;" id="btnGuestManual">🔧 Herramientas Manuales</button>
+      <button type="button" class="btn" style="background:var(--success); color:#fff;" id="btnGuestElectrico">⚡ Herramientas Eléctricas</button>
+    </div>
+  </div>
+</div>
+
+<!-- Modal: agregar / cambiar contraseña del modo actual -->
+<div class="modal modal-sm" id="modalSetPassword">
+  <div class="modal-header">
+    <h3>🔒 Contraseña de <span id="setPassModoLabel"></span></h3>
+    <button class="modal-close" data-close-modal>✕</button>
+  </div>
+  <div class="modal-body">
+    <form id="formSetPassword" class="form-grid">
+      <label style="grid-column:1/-1;">Nueva contraseña *
+        <input type="password" id="setPassInput" class="input" autocomplete="off" required>
+      </label>
+      <label style="grid-column:1/-1;">Confirmar contraseña *
+        <input type="password" id="setPassConfirm" class="input" autocomplete="off" required>
+      </label>
+      <p class="hint" style="grid-column:1/-1; margin:0;">Solo se guarda en este dispositivo. Si alguien no la sabe, siempre puede entrar como invitado.</p>
+      <div class="form-actions" style="justify-content:space-between;">
+        <button type="button" class="btn btn-danger" id="btnRemovePassword" style="display:none;">Quitar contraseña</button>
+        <button type="submit" class="btn btn-primary">Guardar</button>
       </div>
     </form>
   </div>

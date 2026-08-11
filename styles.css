@@ -223,6 +223,20 @@ input,select{font-family:inherit;}
 /* ---------- STOCK NEGATIVO ---------- */
 .stock-negative{color:var(--danger);}
 
+/* ---------- ROL INVITADO ---------- */
+/* Los invitados no ven precio de compra ni precio de marca, y no tienen
+   acceso a las pestañas de Inventario ni Configuración. */
+body.role-guest .nav-item[data-view="inventario"],
+body.role-guest .nav-item[data-view="config"]{display:none;}
+body.role-guest .price-guest-hide{display:none;}
+
+/* ---------- CONTRASEÑA POR MODO (barra lateral) ---------- */
+/* Por ahora, el botón para agregar contraseña solo aparece dentro de
+   Herramientas Manuales, y no se muestra a los invitados. */
+#btnAddPassword{display:none; background:none; border:none; cursor:pointer; font-size:12px; color:#9ca3af; text-align:left; padding:6px 0; font-family:inherit;}
+#btnAddPassword:hover{color:#fff;}
+body.modo-manual:not(.role-guest) #btnAddPassword{display:block;}
+
 /* ---------- INICIO: pantalla completa negro + naranja ---------- */
 body.inicio-theme .main-wrap{background:#0b0b0c;}
 body.inicio-theme .content{background:#0b0b0c;}
@@ -253,6 +267,49 @@ body.inicio-theme .nav-item.active{background:#fb923c; color:#0b0b0c;}
   text-transform:capitalize; letter-spacing:.01em;
 }
 .inicio-clock-card .hint{color:#9ca3af; font-size:15px; margin-top:22px;}
+
+.inicio-modos{
+  display:flex; flex-wrap:wrap; gap:16px; justify-content:center; margin-top:36px;
+}
+.inicio-modo-btn{
+  padding:16px 26px; border-radius:12px; font-size:17px; font-weight:700;
+  cursor:pointer; border:2px solid transparent; min-width:230px;
+  transition:filter .15s ease, transform .1s ease;
+}
+.inicio-modo-btn:hover{filter:brightness(1.1); transform:translateY(-1px);}
+.inicio-modo-manual{background:#dc2626; color:#fff; box-shadow:0 0 24px rgba(220,38,38,.35);}
+.inicio-modo-electrico{background:#2563eb; color:#fff; box-shadow:0 0 24px rgba(37,99,235,.35);}
+.inicio-modo-invitado{background:var(--success); color:#fff; box-shadow:0 0 24px rgba(22,163,74,.35);}
+
+.inicio-footer{
+  text-align:right; color:#9ca3af; font-size:22px; font-weight:800; letter-spacing:.02em;
+  padding:18px 32px 30px;
+}
+
+@media (max-width: 560px){
+  .inicio-footer{font-size:15px; padding:14px 18px 22px;}
+}
+
+/* ---------- MODO: HERRAMIENTAS MANUALES (rojo) ---------- */
+body.modo-manual .sidebar{background:#1a0d0d;}
+body.modo-manual .sidebar-brand{border-bottom-color:rgba(220,38,38,.25);}
+body.modo-manual .brand-text strong{color:#fca5a5;}
+body.modo-manual .nav-item.active{background:#dc2626; color:#fff;}
+body.modo-manual .nav-item:hover{background:rgba(220,38,38,.18); color:#fca5a5;}
+body.modo-manual .sidebar-footer{border-top-color:rgba(220,38,38,.25);}
+
+/* ---------- MODO: HERRAMIENTAS ELÉCTRICAS (azul) ---------- */
+body.modo-electrico .sidebar{background:#0d1526;}
+body.modo-electrico .sidebar-brand{border-bottom-color:rgba(37,99,235,.25);}
+body.modo-electrico .brand-text strong{color:#93c5fd;}
+body.modo-electrico .nav-item.active{background:#2563eb; color:#fff;}
+body.modo-electrico .nav-item:hover{background:rgba(37,99,235,.18); color:#93c5fd;}
+body.modo-electrico .sidebar-footer{border-top-color:rgba(37,99,235,.25);}
+
+@media (max-width: 560px){
+  .inicio-modos{margin-top:22px; gap:10px;}
+  .inicio-modo-btn{min-width:0; flex:1 1 auto; font-size:14px; padding:13px 14px;}
+}
 @media (max-width: 900px){
   .inicio-drill{width:110px; margin-bottom:10px;}
   .inicio-welcome{font-size:80px;}

@@ -6,17 +6,33 @@
    firebase-config.js) + LocalStorage como caché/respaldo local. Sin Google Sheets.
    ========================================================================= */
 
-const STORAGE_KEY = 'stockferre_catalogo_v1';
-// Fecha/hora del último registro de inventario por producto. Se guarda solo
-// en este dispositivo (LocalStorage) para no gastar la cuota de Firebase.
-const INV_UPDATES_KEY = 'stockferre_inv_actualizaciones_v1';
+// Claves "viejas" (de cuando la app tenía una sola base de datos, antes de
+// dividirse en Herramientas Manuales / Herramientas Eléctricas). Se usan solo
+// para migrar automáticamente esos datos hacia Herramientas Manuales una vez.
+const LEGACY_STORAGE_KEY = 'stockferre_catalogo_v1';
+const LEGACY_INV_UPDATES_KEY = 'stockferre_inv_actualizaciones_v1';
+
+// currentModo: 'manual' (Herramientas Manuales) o 'electrico' (Herramientas
+// Eléctricas). Cada modo tiene su PROPIA base de datos (LocalStorage y
+// Firebase separados) para que sean como "dos apps iguales" independientes.
+let currentModo = 'manual';
+// currentRole: 'admin' (dueño, entra con o sin contraseña) o 'guest'
+// (invitado: no ve precios de compra/marca ni puede entrar a Inventario o
+// Configuración).
+let currentRole = 'admin';
+
+function storageKey(){ return 'stockferre_catalogo_v1_' + currentModo; }
+function invUpdatesKey(){ return 'stockferre_inv_actualizaciones_v1_' + currentModo; }
 
 let db = null;
 let invUpdates = {};
 
 function loadInvUpdates(){
   try{
-    const raw = localStorage.getItem(INV_UPDATES_KEY);
+    let raw = localStorage.getItem(invUpdatesKey());
+    if(!raw && currentModo === 'manual'){
+      raw = localStorage.getItem(LEGACY_INV_UPDATES_KEY); // migración única
+    }
     invUpdates = raw ? JSON.parse(raw) : {};
   }catch(e){
     console.error('Error leyendo actualizaciones de inventario', e);
@@ -26,7 +42,7 @@ function loadInvUpdates(){
 
 function saveInvUpdates(){
   try{
-    localStorage.setItem(INV_UPDATES_KEY, JSON.stringify(invUpdates));
+    localStorage.setItem(invUpdatesKey(), JSON.stringify(invUpdates));
   }catch(e){
     console.error('Error guardando actualizaciones de inventario', e);
   }
@@ -75,8 +91,11 @@ function normalizeDB(obj){
 // Si Firebase está configurado, connectFirebase() la reemplaza/sincroniza después.
 function loadDB(){
   try{
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if(raw){ db = normalizeDB(JSON.parse(raw)); return; }
+    let raw = localStorage.getItem(storageKey());
+    if(!raw && currentModo === 'manual'){
+      raw = localStorage.getItem(LEGACY_STORAGE_KEY); // migración única
+    }
+    if(raw){ db = normalizeDB(JSON.parse(raw)); persistLocalCache(); return; }
   }catch(e){ console.error('Error leyendo LocalStorage', e); }
   db = defaultDB();
   persistLocalCache();
@@ -84,7 +103,7 @@ function loadDB(){
 
 function persistLocalCache(){
   try{
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(db));
+    localStorage.setItem(storageKey(), JSON.stringify(db));
   }catch(e){
     console.error('Error guardando en LocalStorage', e);
     toast('No se pudo guardar en el almacenamiento local (¿espacio lleno?)', 'error');
@@ -115,6 +134,16 @@ function saveDB(){
 let fbReady = false;
 let fbDocRef = null;
 let fbUnsub = null;
+
+// Cada modo se guarda en un documento de Firestore distinto para que sean
+// bases de datos completamente separadas dentro del mismo proyecto.
+function firebaseDocId(){ return 'inventario_' + currentModo; }
+
+function disconnectFirebase(){
+  if(fbUnsub){ try{ fbUnsub(); }catch(e){ /* ignorar */ } fbUnsub = null; }
+  fbReady = false;
+  fbDocRef = null;
+}
 
 function setSyncStatus(status){
   const el = document.getElementById('sidebarSyncStatus');
@@ -153,9 +182,9 @@ async function connectFirebase(){
 
   try{
     setSyncStatus('connecting');
-    firebase.initializeApp(firebaseConfig);
+    if(!firebase.apps || !firebase.apps.length){ firebase.initializeApp(firebaseConfig); }
     const fbFirestore = firebase.firestore();
-    fbDocRef = fbFirestore.collection('stockferre').doc('inventario');
+    fbDocRef = fbFirestore.collection('stockferre').doc(firebaseDocId());
     fbReady = true;
 
     const snap = await fbDocRef.get();
@@ -454,85 +483,6 @@ function handleVentaSubmit(e){
    4. VISTA: ESCÁNER / RESULTADO
    ------------------------------------------------------------------------- */
 
-// Sonido tipo "silbido" que suena cuando la cámara detecta un código (en
-// cualquiera de los 3 modos: numérico, alfanumérico o código de barras).
-// Generado con Web Audio API (sin archivos externos): un tono que sube y
-// baja de frecuencia durante 1 segundo, a volumen estándar.
-let detectAudioCtx = null;
-function getDetectAudioCtx(){
-  if(!detectAudioCtx){
-    try{ detectAudioCtx = new (window.AudioContext || window.webkitAudioContext)(); }
-    catch(e){ return null; }
-  }
-  if(detectAudioCtx.state === 'suspended') detectAudioCtx.resume().catch(()=>{});
-  return detectAudioCtx;
-}
-
-function playDetectionSound(){
-  const ctx = getDetectAudioCtx();
-  if(!ctx) return;
-  try{
-    const duration = 0.32; // silbido rápido
-    const now = ctx.currentTime;
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-    osc.type = 'sine';
-    // Silbido: la frecuencia sube y luego baja, pero mucho más rápido que antes
-    osc.frequency.setValueAtTime(900, now);
-    osc.frequency.exponentialRampToValueAtTime(1900, now + 0.13);
-    osc.frequency.exponentialRampToValueAtTime(1100, now + duration);
-    // Volumen estándar, con una pequeña rampa de entrada/salida para evitar "clics"
-    gain.gain.setValueAtTime(0.0001, now);
-    gain.gain.exponentialRampToValueAtTime(0.35, now + 0.025);
-    gain.gain.setValueAtTime(0.35, now + duration - 0.06);
-    gain.gain.exponentialRampToValueAtTime(0.0001, now + duration);
-    osc.connect(gain);
-    gain.connect(ctx.destination);
-    osc.start(now);
-    osc.stop(now + duration + 0.02);
-  }catch(e){ /* si el navegador bloquea audio, se ignora silenciosamente */ }
-}
-
-// Sonido tipo "taladro" (motor + traqueteo) que suena al cambiar de pestaña
-// en la barra de navegación. Volumen estándar y duración menor a 1 segundo.
-function playTabChangeSound(){
-  const ctx = getDetectAudioCtx();
-  if(!ctx) return;
-  try{
-    const duration = 0.42; // menos de 1 segundo
-    const now = ctx.currentTime;
-
-    // Tono grave y áspero, como el motor de un taladro
-    const osc = ctx.createOscillator();
-    osc.type = 'sawtooth';
-    osc.frequency.setValueAtTime(180, now);
-    osc.frequency.linearRampToValueAtTime(220, now + duration);
-
-    // Oscilador de modulación (tremolo rápido) que simula el "traqueteo" del taladro
-    const lfo = ctx.createOscillator();
-    lfo.type = 'square';
-    lfo.frequency.setValueAtTime(28, now);
-    const lfoGain = ctx.createGain();
-    lfoGain.gain.setValueAtTime(0.5, now);
-    lfo.connect(lfoGain);
-
-    const gain = ctx.createGain();
-    gain.gain.setValueAtTime(0.0001, now);
-    gain.gain.exponentialRampToValueAtTime(0.28, now + 0.03);
-    gain.gain.setValueAtTime(0.28, now + duration - 0.08);
-    gain.gain.exponentialRampToValueAtTime(0.0001, now + duration);
-    lfoGain.connect(gain.gain);
-
-    osc.connect(gain);
-    gain.connect(ctx.destination);
-
-    osc.start(now);
-    lfo.start(now);
-    osc.stop(now + duration + 0.02);
-    lfo.stop(now + duration + 0.02);
-  }catch(e){ /* si el navegador bloquea audio, se ignora silenciosamente */ }
-}
-
 // Baja automáticamente la pantalla hasta la tarjeta con la información del
 // producto detectado, para que se vea sin que el usuario tenga que hacer scroll.
 function scrollToScanResult(elementId){
@@ -583,8 +533,9 @@ function renderScanResultInto(elementId, codigo, context){
       <div class="sr-row"><span>Marca</span><strong>${escapeHtml(p.marca || '-')}</strong></div>
       <div class="sr-row"><span>Categoría</span><strong>${escapeHtml(p.categoria || '-')}</strong></div>
       ${stockRowHtml}
+      ${currentRole === 'guest' ? '' : `
       <div class="sr-row"><span>Precio de compra</span><strong>${fmtMoney(p.precioCompra)}</strong></div>
-      <div class="sr-row"><span>Precio de marca</span><strong>${fmtMoney(p.precioMarca)}</strong></div>
+      <div class="sr-row"><span>Precio de marca</span><strong>${fmtMoney(p.precioMarca)}</strong></div>`}
       <div class="sr-row"><span>Precio de venta</span><strong>${fmtMoney(p.precioVenta)}</strong></div>`;
 
   resultDiv.innerHTML = `
@@ -621,7 +572,6 @@ function handleScannedCode(codigo, fromCamera){
   if(scanContext === 'inventario'){
     handleInventoryScan(codigo);
     if(fromCamera){
-      playDetectionSound();
       scrollToScanResult('invScanResultBox');
     }
     return;
@@ -629,7 +579,6 @@ function handleScannedCode(codigo, fromCamera){
   renderScanResult(codigo);
   logScanHistory(codigo);
   if(fromCamera){
-    playDetectionSound();
     scrollToScanResult('scanResult');
   }
 }
@@ -1196,8 +1145,8 @@ function renderProductos(){
         <td>${escapeHtml(p.nombre)}</td>
         <td>${escapeHtml(p.marca || '-')}</td>
         <td>${p.categoria ? `<span class="badge badge-muted">${escapeHtml(p.categoria)}</span>` : '-'}</td>
-        <td>${fmtMoney(p.precioCompra)}</td>
-        <td>${fmtMoney(p.precioMarca)}</td>
+        <td class="price-guest-hide">${fmtMoney(p.precioCompra)}</td>
+        <td class="price-guest-hide">${fmtMoney(p.precioMarca)}</td>
         <td>${fmtMoney(p.precioVenta)}</td>
         <td>
           <button class="btn-icon" title="Editar" data-edit-product="${p.id}">✏️</button>
@@ -1538,6 +1487,10 @@ function updateInicioClock(){
 }
 
 function showView(name){
+  if(currentRole === 'guest' && (name === 'inventario' || name === 'config')){
+    toast('Los invitados no tienen acceso a esa sección', 'error');
+    name = 'productos';
+  }
   document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
   document.getElementById('view-' + name).classList.add('active');
   document.querySelectorAll('.nav-item[data-view]').forEach(btn=>{
@@ -1567,6 +1520,147 @@ function showView(name){
 function closeSidebarMobile(){
   document.getElementById('sidebar').classList.remove('open');
   document.getElementById('sidebarOverlay').classList.remove('open');
+}
+
+/* -------------------------------------------------------------------------
+   10b. MODO: HERRAMIENTAS MANUALES / HERRAMIENTAS ELÉCTRICAS
+   Son como "dos apps iguales" con bases de datos separadas (LocalStorage y
+   Firebase independientes — ver storageKey()/invUpdatesKey()/firebaseDocId()).
+   Cada modo puede tener su propia contraseña (guardada solo en este
+   dispositivo). Si no se sabe la contraseña, se puede entrar como invitado:
+   el invitado puede usar Herramientas Manuales y Eléctricas normalmente,
+   pero no ve precio de compra ni precio de marca, y no tiene acceso a las
+   pestañas de Inventario ni Configuración.
+   ------------------------------------------------------------------------- */
+const MODO_KEY = 'stockferre_modo_v1';
+const ROLE_KEY = 'stockferre_role_v1';
+const MODO_LABELS = { manual: 'Herramientas Manuales', electrico: 'Herramientas Eléctricas' };
+
+let pendingGateModo = null;
+
+function passKeyFor(modo){ return 'stockferre_pass_' + modo + '_v1'; }
+
+// Ofuscación simple (NO es seguridad real, solo evita que se vea la
+// contraseña "a simple vista" en LocalStorage). Suficiente para separar el
+// acceso entre los dos dueños del negocio.
+function encodePass(pass){ return btoa(unescape(encodeURIComponent('sf::' + pass))); }
+
+function hasPassword(modo){
+  try{ return !!localStorage.getItem(passKeyFor(modo)); }catch(e){ return false; }
+}
+function setPassword(modo, pass){
+  try{ localStorage.setItem(passKeyFor(modo), encodePass(pass)); }catch(e){}
+}
+function removePassword(modo){
+  try{ localStorage.removeItem(passKeyFor(modo)); }catch(e){}
+}
+function checkPassword(modo, pass){
+  try{ return localStorage.getItem(passKeyFor(modo)) === encodePass(pass); }catch(e){ return false; }
+}
+
+// Cambia la base de datos activa (LocalStorage + Firebase) al modo indicado.
+function switchModoData(modo){
+  disconnectFirebase();
+  currentModo = modo;
+  try{ localStorage.setItem(MODO_KEY, modo); }catch(e){}
+  document.body.classList.remove('modo-manual', 'modo-electrico');
+  document.body.classList.add('modo-' + modo);
+  loadDB();
+  loadInvUpdates();
+  setSyncStatus('local');
+  updateSidebarBrand();
+  updatePasswordButtonLabel();
+  connectFirebase();
+}
+
+// Punto de entrada desde los botones de Inicio (🔧 Manuales / ⚡ Eléctricas).
+// Si ese modo tiene contraseña puesta, pide la contraseña antes de entrar;
+// si no, entra directo como dueño (admin) — así es "por ahora".
+function attemptEnterModo(modo){
+  if(hasPassword(modo)){
+    openPasswordGate(modo);
+  }else{
+    currentRole = 'admin';
+    try{ localStorage.setItem(ROLE_KEY, 'admin'); }catch(e){}
+    enterModo(modo);
+  }
+}
+
+function enterModoAsGuest(modo){
+  currentRole = 'guest';
+  try{ localStorage.setItem(ROLE_KEY, 'guest'); }catch(e){}
+  enterModo(modo);
+}
+
+function enterModo(modo){
+  switchModoData(modo);
+  applyRoleUI();
+  showView('escaner');
+  const nombre = MODO_LABELS[modo];
+  toast(currentRole === 'guest' ? `Entraste a ${nombre} como invitado` : `Entraste a ${nombre}`, 'success');
+}
+
+function openPasswordGate(modo){
+  pendingGateModo = modo;
+  document.getElementById('gateModoLabel').textContent = MODO_LABELS[modo];
+  const input = document.getElementById('gatePassInput');
+  if(input) input.value = '';
+  openModal('modalPasswordGate');
+  setTimeout(()=>{ if(input) input.focus(); }, 150);
+}
+
+function applyRoleUI(){
+  document.body.classList.toggle('role-guest', currentRole === 'guest');
+}
+
+// Restaura modo/rol guardados al abrir la app (sin pedir contraseña de
+// nuevo: la contraseña solo se pide al elegir un modo desde Inicio).
+function restoreModo(){
+  let modo = 'manual', role = 'admin';
+  try{
+    modo = localStorage.getItem(MODO_KEY) || 'manual';
+    role = localStorage.getItem(ROLE_KEY) || 'admin';
+  }catch(e){}
+  currentModo = modo;
+  currentRole = role;
+  document.body.classList.remove('modo-manual', 'modo-electrico');
+  document.body.classList.add('modo-' + modo);
+  applyRoleUI();
+}
+
+function updateSidebarBrand(){
+  const strongEl = document.querySelector('.sidebar-brand .brand-text strong');
+  const smallEl = document.querySelector('.sidebar-brand .brand-text small');
+  if(strongEl) strongEl.textContent = MODO_LABELS[currentModo] || 'TIENDA 1';
+  if(smallEl) smallEl.textContent = currentRole === 'guest' ? '👤 Modo invitado' : 'Consulta de productos';
+}
+
+// El botón "🔒 Agregar contraseña" solo se muestra dentro de Herramientas
+// Manuales (por ahora) y solo para el dueño (no para invitados).
+function updatePasswordButtonLabel(){
+  const btn = document.getElementById('btnAddPassword');
+  if(!btn) return;
+  btn.textContent = hasPassword(currentModo) ? '🔒 Cambiar contraseña' : '🔒 Agregar contraseña';
+}
+
+function openSetPasswordModal(){
+  document.getElementById('setPassModoLabel').textContent = MODO_LABELS[currentModo];
+  document.getElementById('setPassInput').value = '';
+  document.getElementById('setPassConfirm').value = '';
+  document.getElementById('btnRemovePassword').style.display = hasPassword(currentModo) ? 'inline-block' : 'none';
+  openModal('modalSetPassword');
+}
+
+function handleSetPasswordSubmit(e){
+  e.preventDefault();
+  const p1 = document.getElementById('setPassInput').value;
+  const p2 = document.getElementById('setPassConfirm').value;
+  if(p1.length < 4){ toast('La contraseña debe tener al menos 4 caracteres', 'error'); return; }
+  if(p1 !== p2){ toast('Las contraseñas no coinciden', 'error'); return; }
+  setPassword(currentModo, p1);
+  toast(`Contraseña guardada para ${MODO_LABELS[currentModo]}`, 'success');
+  updatePasswordButtonLabel();
+  closeAllModals();
 }
 
 /* -------------------------------------------------------------------------
@@ -2169,7 +2263,6 @@ function setupEventListeners(){
   // Navegación
   document.querySelectorAll('.nav-item[data-view]').forEach(btn=>{
     btn.addEventListener('click', ()=>{
-      playTabChangeSound();
       showView(btn.dataset.view);
     });
   });
@@ -2180,6 +2273,44 @@ function setupEventListeners(){
     document.getElementById('sidebarOverlay').classList.add('open');
   });
   document.getElementById('sidebarOverlay').addEventListener('click', closeSidebarMobile);
+
+  // Botones de Inicio: Herramientas Manuales (rojo) / Herramientas Eléctricas (azul) / Invitado (verde)
+  document.getElementById('btnModoManual').addEventListener('click', ()=> attemptEnterModo('manual'));
+  document.getElementById('btnModoElectrico').addEventListener('click', ()=> attemptEnterModo('electrico'));
+  document.getElementById('btnModoInvitado').addEventListener('click', ()=> openModal('modalGuestChoice'));
+  document.getElementById('btnGuestManual').addEventListener('click', ()=>{ closeAllModals(); enterModoAsGuest('manual'); });
+  document.getElementById('btnGuestElectrico').addEventListener('click', ()=>{ closeAllModals(); enterModoAsGuest('electrico'); });
+
+  // Puerta de contraseña al entrar a un modo que tiene contraseña puesta
+  document.getElementById('formPasswordGate').addEventListener('submit', (e)=>{
+    e.preventDefault();
+    const val = document.getElementById('gatePassInput').value;
+    if(checkPassword(pendingGateModo, val)){
+      currentRole = 'admin';
+      try{ localStorage.setItem(ROLE_KEY, 'admin'); }catch(err){}
+      closeAllModals();
+      enterModo(pendingGateModo);
+    }else{
+      toast('Contraseña incorrecta', 'error');
+    }
+  });
+  document.getElementById('btnGateAsGuest').addEventListener('click', ()=>{
+    const modo = pendingGateModo;
+    closeAllModals();
+    enterModoAsGuest(modo);
+  });
+
+  // Agregar/cambiar/quitar contraseña (por ahora, dentro de Herramientas Manuales)
+  document.getElementById('btnAddPassword').addEventListener('click', openSetPasswordModal);
+  document.getElementById('formSetPassword').addEventListener('submit', handleSetPasswordSubmit);
+  document.getElementById('btnRemovePassword').addEventListener('click', ()=>{
+    confirmDialog('Quitar contraseña', `¿Seguro que quieres quitar la contraseña de ${MODO_LABELS[currentModo]}?`, ()=>{
+      removePassword(currentModo);
+      toast('Contraseña eliminada', 'success');
+      updatePasswordButtonLabel();
+      closeAllModals();
+    });
+  });
 
   // Cerrar modales
   document.querySelectorAll('[data-close-modal]').forEach(btn=>{
@@ -2341,6 +2472,7 @@ function setupEventListeners(){
 }
 
 function init(){
+  restoreModo(); // decide qué modo/rol estaba activo ANTES de cargar datos
   loadDB();
   loadInvUpdates();
   setupEventListeners();
@@ -2348,6 +2480,8 @@ function init(){
   updateInicioClock();
   setInterval(updateInicioClock, 1000);
   updateSidebarProductCount();
+  updateSidebarBrand();
+  updatePasswordButtonLabel();
   connectFirebase(); // no bloquea el arranque; si no está configurado, sigue todo local
 }
 

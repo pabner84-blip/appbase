@@ -4,6 +4,9 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>TIENDA 1 — Consulta de Productos</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Alfa+Slab+One&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -70,7 +73,7 @@
         <div class="inicio-modos">
           <button class="inicio-modo-btn inicio-modo-manual" id="btnModoManual">🔧 Herramientas Manuales</button>
           <button class="inicio-modo-btn inicio-modo-electrico" id="btnModoElectrico">⚡ Herramientas Eléctricas</button>
-          <button class="inicio-modo-btn inicio-modo-invitado" id="btnModoInvitado">👤 Entrar como invitado</button>
+          <button class="inicio-modo-btn inicio-modo-invitado" id="btnModoInvitado">👤 INGRESAR</button>
         </div>
       </div>
       <div class="inicio-footer">Creado por Abner Pérez</div>
@@ -119,16 +122,16 @@
       <div class="toolbar">
         <input type="text" id="prodSearch" class="input" placeholder="🔍 Buscar por nombre, código o marca...">
         <select id="prodFilterCategoria" class="input select"><option value="">Todas las categorías</option></select>
-        <button class="btn btn-primary" id="btnNewProduct">+ Nuevo producto</button>
-        <button class="btn btn-secondary" id="btnExportProducts">📤 Exportar CSV</button>
-        <button class="btn btn-secondary" id="btnImportProducts">📥 Importar CSV</button>
+        <button class="btn btn-primary admin-only" id="btnNewProduct">+ Nuevo producto</button>
+        <button class="btn btn-secondary admin-only" id="btnExportProducts">📤 Exportar CSV</button>
+        <button class="btn btn-secondary admin-only" id="btnImportProducts">📥 Importar CSV</button>
       </div>
       <div class="table-wrap">
         <table class="table" id="productsTable">
           <thead>
             <tr>
               <th>Código</th><th>Cód. Barras</th><th>Descripción</th><th>Marca</th><th>Categoría</th>
-              <th class="price-guest-hide">P. Compra</th><th class="price-guest-hide">P. Marca</th><th>P. Venta</th><th>Acciones</th>
+              <th class="price-guest-hide">P. Compra</th><th class="price-guest-hide">P. Marca</th><th>P. Venta</th><th class="admin-only">Acciones</th>
             </tr>
           </thead>
           <tbody></tbody>
@@ -140,7 +143,7 @@
     <section class="view" id="view-categorias">
       <div class="toolbar">
         <input type="text" id="newCategoryInput" class="input" placeholder="Nombre de nueva categoría...">
-        <button class="btn btn-primary" id="btnAddCategory">+ Agregar categoría</button>
+        <button class="btn btn-primary admin-only" id="btnAddCategory">+ Agregar categoría</button>
       </div>
       <div class="cards-grid" id="categoriesGrid"></div>
     </section>
@@ -150,7 +153,7 @@
       <div class="toolbar">
         <button class="btn btn-primary" id="btnNuevaVenta">➕ Nueva venta</button>
         <button class="btn btn-secondary" id="btnExportVentas">📤 Exportar CSV</button>
-        <button class="btn btn-secondary" id="btnImportVentas">📥 Importar CSV</button>
+        <button class="btn btn-secondary admin-only" id="btnImportVentas">📥 Importar CSV</button>
       </div>
       <p class="hint" id="ventasSummary" style="margin-bottom:12px;">0 ventas</p>
       <div class="table-wrap">
@@ -158,7 +161,7 @@
           <thead>
             <tr>
               <th>Fecha</th><th>Código</th><th>Producto</th><th>Cant.</th>
-              <th>Precio</th><th>Total</th><th>Pago</th><th>Acciones</th>
+              <th>Precio</th><th>Total</th><th>Pago</th><th class="admin-only">Acciones</th>
             </tr>
           </thead>
           <tbody></tbody>
@@ -324,6 +327,12 @@
           <button type="button" class="scan-tab" data-payment-method="qr">📱 QR</button>
         </div>
       </label>
+      <label id="vModoDestinoLabel" style="grid-column:1/-1; display:none;">Registrar venta en
+        <select id="vModoDestino" class="input select">
+          <option value="manual">🔧 Herramientas Manuales</option>
+          <option value="electrico">⚡ Herramientas Eléctricas</option>
+        </select>
+      </label>
       <div class="form-actions">
         <button type="submit" class="btn btn-success">Registrar venta</button>
         <button type="button" class="btn btn-secondary" data-close-modal>Cancelar</button>
@@ -442,21 +451,6 @@
         <button type="submit" class="btn btn-primary">Ingresar</button>
       </div>
     </form>
-  </div>
-</div>
-
-<!-- Modal: elegir a cuál app entrar como invitado -->
-<div class="modal modal-sm" id="modalGuestChoice">
-  <div class="modal-header">
-    <h3>👤 Entrar como invitado</h3>
-    <button class="modal-close" data-close-modal>✕</button>
-  </div>
-  <div class="modal-body">
-    <p class="hint" style="margin-top:0;">Como invitado puedes usar Productos, Ventas, Categorías e Historial, pero no verás precio de compra ni precio de marca, y no tendrás acceso a Inventario ni a Configuración.</p>
-    <div class="form-actions" style="justify-content:center; flex-wrap:wrap;">
-      <button type="button" class="btn" style="background:var(--success); color:#fff;" id="btnGuestManual">🔧 Herramientas Manuales</button>
-      <button type="button" class="btn" style="background:var(--success); color:#fff;" id="btnGuestElectrico">⚡ Herramientas Eléctricas</button>
-    </div>
   </div>
 </div>
 

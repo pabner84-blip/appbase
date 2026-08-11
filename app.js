@@ -90,6 +90,7 @@ function normalizeDB(obj){
 // Carga inicial: siempre desde LocalStorage (instantáneo, funciona sin internet).
 // Si Firebase está configurado, connectFirebase() la reemplaza/sincroniza después.
 function loadDB(){
+  if(currentModo === 'invitado'){ db = buildGuestDB(); return; } // vista combinada de ambos modos
   try{
     let raw = localStorage.getItem(storageKey());
     if(!raw && currentModo === 'manual'){
@@ -102,6 +103,7 @@ function loadDB(){
 }
 
 function persistLocalCache(){
+  if(currentModo === 'invitado') return; // el invitado no tiene base propia
   try{
     localStorage.setItem(storageKey(), JSON.stringify(db));
   }catch(e){
@@ -115,6 +117,7 @@ function persistLocalCache(){
 // El historial de escaneos/búsquedas se queda solo en este dispositivo (no se
 // sube) para no gastar la cuota gratuita de Firebase con cada escaneo.
 function saveDB(){
+  if(currentModo === 'invitado') return; // el invitado no escribe sobre las bases de cada modo
   persistLocalCache();
   if(fbReady && fbDocRef){
     const { historialEscaneos, historialBusquedas, historialInventario, ...syncData } = db;
@@ -124,6 +127,122 @@ function saveDB(){
       console.error('Error guardando en Firebase', err);
       setSyncStatus('error');
     });
+  }
+}
+
+/* -------------------------------------------------------------------------
+   1a. MODO INVITADO: catálogo combinado de ambos modos + escritura dirigida
+   El invitado NO tiene base de datos propia: lee los productos de
+   Herramientas Manuales y Herramientas Eléctricas y los combina en una vista
+   única. Las ventas que registra se guardan en la base del modo al que
+   pertenece el producto (o el que elija para "OTRO"), para que el dueño las
+   vea en la pestaña Ventas de cada modo.
+   ------------------------------------------------------------------------- */
+
+// Historiales de la sesión del invitado (solo en memoria: se borran al salir)
+let guestSessionScans = [];
+let guestSessionSearches = [];
+let guestSessionInventory = [];
+
+// Lee la base completa de UN modo concreto desde LocalStorage.
+function loadModoDB(modo){
+  let raw = null;
+  try{ raw = localStorage.getItem('stockferre_catalogo_v1_' + modo); }catch(e){}
+  if(!raw && modo === 'manual'){ try{ raw = localStorage.getItem(LEGACY_STORAGE_KEY); }catch(e){} }
+  if(raw){ try{ return normalizeDB(JSON.parse(raw)); }catch(e){ return defaultDB(); } }
+  return defaultDB();
+}
+
+// Arma la vista combinada del invitado: productos de ambos modos (marcados
+// con modoOrigin para saber a qué base pertenece cada uno) y ventas unidas.
+function buildGuestDB(){
+  const m = loadModoDB('manual');
+  const e = loadModoDB('electrico');
+  const merged = defaultDB();
+  merged.productos = [
+    ...m.productos.map(p => Object.assign({}, p, { modoOrigin: 'manual' })),
+    ...e.productos.map(p => Object.assign({}, p, { modoOrigin: 'electrico' }))
+  ];
+  merged.categorias = Array.from(new Set(m.categorias.concat(e.categorias).map(c => String(c||'').trim()).filter(Boolean)));
+  merged.ventas = m.ventas.concat(e.ventas).sort((a,b)=> new Date(b.fecha) - new Date(a.fecha));
+  merged.historialEscaneos = guestSessionScans;
+  merged.historialBusquedas = guestSessionSearches;
+  merged.historialInventario = guestSessionInventory;
+  return merged;
+}
+
+// Busca por código/código de barras DENTRO de una base específica.
+function findProductoInDB(dbObj, codigo){
+  const c = normalize(codigo);
+  if(!c) return null;
+  return dbObj.productos.find(p => normalize(p.codigo) === c || (p.codigoBarras && normalize(p.codigoBarras) === c)) || null;
+}
+
+// Guarda la base de UN modo concreto (LocalStorage + Firebase), sin depender
+// del modo actual. Lo usa el invitado para que sus ventas queden en la base
+// correcta (Manuales o Eléctricas).
+function persistModoDB(modo, dbObj){
+  try{ localStorage.setItem('stockferre_catalogo_v1_' + modo, JSON.stringify(dbObj)); }catch(e){}
+  if(typeof firebase !== 'undefined' && typeof firebaseConfig !== 'undefined' && firebaseConfig.apiKey){
+    try{
+      if(!firebase.apps || !firebase.apps.length){ firebase.initializeApp(firebaseConfig); }
+      const ref = firebase.firestore().collection('stockferre').doc('inventario_' + modo);
+      const { historialEscaneos, historialBusquedas, historialInventario, ...syncData } = dbObj;
+      ref.set(syncData).then(()=>{
+        setSyncStatus('synced');
+      }).catch(err=>{
+        console.error('Error guardando en Firebase', err);
+        setSyncStatus('error');
+      });
+    }catch(err){
+      console.error('Error guardando en Firebase', err);
+    }
+  }
+}
+
+let guestUnsubs = [];
+function disconnectGuestFirebase(){
+  guestUnsubs.forEach(u => { try{ u(); }catch(e){ /* ignorar */ } });
+  guestUnsubs = [];
+}
+
+// En modo invitado conecta a Firestore de ambos modos (lectura + escucha)
+// para que el invitado vea datos recientes; las escrituras van por
+// persistModoDB() al documento del modo correcto.
+function connectGuestFirebase(){
+  if(typeof firebaseConfig === 'undefined' || !firebaseConfig.apiKey || !firebaseConfig.projectId) return;
+  if(typeof firebase === 'undefined') return;
+  try{
+    if(!firebase.apps || !firebase.apps.length){ firebase.initializeApp(firebaseConfig); }
+    const fbFirestore = firebase.firestore();
+    ['manual','electrico'].forEach(modo => {
+      const ref = fbFirestore.collection('stockferre').doc('inventario_' + modo);
+      ref.get().then(snap=>{
+        if(snap.exists){
+          const prev = loadModoDB(modo);
+          const remote = normalizeDB(snap.data());
+          remote.historialEscaneos = prev.historialEscaneos;
+          remote.historialBusquedas = prev.historialBusquedas;
+          remote.historialInventario = prev.historialInventario;
+          try{ localStorage.setItem('stockferre_catalogo_v1_' + modo, JSON.stringify(remote)); }catch(e){}
+          if(currentModo === 'invitado'){ db = buildGuestDB(); rerenderCurrentView(); }
+        }
+      }).catch(()=>{ /* local sigue funcionando */ });
+      const unsub = ref.onSnapshot(snap=>{
+        if(snap.metadata.hasPendingWrites) return;
+        if(!snap.exists) return;
+        const prev = loadModoDB(modo);
+        const remote = normalizeDB(snap.data());
+        remote.historialEscaneos = prev.historialEscaneos;
+        remote.historialBusquedas = prev.historialBusquedas;
+        remote.historialInventario = prev.historialInventario;
+        try{ localStorage.setItem('stockferre_catalogo_v1_' + modo, JSON.stringify(remote)); }catch(e){}
+        if(currentModo === 'invitado'){ db = buildGuestDB(); rerenderCurrentView(); }
+      }, ()=>{ /* ignorar */ });
+      guestUnsubs.push(unsub);
+    });
+  }catch(err){
+    console.error('No se pudo conectar a Firebase en modo invitado', err);
   }
 }
 
@@ -359,6 +478,14 @@ function saveVenta(data){
     metodoPago: data.metodoPago,
     fecha: todayISO()
   };
+
+  // En modo invitado la venta se guarda en la base del modo al que pertenece
+  // el producto (Manuales o Eléctricas), no en una base de invitado.
+  if(currentModo === 'invitado'){
+    guestCommitVenta(venta, data, cantidad);
+    return venta;
+  }
+
   db.ventas.unshift(venta);
 
   // Descuenta del stock del producto (si es un producto real, no "OTRO").
@@ -370,6 +497,27 @@ function saveVenta(data){
 
   saveDB();
   return venta;
+}
+
+// El invitado vende productos de ambos modos: la venta se escribe en la base
+// del modo destino (por defecto, el modo del producto; para "OTRO" lo elige
+// el vendedor) y se descuenta el stock de esa base.
+function guestCommitVenta(venta, data, cantidad){
+  const modo = data.modoDestino || 'manual';
+  const dbObj = loadModoDB(modo);
+  const p = findProductoInDB(dbObj, data.codigo);
+  if(p){
+    p.stock = (p.stock || 0) - cantidad;
+  }
+  dbObj.contador = dbObj.contador || { producto: 1, venta: 1 };
+  dbObj.contador.venta = dbObj.contador.venta || 1;
+  const n = dbObj.contador.venta++;
+  dbObj.ventas.unshift({ ...venta, id: 'v' + n + '_' + Date.now().toString(36) });
+  persistModoDB(modo, dbObj);
+  // Reconstruye la vista combinada para que la venta aparezca al instante
+  db = buildGuestDB();
+  renderVentas();
+  renderProductos();
 }
 
 function deleteVenta(id){
@@ -401,6 +549,19 @@ function recalcVentaPrecioUnitario(){
   }
 }
 
+// En modo invitado muestra de dónde sale el producto y hacia qué base va la
+// venta. Para productos reales queda fijo (según el modo del producto); para
+// "OTRO" el vendedor elige. Para el dueño no se muestra nada.
+function updateVentaDestinoUI(modo, locked){
+  const label = document.getElementById('vModoDestinoLabel');
+  const sel = document.getElementById('vModoDestino');
+  if(!label || !sel) return;
+  if(currentModo !== 'invitado'){ label.style.display = 'none'; return; }
+  label.style.display = '';
+  sel.value = modo;
+  sel.disabled = !!locked;
+}
+
 function openVentaModal(producto){
   document.getElementById('vEsOtro').value = '0';
   document.getElementById('vNombreDisplayBox').style.display = '';
@@ -414,6 +575,7 @@ function openVentaModal(producto){
     btn.classList.toggle('active', btn.dataset.paymentMethod === 'efectivo');
   });
   document.getElementById('vMetodoPago').value = 'efectivo';
+  updateVentaDestinoUI(producto.modoOrigin || 'manual', true);
   recalcVentaPrecioUnitario();
   openModal('modalVenta');
 }
@@ -434,6 +596,7 @@ function openVentaModalOtro(){
     btn.classList.toggle('active', btn.dataset.paymentMethod === 'efectivo');
   });
   document.getElementById('vMetodoPago').value = 'efectivo';
+  updateVentaDestinoUI('manual', false);
   recalcVentaPrecioUnitario();
   openModal('modalVenta');
   setTimeout(()=> document.getElementById('vNombreOtroInput').focus(), 50);
@@ -472,7 +635,8 @@ function handleVentaSubmit(e){
     nombre = document.getElementById('vNombre').value;
   }
 
-  saveVenta({ codigo, nombre, cantidad, total, metodoPago });
+  const modoDestino = document.getElementById('vModoDestino') ? document.getElementById('vModoDestino').value : 'manual';
+  saveVenta({ codigo, nombre, cantidad, total, metodoPago, modoDestino });
   closeAllModals();
   renderInventario();
   renderProductos();
@@ -507,11 +671,13 @@ function renderScanResultInto(elementId, codigo, context){
     resultDiv.innerHTML = `
       <div class="scan-not-found">
         ⚠️ No se encontró ningún producto con el código <strong>${escapeHtml(codigo)}</strong>.
+        ${currentRole === 'guest' ? '' : `
         <div style="margin-top:10px;">
           <button class="btn btn-primary btn-sm" id="btnCreateFromScan_${elementId}">+ Crear producto con este código</button>
-        </div>
+        </div>`}
       </div>`;
-    document.getElementById(`btnCreateFromScan_${elementId}`).addEventListener('click', ()=>{
+    const btnCreate = document.getElementById(`btnCreateFromScan_${elementId}`);
+    if(btnCreate) btnCreate.addEventListener('click', ()=>{
       if(context === 'inventario') closeInventarioScan();
       openProductModal(null, codigo);
     });
@@ -544,12 +710,13 @@ function renderScanResultInto(elementId, codigo, context){
       <div class="sr-row"><span>Código</span><strong>${escapeHtml(p.codigo)}</strong></div>
       ${detailRowsHtml}
       <div style="margin-top:12px; display:flex; gap:8px; flex-wrap:wrap;">
-        <button class="btn btn-secondary btn-sm" id="btnEditFromScan_${elementId}">✏️ Editar producto</button>
+        ${currentRole === 'guest' ? '' : `<button class="btn btn-secondary btn-sm" id="btnEditFromScan_${elementId}">✏️ Editar producto</button>`}
         ${secondBtnHtml}
       </div>
     </div>`;
 
-  document.getElementById(`btnEditFromScan_${elementId}`).addEventListener('click', ()=>{
+  const btnEdit = document.getElementById(`btnEditFromScan_${elementId}`);
+  if(btnEdit) btnEdit.addEventListener('click', ()=>{
     openProductModal(p);
   });
   document.getElementById(`btnActionFromScan_${elementId}`).addEventListener('click', ()=>{
@@ -565,6 +732,52 @@ function renderScanResultInto(elementId, codigo, context){
 // scanContext: 'lookup' (pestaña Escanear normal) o 'inventario' (registro de
 // cantidad desde la pestaña Inventario) — cambia qué pasa al detectar un código
 let scanContext = 'lookup';
+
+/* -------------------------------------------------------------------------
+   4b. SONIDOS DEL ESCÁNER (Web Audio API — sin archivos de audio)
+   Un pitido corto y agudo cuando el OCR (numérico/alfanumérico) detecta un
+   código, y el "beep-beep" clásico de lector de código de barras cuando lo
+   detecta ZXing. Se sintetizan al instante, así que la app sigue funcionando
+   sin internet.
+   ------------------------------------------------------------------------- */
+let audioCtx = null;
+function ensureAudioCtx(){
+  if(!audioCtx){
+    try{ audioCtx = new (window.AudioContext || window.webkitAudioContext)(); }catch(e){}
+  }
+  if(audioCtx && audioCtx.state === 'suspended'){ try{ audioCtx.resume(); }catch(e){} }
+  return audioCtx;
+}
+
+function playTone(freq, delay, dur, vol, type){
+  const ctx = ensureAudioCtx();
+  if(!ctx) return;
+  const t0 = ctx.currentTime + delay;
+  const osc = ctx.createOscillator();
+  const gain = ctx.createGain();
+  osc.type = type || 'sine';
+  osc.frequency.setValueAtTime(freq, t0);
+  gain.gain.setValueAtTime(0.0001, t0);
+  gain.gain.exponentialRampToValueAtTime(vol || 0.2, t0 + 0.01);
+  gain.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+  osc.connect(gain);
+  gain.connect(ctx.destination);
+  osc.start(t0);
+  osc.stop(t0 + dur + 0.02);
+}
+
+// Pitido corto y agudo: código numérico/alfanumérico detectado por el OCR.
+function playOcrBeep(){
+  playTone(1760, 0, 0.09, 0.16, 'sine');
+  playTone(2640, 0.02, 0.06, 0.08, 'sine');
+}
+
+// "Beep-beep" clásico de los lectores de código de barras de mano (el sonido
+// más común de caja registradora): dos tonos rápidos, el segundo más grave.
+function playBarcodeBeep(){
+  playTone(2000, 0, 0.10, 0.18, 'square');
+  playTone(1400, 0.13, 0.14, 0.18, 'square');
+}
 
 function handleScannedCode(codigo, fromCamera){
   codigo = String(codigo).trim();
@@ -689,7 +902,7 @@ function renderVentas(){
   const summary = document.getElementById('ventasSummary');
 
   if(db.ventas.length === 0){
-    tbody.innerHTML = `<tr class="empty-row"><td colspan="7">Todavía no registraste ninguna venta.</td></tr>`;
+    tbody.innerHTML = `<tr class="empty-row"><td colspan="${currentRole === 'guest' ? 7 : 8}">Todavía no registraste ninguna venta.</td></tr>`;
     summary.textContent = '0 ventas';
     return;
   }
@@ -703,7 +916,7 @@ function renderVentas(){
       <td>${fmtMoney(v.precioUnitario)}</td>
       <td><strong>${fmtMoney(v.total)}</strong></td>
       <td>${PAYMENT_LABELS[v.metodoPago] || v.metodoPago}</td>
-      <td><button class="btn-icon" title="Eliminar" data-delete-venta="${v.id}">🗑️</button></td>
+      ${currentRole === 'guest' ? '' : `<td><button class="btn-icon" title="Eliminar" data-delete-venta="${v.id}">🗑️</button></td>`}
     </tr>
   `).join('');
 
@@ -1136,7 +1349,7 @@ function renderProductos(){
 
   const tbody = document.querySelector('#productsTable tbody');
   if(list.length === 0){
-    tbody.innerHTML = `<tr class="empty-row"><td colspan="9">No hay productos que coincidan.</td></tr>`;
+    tbody.innerHTML = `<tr class="empty-row"><td colspan="${currentRole === 'guest' ? 8 : 9}">No hay productos que coincidan.</td></tr>`;
   }else{
     tbody.innerHTML = list.map(p => `
       <tr>
@@ -1148,10 +1361,11 @@ function renderProductos(){
         <td class="price-guest-hide">${fmtMoney(p.precioCompra)}</td>
         <td class="price-guest-hide">${fmtMoney(p.precioMarca)}</td>
         <td>${fmtMoney(p.precioVenta)}</td>
+        ${currentRole === 'guest' ? '' : `
         <td>
           <button class="btn-icon" title="Editar" data-edit-product="${p.id}">✏️</button>
           <button class="btn-icon" title="Eliminar" data-delete-product="${p.id}">🗑️</button>
-        </td>
+        </td>`}
       </tr>
     `).join('');
   }
@@ -1523,18 +1737,23 @@ function closeSidebarMobile(){
 }
 
 /* -------------------------------------------------------------------------
-   10b. MODO: HERRAMIENTAS MANUALES / HERRAMIENTAS ELÉCTRICAS
-   Son como "dos apps iguales" con bases de datos separadas (LocalStorage y
-   Firebase independientes — ver storageKey()/invUpdatesKey()/firebaseDocId()).
-   Cada modo puede tener su propia contraseña (guardada solo en este
-   dispositivo). Si no se sabe la contraseña, se puede entrar como invitado:
-   el invitado puede usar Herramientas Manuales y Eléctricas normalmente,
-   pero no ve precio de compra ni precio de marca, y no tiene acceso a las
-   pestañas de Inventario ni Configuración.
+   10b. MODO: HERRAMIENTAS MANUALES / HERRAMIENTAS ELÉCTRICAS / INVITADO
+   Manuales y Eléctricas son como "dos apps iguales" con bases de datos
+   separadas (LocalStorage y Firebase independientes — ver
+   storageKey()/invUpdatesKey()/firebaseDocId()). Cada modo puede tener su
+   propia contraseña (guardada solo en este dispositivo), configurable desde
+   la barra lateral de cada uno.
+
+   El INVITADO no aparece en la pantalla principal: entra desde la puerta de
+   contraseña ("Entrar como invitado") y va directo a su menú (barra lateral
+   naranja), que combina los productos de Manuales y Eléctricas. El invitado
+   no ve precio de compra ni de marca, no puede editar productos, y no tiene
+   acceso a Inventario ni Configuración. Las ventas que registra se guardan
+   en la base del modo al que pertenece el producto (ver guestCommitVenta).
    ------------------------------------------------------------------------- */
 const MODO_KEY = 'stockferre_modo_v1';
 const ROLE_KEY = 'stockferre_role_v1';
-const MODO_LABELS = { manual: 'Herramientas Manuales', electrico: 'Herramientas Eléctricas' };
+const MODO_LABELS = { manual: 'Herramientas Manuales', electrico: 'Herramientas Eléctricas', invitado: 'Modo Invitado' };
 
 let pendingGateModo = null;
 
@@ -1559,24 +1778,37 @@ function checkPassword(modo, pass){
 }
 
 // Cambia la base de datos activa (LocalStorage + Firebase) al modo indicado.
+// 'invitado' no se guarda como último modo: es una sesión temporal.
 function switchModoData(modo){
   disconnectFirebase();
+  disconnectGuestFirebase();
   currentModo = modo;
-  try{ localStorage.setItem(MODO_KEY, modo); }catch(e){}
-  document.body.classList.remove('modo-manual', 'modo-electrico');
+  if(modo !== 'invitado'){ try{ localStorage.setItem(MODO_KEY, modo); }catch(e){} }
+  document.body.classList.remove('modo-manual', 'modo-electrico', 'modo-invitado');
   document.body.classList.add('modo-' + modo);
   loadDB();
   loadInvUpdates();
   setSyncStatus('local');
   updateSidebarBrand();
   updatePasswordButtonLabel();
-  connectFirebase();
+  if(modo === 'invitado') connectGuestFirebase();
+  else connectFirebase();
 }
 
 // Punto de entrada desde los botones de Inicio (🔧 Manuales / ⚡ Eléctricas).
 // Si ese modo tiene contraseña puesta, pide la contraseña antes de entrar;
 // si no, entra directo como dueño (admin) — así es "por ahora".
 function attemptEnterModo(modo){
+  // Un invitado nunca puede "colarse" como dueño: si el modo no tiene
+  // contraseña, no hay puerta por la que entrar como administrador.
+  if(currentRole === 'guest'){
+    if(hasPassword(modo)){
+      openPasswordGate(modo);
+    }else{
+      toast('Este modo no tiene contraseña. Pídele la contraseña al dueño.', 'warning');
+    }
+    return;
+  }
   if(hasPassword(modo)){
     openPasswordGate(modo);
   }else{
@@ -1586,18 +1818,26 @@ function attemptEnterModo(modo){
   }
 }
 
-function enterModoAsGuest(modo){
+// El invitado ya no elige a cuál app entrar: entra directo al menú de
+// invitado, que combina los productos de Manuales y Eléctricas.
+function enterModoAsGuest(){
+  guestSessionScans = [];
+  guestSessionSearches = [];
+  guestSessionInventory = [];
   currentRole = 'guest';
-  try{ localStorage.setItem(ROLE_KEY, 'guest'); }catch(e){}
-  enterModo(modo);
+  try{ localStorage.removeItem(ROLE_KEY); }catch(e){}
+  enterModo('invitado');
 }
 
 function enterModo(modo){
   switchModoData(modo);
   applyRoleUI();
   showView('escaner');
-  const nombre = MODO_LABELS[modo];
-  toast(currentRole === 'guest' ? `Entraste a ${nombre} como invitado` : `Entraste a ${nombre}`, 'success');
+  if(currentRole === 'guest'){
+    toast('Entraste al modo invitado', 'success');
+  }else{
+    toast(`Entraste a ${MODO_LABELS[modo]}`, 'success');
+  }
 }
 
 function openPasswordGate(modo){
@@ -1613,17 +1853,16 @@ function applyRoleUI(){
   document.body.classList.toggle('role-guest', currentRole === 'guest');
 }
 
-// Restaura modo/rol guardados al abrir la app (sin pedir contraseña de
-// nuevo: la contraseña solo se pide al elegir un modo desde Inicio).
+// Restaura el modo guardado al abrir la app (sin pedir contraseña de nuevo:
+// la contraseña solo se pide al elegir un modo desde Inicio). La app siempre
+// abre como dueño en la pantalla principal: el modo invitado no se recuerda.
 function restoreModo(){
-  let modo = 'manual', role = 'admin';
-  try{
-    modo = localStorage.getItem(MODO_KEY) || 'manual';
-    role = localStorage.getItem(ROLE_KEY) || 'admin';
-  }catch(e){}
+  let modo = 'manual';
+  try{ modo = localStorage.getItem(MODO_KEY) || 'manual'; }catch(e){}
+  if(modo === 'invitado') modo = 'manual';
   currentModo = modo;
-  currentRole = role;
-  document.body.classList.remove('modo-manual', 'modo-electrico');
+  currentRole = 'admin';
+  document.body.classList.remove('modo-manual', 'modo-electrico', 'modo-invitado');
   document.body.classList.add('modo-' + modo);
   applyRoleUI();
 }
@@ -1635,8 +1874,8 @@ function updateSidebarBrand(){
   if(smallEl) smallEl.textContent = currentRole === 'guest' ? '👤 Modo invitado' : 'Consulta de productos';
 }
 
-// El botón "🔒 Agregar contraseña" solo se muestra dentro de Herramientas
-// Manuales (por ahora) y solo para el dueño (no para invitados).
+// El botón "🔒 Agregar contraseña" se muestra dentro de Manuales y Eléctricas
+// (dueño), y no para invitados.
 function updatePasswordButtonLabel(){
   const btn = document.getElementById('btnAddPassword');
   if(!btn) return;
@@ -1857,6 +2096,7 @@ let ocrStarting = false;
 
 async function startOcrScanner(){
   if(ocrActive || ocrStarting) return;
+  ensureAudioCtx(); // desbloquea el audio dentro del gesto que abrió la cámara
   ocrStarting = true;
 
   if(typeof Tesseract === 'undefined'){
@@ -1972,6 +2212,7 @@ async function runOcrCapture(){
       if(!(window.__lastOcrCode === best && now - (window.__lastOcrTime||0) < 3000)){
         window.__lastOcrCode = best;
         window.__lastOcrTime = now;
+        playOcrBeep();
         handleScannedCode(best, true);
       }
       if(ocrActive) setOcrStatus('✅ Código detectado: ' + best);
@@ -2036,6 +2277,7 @@ async function captureShot(){
     const best = resolveScannedText(text);
 
     if(best){
+      playOcrBeep();
       handleScannedCode(best, true);
       setOcrStatus('✅ Código detectado: ' + best);
     }else{
@@ -2100,6 +2342,7 @@ let zxingLiveActive = false;
 
 async function startZxingLiveScanner(){
   if(zxingLiveActive) return;
+  ensureAudioCtx(); // desbloquea el audio dentro del gesto que abrió la cámara
   if(typeof ZXing === 'undefined'){
     setOcrStatus('No se pudo cargar el lector de códigos de barras (revisa tu conexión a internet).');
     return;
@@ -2122,6 +2365,7 @@ async function startZxingLiveScanner(){
       if(!(window.__lastOcrCode === code && now - (window.__lastOcrTime||0) < 3000)){
         window.__lastOcrCode = code;
         window.__lastOcrTime = now;
+        playBarcodeBeep();
         handleScannedCode(code, true);
       }
       if(zxingLiveActive) setOcrStatus('✅ Código de barras detectado: ' + code);
@@ -2202,6 +2446,7 @@ function setBcStatus(msg){
 }
 
 async function startBarcodeScanner(){
+  ensureAudioCtx(); // desbloquea el audio dentro del gesto que abrió la cámara
   if(typeof ZXing === 'undefined'){
     setBcStatus('No se pudo cargar el lector de códigos de barras (revisa tu conexión a internet).');
     return;
@@ -2221,6 +2466,7 @@ async function startBarcodeScanner(){
       if(!bcActive) return;
       if(result){
         const code = result.getText();
+        playBarcodeBeep();
         stopBarcodeScanner();
         // Solo cierra el recuadro de la cámara de código de barras: el recuadro
         // de "Registrar inventario" (cantidad / código de barras) debe seguir
@@ -2277,9 +2523,7 @@ function setupEventListeners(){
   // Botones de Inicio: Herramientas Manuales (rojo) / Herramientas Eléctricas (azul) / Invitado (verde)
   document.getElementById('btnModoManual').addEventListener('click', ()=> attemptEnterModo('manual'));
   document.getElementById('btnModoElectrico').addEventListener('click', ()=> attemptEnterModo('electrico'));
-  document.getElementById('btnModoInvitado').addEventListener('click', ()=> openModal('modalGuestChoice'));
-  document.getElementById('btnGuestManual').addEventListener('click', ()=>{ closeAllModals(); enterModoAsGuest('manual'); });
-  document.getElementById('btnGuestElectrico').addEventListener('click', ()=>{ closeAllModals(); enterModoAsGuest('electrico'); });
+  document.getElementById('btnModoInvitado').addEventListener('click', ()=> enterModoAsGuest());
 
   // Puerta de contraseña al entrar a un modo que tiene contraseña puesta
   document.getElementById('formPasswordGate').addEventListener('submit', (e)=>{
@@ -2295,12 +2539,11 @@ function setupEventListeners(){
     }
   });
   document.getElementById('btnGateAsGuest').addEventListener('click', ()=>{
-    const modo = pendingGateModo;
     closeAllModals();
-    enterModoAsGuest(modo);
+    enterModoAsGuest();
   });
 
-  // Agregar/cambiar/quitar contraseña (por ahora, dentro de Herramientas Manuales)
+  // Agregar/cambiar/quitar contraseña (dentro de Manuales y Eléctricas)
   document.getElementById('btnAddPassword').addEventListener('click', openSetPasswordModal);
   document.getElementById('formSetPassword').addEventListener('submit', handleSetPasswordSubmit);
   document.getElementById('btnRemovePassword').addEventListener('click', ()=>{

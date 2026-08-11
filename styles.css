@@ -229,13 +229,15 @@ input,select{font-family:inherit;}
 body.role-guest .nav-item[data-view="inventario"],
 body.role-guest .nav-item[data-view="config"]{display:none;}
 body.role-guest .price-guest-hide{display:none;}
+body.role-guest .admin-only{display:none !important;}
 
 /* ---------- CONTRASEÑA POR MODO (barra lateral) ---------- */
-/* Por ahora, el botón para agregar contraseña solo aparece dentro de
-   Herramientas Manuales, y no se muestra a los invitados. */
+/* El botón para agregar contraseña aparece dentro de Herramientas Manuales
+   y Herramientas Eléctricas (solo dueño), y no se muestra a los invitados. */
 #btnAddPassword{display:none; background:none; border:none; cursor:pointer; font-size:12px; color:#9ca3af; text-align:left; padding:6px 0; font-family:inherit;}
 #btnAddPassword:hover{color:#fff;}
-body.modo-manual:not(.role-guest) #btnAddPassword{display:block;}
+body.modo-manual:not(.role-guest) #btnAddPassword,
+body.modo-electrico:not(.role-guest) #btnAddPassword{display:block;}
 
 /* ---------- INICIO: pantalla completa negro + naranja ---------- */
 body.inicio-theme .main-wrap{background:#0b0b0c;}
@@ -244,6 +246,13 @@ body.inicio-theme .topbar{background:#0b0b0c; border-bottom:1px solid rgba(251,1
 body.inicio-theme .topbar h1{color:#fb923c;}
 body.inicio-theme .hamburger{color:#fb923c;}
 body.inicio-theme .nav-item.active{background:#fb923c; color:#0b0b0c;}
+
+/* En la pantalla de Inicio NO hay menú lateral: la barra de navegación (y el
+   botón hamburguesa) solo aparecen después de entrar con un botón de Inicio. */
+body.inicio-theme .sidebar,
+body.inicio-theme .sidebar-overlay,
+body.inicio-theme .hamburger{display:none;}
+body.inicio-theme .main-wrap{margin-left:0;}
 
 .inicio-clock-card{
   background:transparent; border:none; box-shadow:none;
@@ -279,15 +288,18 @@ body.inicio-theme .nav-item.active{background:#fb923c; color:#0b0b0c;}
 .inicio-modo-btn:hover{filter:brightness(1.1); transform:translateY(-1px);}
 .inicio-modo-manual{background:#dc2626; color:#fff; box-shadow:0 0 24px rgba(220,38,38,.35);}
 .inicio-modo-electrico{background:#2563eb; color:#fff; box-shadow:0 0 24px rgba(37,99,235,.35);}
-.inicio-modo-invitado{background:var(--success); color:#fff; box-shadow:0 0 24px rgba(22,163,74,.35);}
+.inicio-modo-invitado{background:#16a34a; color:#fff; box-shadow:0 0 24px rgba(22,163,74,.35);}
 
+/* "Creado por Abner Pérez": esquina superior izquierda, fuente tipo Alphabet */
+#view-inicio{position:relative;}
 .inicio-footer{
-  text-align:right; color:#9ca3af; font-size:22px; font-weight:800; letter-spacing:.02em;
-  padding:18px 32px 30px;
+  position:absolute; top:6px; left:0; text-align:left; color:#9ca3af;
+  font-size:20px; font-weight:800; letter-spacing:.06em; text-transform:uppercase;
+  font-family:'Alfa Slab One','Impact','Arial Black',sans-serif;
 }
 
 @media (max-width: 560px){
-  .inicio-footer{font-size:15px; padding:14px 18px 22px;}
+  .inicio-footer{font-size:13px; top:2px;}
 }
 
 /* ---------- MODO: HERRAMIENTAS MANUALES (rojo) ---------- */
@@ -305,6 +317,15 @@ body.modo-electrico .brand-text strong{color:#93c5fd;}
 body.modo-electrico .nav-item.active{background:#2563eb; color:#fff;}
 body.modo-electrico .nav-item:hover{background:rgba(37,99,235,.18); color:#93c5fd;}
 body.modo-electrico .sidebar-footer{border-top-color:rgba(37,99,235,.25);}
+
+/* ---------- MODO: INVITADO (naranja) ---------- */
+body.modo-invitado .sidebar{background:#431407;}
+body.modo-invitado .sidebar-brand{border-bottom-color:rgba(249,115,22,.25);}
+body.modo-invitado .brand-text strong{color:#fdba74;}
+body.modo-invitado .nav-item.active{background:#ea580c; color:#fff;}
+body.modo-invitado .nav-item:hover{background:rgba(249,115,22,.18); color:#fdba74;}
+body.modo-invitado .sidebar-footer{border-top-color:rgba(249,115,22,.25);}
+body.modo-invitado .sidebar-footer small{color:#fdba74;}
 
 @media (max-width: 560px){
   .inicio-modos{margin-top:22px; gap:10px;}

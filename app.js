@@ -65,7 +65,10 @@ function defaultDB(){
     historialEscaneos: [],
     historialBusquedas: [],
     historialInventario: [],
-    ventas: []
+    ventas: [],
+    compras: [],
+    gastos: [],
+    finanzas: { caja: 0, retiros: [], deudas: [] }
   };
 }
 
@@ -80,6 +83,12 @@ function normalizeDB(obj){
   obj.historialBusquedas = obj.historialBusquedas || [];
   obj.historialInventario = obj.historialInventario || [];
   obj.ventas = obj.ventas || [];
+  obj.compras = obj.compras || [];
+  obj.gastos = obj.gastos || [];
+  obj.finanzas = obj.finanzas || {};
+  obj.finanzas.caja = typeof obj.finanzas.caja === 'number' ? obj.finanzas.caja : 0;
+  obj.finanzas.retiros = obj.finanzas.retiros || [];
+  obj.finanzas.deudas = obj.finanzas.deudas || [];
   obj.productos.forEach(p=>{
     p.codigoBarras = p.codigoBarras || '';
     p.stock = typeof p.stock === 'number' ? p.stock : 0;
@@ -285,6 +294,11 @@ function rerenderCurrentView(){
   if(name === 'productos') renderProductos();
   if(name === 'categorias') renderCategorias();
   if(name === 'ventas') renderVentas();
+  if(name === 'compras') renderCompras();
+  if(name === 'finanzas') renderFinanzas();
+  if(name === 'retiros') renderRetiros();
+  if(name === 'deudas') renderDeudas();
+  if(name === 'gastos') renderGastos();
   if(name === 'historial') renderHistorial();
   if(name === 'inventario') renderInventario();
   updateSidebarProductCount();
@@ -520,6 +534,10 @@ function saveVenta(data){
 
   db.ventas.unshift(venta);
 
+  // El dinero recibido por la venta (efectivo o QR) se suma al efectivo actual
+  db.finanzas = db.finanzas || {};
+  db.finanzas.caja = (Number(db.finanzas.caja) || 0) + total;
+
   // Descuenta del stock del producto (si es un producto real, no "OTRO").
   // Se permite que el stock quede en 0 o negativo: la venta nunca se bloquea.
   const p = getProductoByCodigo(data.codigo);
@@ -545,6 +563,9 @@ function guestCommitVenta(venta, data, cantidad){
   dbObj.contador.venta = dbObj.contador.venta || 1;
   const n = dbObj.contador.venta++;
   dbObj.ventas.unshift({ ...venta, id: 'v' + n + '_' + Date.now().toString(36) });
+  // El dinero de la venta se suma al efectivo del modo al que pertenece
+  dbObj.finanzas = dbObj.finanzas || {};
+  dbObj.finanzas.caja = (Number(dbObj.finanzas.caja) || 0) + (venta.total || 0);
   persistModoDB(modo, dbObj);
   // Reconstruye la vista combinada para que la venta aparezca al instante
   db = buildGuestDB();
@@ -563,17 +584,21 @@ function deleteVenta(id, mantenerInventario){
     if(p) p.stock = (p.stock || 0) + venta.cantidad;
   }
   db.ventas = db.ventas.filter(v => v.id !== id);
+  // Al eliminar una venta, el dinero que se recibió sale del efectivo actual
+  db.finanzas = db.finanzas || {};
+  db.finanzas.caja = (Number(db.finanzas.caja) || 0) - (venta.total || 0);
   saveDB();
   renderVentas();
   renderInventario();
   renderProductos();
+  renderFinanzas();
   toast('Venta eliminada', 'success');
 }
 
 // Vacía TODO el historial de ventas (solo dueño en Manuales y Eléctricas).
 // Pregunta lo mismo que al borrar una: si mantener inventario.
 function vaciarHistorialVentas(){
-  ventaBorrarDialog('¿Vaciar todo el historial de ventas?\n\n¿Mantener el inventario?\n• Sí = el inventario NO se modifica.\n• No = las cantidades vuelven al stock.',
+  ventaBorrarDialog('Vaciar historial de ventas', '¿Vaciar todo el historial de ventas?\n\n¿Mantener el inventario?\n• Sí = el inventario NO se modifica.\n• No = las cantidades vuelven al stock.',
     ()=> vaciarVentasConStock(false),
     ()=> vaciarVentasConStock(true));
 }
@@ -717,8 +742,8 @@ function renderScanResult(codigo){
 }
 
 // Renderiza la misma tarjeta de resultado (usada en la pestaña "Escanear")
-// dentro de cualquier contenedor. En la pestaña Inventario es exactamente
-// igual, solo que el botón de acción dice "Registrar" y lleva al registro
+// dentro de cualquier contenedor. En las pestañas Inventario y Compras es
+// idéntica, solo que el botón de acción dice "Registrar" y lleva al registro
 // de cantidad en vez de abrir la venta.
 function renderScanResultInto(elementId, codigo, context){
   const resultDiv = document.getElementById(elementId);
@@ -726,6 +751,22 @@ function renderScanResultInto(elementId, codigo, context){
   const p = getProductoByCodigo(codigo);
 
   if(!p){
+    if(context === 'compra'){
+      resultDiv.innerHTML = `
+        <div class="scan-not-found">
+          ⚠️ No se encontró ningún producto con el código <strong>${escapeHtml(codigo)}</strong>.<br>
+          <span style="font-size:12px;">No hay problema: se creará un producto nuevo al registrar la compra.</span>
+          <div style="margin-top:10px;">
+            <button class="btn btn-primary btn-sm" id="btnCompraCreate_${elementId}">🛒 Registrar compra</button>
+          </div>
+        </div>`;
+      const btnCreate = document.getElementById(`btnCompraCreate_${elementId}`);
+      if(btnCreate) btnCreate.addEventListener('click', ()=>{
+        closeCompraScan();
+        openCompraDetalleForm(null, codigo);
+      });
+      return;
+    }
     resultDiv.innerHTML = `
       <div class="scan-not-found">
         ⚠️ No se encontró ningún producto con el código <strong>${escapeHtml(codigo)}</strong>.
@@ -744,7 +785,9 @@ function renderScanResultInto(elementId, codigo, context){
 
   const secondBtnHtml = context === 'inventario'
     ? `<button class="btn btn-primary btn-sm" id="btnActionFromScan_${elementId}">📋 Registrar</button>`
-    : `<button class="btn btn-success btn-sm" id="btnActionFromScan_${elementId}">💰 Venderlo</button>`;
+    : context === 'compra'
+      ? `<button class="btn btn-primary btn-sm" id="btnActionFromScan_${elementId}">🛒 Registrar compra</button>`
+      : `<button class="btn btn-success btn-sm" id="btnActionFromScan_${elementId}">💰 Venderlo</button>`;
 
   // En el contexto de Inventario NO se muestra información de precios: solo
   // descripción, código, código de barras y stock actual.
@@ -768,7 +811,7 @@ function renderScanResultInto(elementId, codigo, context){
       <div class="sr-row"><span>Código</span><strong>${escapeHtml(p.codigo)}</strong></div>
       ${detailRowsHtml}
       <div style="margin-top:12px; display:flex; gap:8px; flex-wrap:wrap;">
-        ${currentRole === 'guest' ? '' : `<button class="btn btn-secondary btn-sm" id="btnEditFromScan_${elementId}">✏️ Editar producto</button>`}
+        ${currentRole !== 'guest' && context !== 'compra' ? `<button class="btn btn-secondary btn-sm" id="btnEditFromScan_${elementId}">✏️ Editar producto</button>` : ''}
         ${secondBtnHtml}
       </div>
     </div>`;
@@ -781,14 +824,18 @@ function renderScanResultInto(elementId, codigo, context){
     if(context === 'inventario'){
       closeInventarioScan();
       openInventarioDetalleForm(p, codigo);
+    }else if(context === 'compra'){
+      closeCompraScan();
+      openCompraDetalleForm(p, codigo);
     }else{
       openVentaModal(p);
     }
   });
 }
 
-// scanContext: 'lookup' (pestaña Escanear normal) o 'inventario' (registro de
-// cantidad desde la pestaña Inventario) — cambia qué pasa al detectar un código
+// scanContext: 'lookup' (pestaña Escanear normal), 'inventario' (registro de
+// cantidad desde la pestaña Inventario) o 'compra' (registro de compra desde
+// la pestaña Compras) — cambia qué pasa al detectar un código.
 let scanContext = 'lookup';
 
 /* -------------------------------------------------------------------------
@@ -844,6 +891,13 @@ function handleScannedCode(codigo, fromCamera){
     handleInventoryScan(codigo);
     if(fromCamera){
       scrollToScanResult('invScanResultBox');
+    }
+    return;
+  }
+  if(scanContext === 'compra'){
+    handleCompraScan(codigo);
+    if(fromCamera){
+      scrollToScanResult('compraScanResultBox');
     }
     return;
   }
@@ -904,6 +958,14 @@ function fmtHistoryDate(iso){
   try{
     const d = new Date(iso);
     return d.toLocaleString('es-BO', { day:'2-digit', month:'2-digit', year:'2-digit', hour:'2-digit', minute:'2-digit' });
+  }catch(e){ return ''; }
+}
+
+// Solo la fecha (día/mes/año), sin hora.
+function fmtDateShort(iso){
+  try{
+    const d = new Date(iso);
+    return d.toLocaleDateString('es-BO', { day:'2-digit', month:'2-digit', year:'2-digit' });
   }catch(e){ return ''; }
 }
 
@@ -1073,7 +1135,19 @@ function renderVentas(){
   }).join('');
 
   const totalMonto = list.reduce((sum, v) => sum + v.total, 0);
-  summary.textContent = `${list.length} venta${list.length === 1 ? '' : 's'} ${ventasFilterLabel()} · ${fmtMoney(totalMonto)}`;
+  if(currentRole === 'guest'){
+    // El invitado solo ve la suma de lo vendido (precio de venta).
+    summary.textContent = `${list.length} venta${list.length === 1 ? '' : 's'} ${ventasFilterLabel()} · Total ${fmtMoney(totalMonto)}`;
+  }else{
+    // El dueño ve el total vendido y la ganancia neta (total − costo de compra).
+    let costoTotal = 0;
+    list.forEach(v => {
+      const p = getProductoByCodigo(v.codigo);
+      if(p) costoTotal += (parseFloat(p.precioCompra) || 0) * (parseFloat(v.cantidad) || 1);
+    });
+    const gananciaNeta = totalMonto - costoTotal;
+    summary.textContent = `${list.length} venta${list.length === 1 ? '' : 's'} ${ventasFilterLabel()} · Total ${fmtMoney(totalMonto)} · Ganancia neta ${fmtMoney(gananciaNeta)}`;
+  }
   syncVentasChips();
   maybeShowExportReminder();
 }
@@ -1091,6 +1165,723 @@ function purgeVentasAntiguas(){
   renderVentas();
   if(borradas > 0) toast(`${borradas} venta(s) antigua(s) eliminadas`, 'success');
   else toast('No había ventas antiguas que borrar', 'warning');
+}
+
+/* -------------------------------------------------------------------------
+   4e. COMPRAS (registro de compras de productos, solo dueño)
+   Es una pestaña paralela a Ventas: filtro por fechas (Hoy/Ayer/Anteayer/
+   fecha/Todas), exportar/importar CSV, borrar antiguas y vaciar. Al registrar
+   una compra se aumenta el stock y, OPCIONALMENTE, se actualizan la marca y
+   los precios del producto (sin tocar las ventas ya registradas, que guardan
+   su propio precio en cada registro).
+   ------------------------------------------------------------------------- */
+
+let compraDateFilter = 'hoy';
+
+function comprasFiltradas(){
+  return db.compras.filter(c => {
+    const k = ventaFechaKey(c.fecha);
+    if(compraDateFilter === 'todas') return true;
+    if(compraDateFilter === 'hoy') return k === dateKeyOffset(0);
+    if(compraDateFilter === 'ayer') return k === dateKeyOffset(1);
+    if(compraDateFilter === 'anteayer') return k === dateKeyOffset(2);
+    if(/^\d{4}-\d{2}-\d{2}$/.test(compraDateFilter)) return k === compraDateFilter;
+    return true;
+  });
+}
+function comprasFilterLabel(){
+  const map = { hoy: 'de hoy', ayer: 'de ayer', anteayer: 'de anteayer', todas: 'de todas las fechas' };
+  return map[compraDateFilter] || 'del ' + compraDateFilter;
+}
+function syncComprasChips(){
+  document.querySelectorAll('.compra-date-chip').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.compraDate === compraDateFilter);
+  });
+  const input = document.getElementById('compraDateInput');
+  if(input) input.value = /^\d{4}-\d{2}-\d{2}$/.test(compraDateFilter) ? compraDateFilter : '';
+}
+
+function renderCompras(){
+  const tbody = document.querySelector('#comprasTable tbody');
+  const summary = document.getElementById('comprasSummary');
+  if(!tbody || !summary) return;
+  const colspan = 8;
+
+  if(db.compras.length === 0){
+    tbody.innerHTML = `<tr class="empty-row"><td colspan="${colspan}">Todavía no registraste ninguna compra.</td></tr>`;
+    summary.textContent = '0 compras';
+    syncComprasChips();
+    maybeShowCompraReminder();
+    return;
+  }
+
+  const list = comprasFiltradas();
+  if(list.length === 0){
+    tbody.innerHTML = `<tr class="empty-row"><td colspan="${colspan}">No hay compras ${comprasFilterLabel()}.</td></tr>`;
+    summary.textContent = `0 compras ${comprasFilterLabel()}`;
+    syncComprasChips();
+    maybeShowCompraReminder();
+    return;
+  }
+
+  tbody.innerHTML = list.map(c => `
+    <tr>
+      <td>${fmtHistoryDate(c.fecha)}</td>
+      <td><strong>${escapeHtml(c.codigo)}</strong></td>
+      <td>${escapeHtml(c.nombre)}</td>
+      <td>${c.cantidad}</td>
+      <td>${fmtMoney(c.precioUnitario)}</td>
+      <td><strong>${fmtMoney(c.total)}</strong></td>
+      <td>${PAYMENT_LABELS[c.metodoPago] || c.metodoPago}</td>
+      <td><button class="btn-icon" title="Eliminar" data-delete-compra="${c.id}">🗑️</button></td>
+    </tr>
+  `).join('');
+
+  const totalMonto = list.reduce((sum, c) => sum + c.total, 0);
+  summary.textContent = `${list.length} compra${list.length === 1 ? '' : 's'} ${comprasFilterLabel()} · ${fmtMoney(totalMonto)}`;
+  syncComprasChips();
+  maybeShowCompraReminder();
+}
+
+// Borra UNA compra. Al borrarla se pregunta si el inventario se mantiene:
+//   mantenerInventario = true  → el stock NO se toca.
+//   mantenerInventario = false → la cantidad comprada se quita del stock.
+function deleteCompra(id, mantenerInventario){
+  const compra = db.compras.find(c => c.id === id);
+  if(!compra) return;
+  if(!mantenerInventario){
+    const p = getProductoByCodigo(compra.codigo);
+    if(p) p.stock = (p.stock || 0) - compra.cantidad;
+  }
+  db.compras = db.compras.filter(c => c.id !== id);
+  saveDB();
+  renderCompras();
+  renderInventario();
+  renderProductos();
+  toast('Compra eliminada', 'success');
+}
+
+function vaciarHistorialCompras(){
+  ventaBorrarDialog('Vaciar historial de compras', '¿Vaciar todo el historial de compras?\n\n¿Mantener el inventario?\n• Sí = el inventario NO se modifica.\n• No = las cantidades se quitan del stock.',
+    ()=> vaciarComprasConStock(false),
+    ()=> vaciarComprasConStock(true));
+}
+function vaciarComprasConStock(quitarStock){
+  if(quitarStock){
+    db.compras.forEach(c => {
+      const p = getProductoByCodigo(c.codigo);
+      if(p) p.stock = (p.stock || 0) - c.cantidad;
+    });
+  }
+  db.compras = [];
+  saveDB();
+  renderCompras();
+  renderInventario();
+  renderProductos();
+  toast('Historial de compras vaciado', 'success');
+}
+
+// Borra compras de hace más de 3 meses (el stock no se modifica).
+function purgeComprasAntiguas(){
+  const corte = new Date();
+  corte.setDate(corte.getDate() - 90);
+  const corteKey = localDateKey(corte);
+  const antes = db.compras.length;
+  db.compras = db.compras.filter(c => ventaFechaKey(c.fecha) >= corteKey);
+  const borradas = antes - db.compras.length;
+  saveDB();
+  renderCompras();
+  if(borradas > 0) toast(`${borradas} compra(s) antigua(s) eliminadas`, 'success');
+  else toast('No había compras antiguas que borrar', 'warning');
+}
+
+// Recordatorio semanal de respaldo para las compras (independiente del de ventas).
+const COMPRA_EXPORT_PROMPT_KEY = 'stockferre_export_compra_prompt_v1';
+function getLastCompraExportPrompt(){
+  try{ return localStorage.getItem(COMPRA_EXPORT_PROMPT_KEY) || ''; }catch(e){ return ''; }
+}
+function markCompraExportPrompt(){
+  try{ localStorage.setItem(COMPRA_EXPORT_PROMPT_KEY, dateKeyOffset(0)); }catch(e){}
+}
+function maybeShowCompraReminder(){
+  const el = document.getElementById('exportCompraReminder');
+  if(!el) return;
+  const last = getLastCompraExportPrompt();
+  if(last && new Date() - new Date(last) < EXPORT_PROMPT_DAYS * 86400000){
+    el.style.display = 'none';
+    return;
+  }
+  el.style.display = 'block';
+  el.innerHTML = `
+    <span>💾 Hace más de una semana que no haces un respaldo de las compras. Es recomendable exportarlas para que el registro no crezca demasiado.</span>
+    <button class="btn btn-secondary btn-sm" id="btnCompraExportNow">📤 Exportar ahora</button>
+    <button class="btn btn-secondary btn-sm" id="btnCompraDismiss">Omitir</button>
+  `;
+}
+
+function exportComprasCSV(){
+  if(db.compras.length === 0){
+    toast('No hay compras para exportar', 'error');
+    return;
+  }
+  const header = ['FECHA','CODIGO','PRODUCTO','CANTIDAD','PRECIO UNITARIO','TOTAL','METODO DE PAGO'];
+  const rows = db.compras.map(c => [
+    c.fecha, c.codigo, c.nombre, csvNumber(c.cantidad), csvNumber(c.precioUnitario, 2), csvNumber(c.total, 2), c.metodoPago
+  ]);
+  downloadCSV(`stockferre_compras_${todayISO().slice(0,10)}.csv`, header, rows);
+  toast('Compras exportadas', 'success');
+}
+
+// Importa compras desde un CSV (un respaldo exportado antes). Se agregan como
+// registros al historial de compras; NO modifica el stock (para no sumarlo
+// dos veces si esa compra ya afectó el inventario al registrarse).
+function importComprasCSV(file){
+  const reader = new FileReader();
+  reader.onload = (e)=>{
+    try{
+      const rows = parseCSV(e.target.result);
+      if(rows.length < 2){
+        toast('El archivo CSV no tiene datos', 'error');
+        return;
+      }
+      const headers = rows[0].map(normalizeHeader);
+      const idx = {
+        fecha: headers.indexOf('FECHA'),
+        codigo: headers.indexOf('CODIGO'),
+        nombre: headers.findIndex(h => h.includes('PRODUCTO') || h.includes('DESCRIPCION')),
+        cantidad: headers.indexOf('CANTIDAD'),
+        precioUnitario: headers.findIndex(h => h.includes('PRECIO') && h.includes('UNITARIO')),
+        total: headers.indexOf('TOTAL'),
+        metodoPago: headers.findIndex(h => h.includes('PAGO'))
+      };
+      if(idx.codigo === -1 || idx.nombre === -1 || idx.total === -1){
+        toast('El CSV debe tener al menos columnas CODIGO, PRODUCTO y TOTAL', 'error');
+        return;
+      }
+      let importadas = 0;
+      for(let i = 1; i < rows.length; i++){
+        const r = rows[i];
+        const nombre = String(r[idx.nombre] || '').trim();
+        if(!nombre) continue;
+        const cantidad = idx.cantidad > -1 ? (parseFloat(String(r[idx.cantidad]).replace(',','.')) || 1) : 1;
+        const total = parsePrecio(r[idx.total]);
+        const precioUnitario = idx.precioUnitario > -1 ? parsePrecio(r[idx.precioUnitario]) : (cantidad > 0 ? total / cantidad : 0);
+        db.compras.push({
+          id: uid('compra'),
+          codigo: String(r[idx.codigo] || '').trim() || 'OTRO',
+          nombre,
+          cantidad,
+          precioUnitario,
+          total,
+          metodoPago: idx.metodoPago > -1 ? (String(r[idx.metodoPago]||'').toLowerCase().includes('qr') ? 'qr' : 'efectivo') : 'efectivo',
+          fecha: idx.fecha > -1 ? (r[idx.fecha] || todayISO()) : todayISO()
+        });
+        importadas++;
+      }
+      db.compras.sort((a,b)=> new Date(b.fecha) - new Date(a.fecha));
+      saveDB();
+      renderCompras();
+      toast(`Compras importadas: ${importadas} (no se modificó el stock)`, 'success');
+    }catch(err){
+      console.error(err);
+      toast('No se pudo leer el archivo CSV. Verifica el formato.', 'error');
+    }
+  };
+  reader.onerror = ()=> toast('Error al leer el archivo', 'error');
+  reader.readAsText(file, 'UTF-8');
+}
+
+/* -------------------------------------------------------------------------
+   4g. FINANZAS: ESTADO FINANCIERO / RETIROS / DEUDAS (solo dueño)
+   ------------------------------------------------------------------------- */
+
+// Capital del negocio = suma de (stock × precio de compra) de cada producto.
+function capitalEnProductos(){
+  return db.productos.reduce((sum, p) => sum + ((p.stock || 0) * (parseFloat(p.precioCompra) || 0)), 0);
+}
+
+function renderFinanzas(){
+  const capEl = document.getElementById('finCapital');
+  const cajaEl = document.getElementById('finCaja');
+  const totEl = document.getElementById('finTotal');
+  if(!capEl || !cajaEl || !totEl) return;
+  const capital = capitalEnProductos();
+  const caja = Number(db.finanzas.caja) || 0;
+  capEl.textContent = fmtMoney(capital);
+  cajaEl.textContent = fmtMoney(caja);
+  totEl.textContent = fmtMoney(capital + caja);
+}
+
+function openEditarCajaModal(){
+  document.getElementById('cajaMonto').value = Number(db.finanzas.caja) || 0;
+  openModal('modalEditarCaja');
+}
+
+function handleEditarCajaSubmit(e){
+  e.preventDefault();
+  const monto = parseFloat(document.getElementById('cajaMonto').value);
+  if(isNaN(monto) || monto < 0){ toast('Ingresa un monto válido', 'error'); return; }
+  db.finanzas = db.finanzas || {};
+  db.finanzas.caja = monto;
+  saveDB();
+  renderFinanzas();
+  closeAllModals();
+  toast('Efectivo actualizado', 'success');
+}
+
+function exportFinanzasCSV(){
+  const capital = capitalEnProductos();
+  const caja = Number(db.finanzas.caja) || 0;
+  const header = ['FECHA','CONCEPTO','MONTO'];
+  const rows = [
+    [todayISO(), 'Capital en productos (stock x precio de compra)', csvNumber(capital, 2)],
+    [todayISO(), 'Efectivo actual', csvNumber(caja, 2)],
+    [todayISO(), 'Patrimonio total (productos + efectivo)', csvNumber(capital + caja, 2)]
+  ];
+  downloadCSV(`stockferre_finanzas_${todayISO().slice(0,10)}.csv`, header, rows);
+  toast('Estado financiero exportado', 'success');
+}
+
+/* ---------- RETIROS DE DINERO ---------- */
+// La fecha del retiro se recuerda por modo (como en Compras) hasta que la cambien.
+const RETIRO_FECHA_KEY = 'stockferre_retiro_fecha_v1_';
+function getLastRetiroFecha(){
+  try{
+    const val = localStorage.getItem(RETIRO_FECHA_KEY + currentModo);
+    return /^\d{4}-\d{2}-\d{2}$/.test(val) ? val : dateKeyOffset(0);
+  }catch(e){ return dateKeyOffset(0); }
+}
+function setLastRetiroFecha(dateStr){
+  try{ localStorage.setItem(RETIRO_FECHA_KEY + currentModo, dateStr || ''); }catch(e){}
+}
+
+// Filtro por mes en la vista de retiros: '' = todas, 'YYYY-MM' = ese mes.
+let retiroMesFilter = '';
+function retirosFiltrados(){
+  const list = (db.finanzas.retiros || []).slice()
+    .sort((a,b)=> new Date(b.fecha || 0) - new Date(a.fecha || 0));
+  if(!retiroMesFilter) return list;
+  return list.filter(r => (r.fecha || '').slice(0,7) === retiroMesFilter);
+}
+function syncRetiroMesFilter(){
+  const el = document.getElementById('retirosMes');
+  if(!el) return;
+  const meses = [...new Set((db.finanzas.retiros || []).map(r => (r.fecha || '').slice(0,7)).filter(Boolean))].sort().reverse();
+  let html = '<option value="">Todas las fechas</option>';
+  meses.forEach(m => {
+    const [y, mo] = m.split('-').map(Number);
+    const nombre = new Date(y, mo-1, 1).toLocaleString('es', { month:'long' });
+    const label = nombre.charAt(0).toUpperCase() + nombre.slice(1) + ' ' + y;
+    html += `<option value="${m}" ${m === retiroMesFilter ? 'selected' : ''}>${label}</option>`;
+  });
+  el.innerHTML = html;
+}
+
+function renderRetiros(){
+  const tbody = document.querySelector('#retirosTable tbody');
+  const summary = document.getElementById('retirosSummary');
+  if(!tbody || !summary) return;
+  const list = retirosFiltrados();
+  syncRetiroMesFilter();
+  if(list.length === 0){
+    tbody.innerHTML = `<tr class="empty-row"><td colspan="4">${retiroMesFilter ? 'No hay retiros en este mes.' : 'Todavía no registraste ningún retiro.'}</td></tr>`;
+    summary.textContent = '0 retiros';
+    return;
+  }
+  tbody.innerHTML = list.map(r => `
+    <tr>
+      <td>${fmtDateShort(r.fecha)}</td>
+      <td><strong class="stock-negative">-${fmtMoney(r.monto)}</strong></td>
+      <td>${escapeHtml(r.obs || '-')}</td>
+      <td>
+        <button class="btn-icon" title="Editar" data-edit-retiro="${r.id}">✏️</button>
+        <button class="btn-icon" title="Eliminar" data-delete-retiro="${r.id}">🗑️</button>
+      </td>
+    </tr>
+  `).join('');
+  const total = list.reduce((s, r) => s + r.monto, 0);
+  summary.textContent = `${list.length} retiro${list.length === 1 ? '' : 's'} · total retirado ${fmtMoney(total)}`;
+}
+
+function openRetiroModal(retiro){
+  document.getElementById('retiroModalTitle').textContent = retiro ? '✏️ Editar retiro' : '➖ Nuevo retiro';
+  document.getElementById('rId').value = retiro ? retiro.id : '';
+  document.getElementById('rMonto').value = retiro ? retiro.monto : '';
+  document.getElementById('rFecha').value = retiro ? (retiro.fecha ? localDateKey(new Date(retiro.fecha)) : getLastRetiroFecha()) : getLastRetiroFecha();
+  const obs = retiro ? (retiro.obs || '') : '';
+  document.getElementById('rObs').value = obs;
+  const presetEl = document.getElementById('rObsPreset');
+  if(presetEl){
+    const presets = ['Pago Truper','Pago Ingco','Pago Dyllu','Salarios'];
+    const match = presets.find(p => normalize(p) === normalize(obs));
+    presetEl.value = match || '';
+    document.getElementById('rObs').disabled = !!match;
+  }
+  openModal('modalRetiro');
+}
+
+function handleRetiroSubmit(e){
+  e.preventDefault();
+  const id = document.getElementById('rId').value;
+  const monto = parseFloat(document.getElementById('rMonto').value);
+  const obs = document.getElementById('rObs').value.trim();
+  if(isNaN(monto) || monto <= 0){ toast('Ingresa un monto válido', 'error'); return; }
+  const fechaElegida = document.getElementById('rFecha').value;
+  setLastRetiroFecha(fechaElegida);
+
+  db.finanzas = db.finanzas || {};
+  db.finanzas.retiros = db.finanzas.retiros || [];
+  db.finanzas.caja = Number(db.finanzas.caja) || 0;
+
+  if(id){
+    const r = db.finanzas.retiros.find(x => x.id === id);
+    if(!r) return;
+    const dif = monto - r.monto;
+    r.monto = monto;
+    r.obs = obs;
+    r.fecha = compraFechaFromInput(fechaElegida);
+    db.finanzas.caja -= dif;
+  }else{
+    db.finanzas.retiros.unshift({
+      id: uid('retiro'),
+      monto,
+      obs,
+      fecha: compraFechaFromInput(fechaElegida)
+    });
+    db.finanzas.caja -= monto;
+  }
+  saveDB();
+  renderRetiros();
+  renderFinanzas();
+  closeAllModals();
+  toast('Retiro guardado', 'success');
+}
+
+function deleteRetiro(id){
+  confirmDialog('Eliminar retiro', '¿Eliminar este retiro? El monto volverá al efectivo actual.', ()=>{
+    const r = db.finanzas.retiros.find(x => x.id === id);
+    if(!r) return;
+    db.finanzas.caja = (Number(db.finanzas.caja) || 0) + r.monto;
+    db.finanzas.retiros = db.finanzas.retiros.filter(x => x.id !== id);
+    saveDB();
+    renderRetiros();
+    renderFinanzas();
+    toast('Retiro eliminado', 'success');
+  });
+}
+
+function exportRetirosCSV(){
+  const list = db.finanzas.retiros || [];
+  if(list.length === 0){ toast('No hay retiros para exportar', 'error'); return; }
+  const header = ['FECHA','MONTO','OBSERVACION'];
+  const rows = list.map(r => [r.fecha, csvNumber(r.monto, 2), r.obs || '']);
+  downloadCSV(`stockferre_retiros_${todayISO().slice(0,10)}.csv`, header, rows);
+  toast('Retiros exportados', 'success');
+}
+
+/* ---------- DEUDAS ---------- */
+const DEUDA_FECHA_KEY = 'stockferre_deuda_fecha_v1_';
+function getLastDeudaFecha(){
+  try{
+    const val = localStorage.getItem(DEUDA_FECHA_KEY + currentModo);
+    return /^\d{4}-\d{2}-\d{2}$/.test(val) ? val : dateKeyOffset(0);
+  }catch(e){ return dateKeyOffset(0); }
+}
+function setLastDeudaFecha(dateStr){
+  try{ localStorage.setItem(DEUDA_FECHA_KEY + currentModo, dateStr || ''); }catch(e){}
+}
+
+function populateMarcasDeudasList(){
+  const dl = document.getElementById('marcasDeudasList');
+  if(!dl) return;
+  const set = new Set((db.finanzas.deudas || []).map(d => String(d.marca || '').trim()).filter(Boolean));
+  dl.innerHTML = Array.from(set).sort((a,b)=> a.localeCompare(b, 'es')).map(m => `<option value="${escapeHtml(m)}">`).join('');
+}
+
+// Filtro por mes en la vista de deudas: '' = todas, 'YYYY-MM' = ese mes.
+let deudaMesFilter = '';
+function deudasFiltradas(){
+  const deudas = (db.finanzas.deudas || []).slice()
+    .sort((a,b)=> new Date(b.fecha || 0) - new Date(a.fecha || 0));
+  if(!deudaMesFilter) return deudas;
+  return deudas.filter(d => (d.fecha || '').slice(0,7) === deudaMesFilter);
+}
+function syncDeudaMesFilter(){
+  const el = document.getElementById('deudasMes');
+  if(!el) return;
+  const meses = [...new Set((db.finanzas.deudas || []).map(d => (d.fecha || '').slice(0,7)).filter(Boolean))].sort().reverse();
+  let html = '<option value="">Todas las fechas</option>';
+  meses.forEach(m => {
+    const [y, mo] = m.split('-').map(Number);
+    const nombre = new Date(y, mo-1, 1).toLocaleString('es', { month:'long' });
+    const label = nombre.charAt(0).toUpperCase() + nombre.slice(1) + ' ' + y;
+    html += `<option value="${m}" ${m === deudaMesFilter ? 'selected' : ''}>${label}</option>`;
+  });
+  el.innerHTML = html;
+}
+
+function renderDeudas(){
+  const groups = document.getElementById('deudasGroups');
+  const totalEl = document.getElementById('deudasTotal');
+  if(!groups || !totalEl) return;
+  const deudas = deudasFiltradas();
+  syncDeudaMesFilter();
+
+  if(deudas.length === 0){
+    groups.innerHTML = `<p class="hint">${deudaMesFilter ? 'No hay deudas en este mes.' : 'Todavía no registraste ninguna deuda.'}</p>`;
+    totalEl.textContent = 'Total de deudas: Bs 0.00';
+    return;
+  }
+
+  const grupos = {};
+  deudas.forEach(d => {
+    const m = String(d.marca || 'Otra').trim() || 'Otra';
+    (grupos[m] = grupos[m] || []).push(d);
+  });
+  const marcas = Object.keys(grupos).sort((a,b)=> a.localeCompare(b, 'es'));
+  const totalGeneral = deudas.reduce((s,d)=> s + d.monto, 0);
+
+  groups.innerHTML = marcas.map(marca => {
+    const items = grupos[marca];
+    const sub = items.reduce((s,d)=> s + d.monto, 0);
+    return `
+    <div class="deuda-group">
+      <div class="deuda-group-header">
+        <h3>🏷️ ${escapeHtml(marca)}</h3>
+        <strong>${fmtMoney(sub)}</strong>
+      </div>
+      <div class="table-wrap" style="box-shadow:none; border-radius:0;">
+        <table class="table" style="min-width:0;">
+          <thead><tr><th>Fecha</th><th>Vencimiento</th><th>Monto</th><th>Observación</th><th>Acciones</th></tr></thead>
+          <tbody>
+            ${items.map(d => `
+              <tr>
+                <td>${fmtDateShort(d.fecha)}</td>
+                <td>${escapeHtml(d.vencimiento || '-')}</td>
+                <td><strong>${fmtMoney(d.monto)}</strong></td>
+                <td>${escapeHtml(d.obs || '-')}</td>
+                <td>
+                  <button class="btn-icon" title="Editar" data-edit-deuda="${d.id}">✏️</button>
+                  <button class="btn-icon" title="Eliminar" data-delete-deuda="${d.id}">🗑️</button>
+                </td>
+              </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>`;
+  }).join('');
+
+  totalEl.textContent = `Total de deudas: ${fmtMoney(totalGeneral)} (${marcas.length} marca${marcas.length === 1 ? '' : 's'})`;
+}
+
+function openDeudaModal(deuda){
+  document.getElementById('deudaModalTitle').textContent = deuda ? '✏️ Editar deuda' : '➕ Nueva deuda';
+  document.getElementById('dId').value = deuda ? deuda.id : '';
+  document.getElementById('dMarca').value = deuda ? (deuda.marca || '') : '';
+  document.getElementById('dMonto').value = deuda ? deuda.monto : '';
+  document.getElementById('dFecha').value = deuda ? (deuda.fecha ? localDateKey(new Date(deuda.fecha)) : getLastDeudaFecha()) : getLastDeudaFecha();
+  document.getElementById('dVencimiento').value = deuda ? (deuda.vencimiento || '') : '';
+  document.getElementById('dObs').value = deuda ? (deuda.obs || '') : '';
+  populateMarcasDeudasList();
+  openModal('modalDeuda');
+}
+
+function handleDeudaSubmit(e){
+  e.preventDefault();
+  const id = document.getElementById('dId').value;
+  const marca = document.getElementById('dMarca').value.trim();
+  const monto = parseFloat(document.getElementById('dMonto').value);
+  const obs = document.getElementById('dObs').value.trim();
+  const vencimiento = document.getElementById('dVencimiento').value;
+  if(!marca){ toast('Ingresa la marca', 'error'); return; }
+  if(isNaN(monto) || monto <= 0){ toast('Ingresa un monto válido', 'error'); return; }
+  const fechaElegida = document.getElementById('dFecha').value;
+  setLastDeudaFecha(fechaElegida);
+
+  db.finanzas = db.finanzas || {};
+  db.finanzas.deudas = db.finanzas.deudas || [];
+
+  if(id){
+    const d = db.finanzas.deudas.find(x => x.id === id);
+    if(!d) return;
+    d.marca = marca;
+    d.monto = monto;
+    d.obs = obs;
+    d.fecha = compraFechaFromInput(fechaElegida);
+    d.vencimiento = vencimiento;
+  }else{
+    db.finanzas.deudas.unshift({
+      id: uid('deuda'),
+      marca,
+      monto,
+      obs,
+      fecha: compraFechaFromInput(fechaElegida),
+      vencimiento,
+      registradoEn: todayISO()
+    });
+  }
+  saveDB();
+  renderDeudas();
+  closeAllModals();
+  toast('Deuda guardada', 'success');
+}
+
+function deleteDeuda(id){
+  confirmDialog('Eliminar deuda', '¿Eliminar esta deuda?', ()=>{
+    db.finanzas.deudas = db.finanzas.deudas.filter(x => x.id !== id);
+    saveDB();
+    renderDeudas();
+    toast('Deuda eliminada', 'success');
+  });
+}
+
+function exportDeudasCSV(){
+  const list = db.finanzas.deudas || [];
+  if(list.length === 0){ toast('No hay deudas para exportar', 'error'); return; }
+  const header = ['FECHA','MARCA','MONTO','VENCIMIENTO','OBSERVACION'];
+  const rows = list.map(d => [d.fecha, d.marca || '', csvNumber(d.monto, 2), d.vencimiento || '', d.obs || '']);
+  downloadCSV(`stockferre_deudas_${todayISO().slice(0,10)}.csv`, header, rows);
+  toast('Deudas exportadas', 'success');
+}
+
+/* ---------- GASTOS DEL DÍA (solo dueño) ---------- */
+// Cada gasto guarda fecha y hora, cantidad, precio (Bs) y observación.
+// Total de un gasto = cantidad × Bs. La vista agrupa por día y suma cada día.
+const GASTO_FECHA_KEY = 'stockferre_gasto_fecha_v1_';
+function getLastGastoFecha(){
+  try{
+    const val = localStorage.getItem(GASTO_FECHA_KEY + currentModo);
+    return /^\d{4}-\d{2}-\d{2}$/.test(val) ? val : dateKeyOffset(0);
+  }catch(e){ return dateKeyOffset(0); }
+}
+function setLastGastoFecha(dateStr){
+  try{ localStorage.setItem(GASTO_FECHA_KEY + currentModo, dateStr || ''); }catch(e){}
+}
+function horaNow(){
+  const d = new Date();
+  return String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0');
+}
+function horaKey(d){
+  return String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0');
+}
+// Combina la fecha y la hora elegidas en un ISO que conserva ese momento local.
+function gastoFechaFromInput(dateStr, horaStr){
+  const now = new Date();
+  const d = new Date(now.getFullYear(), now.getMonth(), now.getDate(), now.getHours(), now.getMinutes(), now.getSeconds());
+  if(/^\d{4}-\d{2}-\d{2}$/.test(dateStr)){
+    const parts = dateStr.split('-').map(Number);
+    d.setFullYear(parts[0], parts[1]-1, parts[2]);
+  }
+  if(/^\d{2}:\d{2}$/.test(horaStr)){
+    const hm = horaStr.split(':').map(Number);
+    d.setHours(hm[0], hm[1], 0, 0);
+  }
+  return new Date(d.getTime() - d.getTimezoneOffset()*60000).toISOString();
+}
+function fmtFechaBonita(key){
+  try{
+    const [y,m,d] = key.split('-').map(Number);
+    const str = new Date(y, m-1, d).toLocaleDateString('es-BO', { weekday:'long', day:'numeric', month:'long', year:'numeric' });
+    return str.charAt(0).toUpperCase() + str.slice(1);
+  }catch(e){ return key; }
+}
+
+function renderGastos(){
+  const tbody = document.querySelector('#gastosTable tbody');
+  const summary = document.getElementById('gastosSummary');
+  if(!tbody || !summary) return;
+  const list = (db.gastos || []).slice()
+    .sort((a,b)=> new Date(b.fecha || 0) - new Date(a.fecha || 0));
+  if(list.length === 0){
+    tbody.innerHTML = `<tr class="empty-row"><td colspan="6">Todavía no registraste ningún gasto.</td></tr>`;
+    summary.textContent = '0 gastos';
+    return;
+  }
+  const grupos = {};
+  list.forEach(g => {
+    const k = ventaFechaKey(g.fecha);
+    (grupos[k] = grupos[k] || []).push(g);
+  });
+  const dias = Object.keys(grupos).sort().reverse();
+  let html = '';
+  dias.forEach(dia => {
+    const items = grupos[dia];
+    const diaTotal = items.reduce((s,g)=> s + g.total, 0);
+    html += `<tr class="gasto-day-row"><td colspan="6">📅 ${fmtFechaBonita(dia)} · <strong>${fmtMoney(diaTotal)}</strong></td></tr>`;
+    html += items.map(g => `
+      <tr>
+        <td>${fmtHistoryDate(g.fecha)}</td>
+        <td>${g.cantidad}</td>
+        <td>${fmtMoney(g.bs)}</td>
+        <td><strong>${fmtMoney(g.total)}</strong></td>
+        <td>${escapeHtml(g.obs || '-')}</td>
+        <td>
+          <button class="btn-icon" title="Editar" data-edit-gasto="${g.id}">✏️</button>
+          <button class="btn-icon" title="Eliminar" data-delete-gasto="${g.id}">🗑️</button>
+        </td>
+      </tr>`).join('');
+  });
+  tbody.innerHTML = html;
+  const totalGeneral = list.reduce((s,g)=> s + g.total, 0);
+  summary.textContent = `${list.length} gasto${list.length === 1 ? '' : 's'} · total ${fmtMoney(totalGeneral)}`;
+}
+
+function recalcGastoTotal(){
+  const cant = parseFloat(document.getElementById('gCant').value) || 0;
+  const bs = parseFloat(document.getElementById('gBs').value) || 0;
+  document.getElementById('gTotalHint').textContent = `Total: ${fmtMoney(cant * bs)}`;
+}
+
+function openGastoModal(gasto){
+  document.getElementById('gastoModalTitle').textContent = gasto ? '✏️ Editar gasto' : '🧾 Nuevo gasto';
+  document.getElementById('gId').value = gasto ? gasto.id : '';
+  document.getElementById('gCant').value = gasto ? gasto.cantidad : 1;
+  document.getElementById('gBs').value = gasto ? gasto.bs : '';
+  document.getElementById('gObs').value = gasto ? (gasto.obs || '') : '';
+  document.getElementById('gFecha').value = gasto ? (gasto.fecha ? localDateKey(new Date(gasto.fecha)) : getLastGastoFecha()) : getLastGastoFecha();
+  document.getElementById('gHora').value = gasto ? horaKey(new Date(gasto.fecha)) : horaNow();
+  recalcGastoTotal();
+  openModal('modalGasto');
+}
+
+function handleGastoSubmit(e){
+  e.preventDefault();
+  const id = document.getElementById('gId').value;
+  const cant = parseFloat(document.getElementById('gCant').value);
+  const bs = parseFloat(document.getElementById('gBs').value);
+  const obs = document.getElementById('gObs').value.trim();
+  const fecha = document.getElementById('gFecha').value;
+  const hora = document.getElementById('gHora').value;
+  if(isNaN(cant) || cant <= 0){ toast('Ingresa una cantidad válida', 'error'); return; }
+  if(isNaN(bs) || bs <= 0){ toast('Ingresa un precio válido', 'error'); return; }
+  const total = cant * bs;
+  const fechaISO = gastoFechaFromInput(fecha, hora);
+  db.gastos = db.gastos || [];
+  if(id){
+    const g = db.gastos.find(x => x.id === id);
+    if(!g) return;
+    g.cantidad = cant;
+    g.bs = bs;
+    g.total = total;
+    g.obs = obs;
+    g.fecha = fechaISO;
+  }else{
+    db.gastos.unshift({ id: uid('gasto'), cantidad: cant, bs, total, obs, fecha: fechaISO });
+  }
+  setLastGastoFecha(fecha);
+  saveDB();
+  renderGastos();
+  closeAllModals();
+  toast('Gasto guardado', 'success');
+}
+
+function deleteGasto(id){
+  confirmDialog('Eliminar gasto', '¿Eliminar este gasto?', ()=>{
+    db.gastos = (db.gastos || []).filter(x => x.id !== id);
+    saveDB();
+    renderGastos();
+    toast('Gasto eliminado', 'success');
+  });
 }
 
 /* -------------------------------------------------------------------------
@@ -1246,6 +2037,161 @@ function handleInventarioSubmit(e){
   // Sigue escaneando el siguiente producto sin que el usuario tenga que
   // volver a tocar el botón (pensado para hacer un conteo físico seguido)
   openInventarioScan();
+}
+
+/* -------------------------------------------------------------------------
+   4f. REGISTRO DE COMPRA (escáner + modal de cantidad/precios)
+   ------------------------------------------------------------------------- */
+
+function openCompraScan(){
+  scanContext = 'compra';
+  moveScannerBlockTo('compraScannerBlockPlaceholder');
+  document.getElementById('compraScanResultBox').innerHTML = '';
+  openModal('modalCompraScan');
+  if(!ocrActive && !zxingLiveActive) startActiveScanner();
+}
+
+function closeCompraScan(){
+  stopActiveScanner();
+  restoreScannerBlockHome();
+  closeAllModals();
+}
+
+function handleCompraScan(codigo){
+  renderScanResultInto('compraScanResultBox', codigo, 'compra');
+}
+
+// Abre el recuadro "Registrar compra". Si el producto NO existe (producto==null)
+// se creará al guardar; en ese caso siempre se guardan marca y precio de venta.
+function openCompraDetalleForm(producto, codigo){
+  const esNuevo = !producto;
+  document.getElementById('cCodigo').value = codigo;
+  document.getElementById('cNombreInput').value = producto ? producto.nombre : '';
+  document.getElementById('cNombreDisplay').textContent = producto ? producto.nombre : 'Producto nuevo (se creará al guardar)';
+  document.getElementById('cCantidad').value = 1;
+  document.getElementById('cPrecioCompra').value = producto ? (producto.precioCompra || '') : '';
+  document.getElementById('cFecha').value = getLastCompraFecha();
+  document.getElementById('cMarca').value = producto ? (producto.marca || '') : '';
+  document.getElementById('cPrecioVenta').value = producto ? (producto.precioVenta || '') : '';
+  document.getElementById('cActualizarDatos').checked = false;
+  // Producto nuevo → la casilla no hace falta: siempre se guardan los datos.
+  document.getElementById('compraUpdateToggle').style.display = esNuevo ? 'none' : 'flex';
+  document.getElementById('compraUpdateFields').style.display = esNuevo ? 'grid' : 'none';
+  recalcCompraTotal();
+  openModal('modalCompraDetalle');
+}
+
+function recalcCompraTotal(){
+  const cant = parseFloat(document.getElementById('cCantidad').value) || 0;
+  const pre = parseFloat(document.getElementById('cPrecioCompra').value) || 0;
+  document.getElementById('cTotalDisplay').value = (cant * pre).toFixed(2);
+}
+
+// Convierte la fecha elegida en el recuadro ("YYYY-MM-DD", por defecto hoy)
+// a un valor ISO que conserva ese día en la zona horaria del dispositivo,
+// igual que lo hacen las ventas con todayISO(). Si no hay fecha, usa ahora.
+function compraFechaFromInput(dateStr){
+  if(!dateStr) return todayISO();
+  const now = new Date();
+  const d = new Date(now.getFullYear(), now.getMonth(), now.getDate(), now.getHours(), now.getMinutes(), now.getSeconds());
+  if(/^\d{4}-\d{2}-\d{2}$/.test(dateStr)){
+    const parts = dateStr.split('-').map(Number);
+    d.setFullYear(parts[0], parts[1] - 1, parts[2]);
+  }
+  return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString();
+}
+
+// La fecha de compra elegida se recuerda por modo (este dispositivo) y se
+// mantiene entre una compra y otra hasta que la vuelvan a cambiar. Así, si
+// estás registrando varios recibos de ayer, no tienes que volver a elegirla.
+const COMPRA_FECHA_KEY = 'stockferre_compra_fecha_v1_';
+function getLastCompraFecha(){
+  try{
+    const val = localStorage.getItem(COMPRA_FECHA_KEY + currentModo);
+    return /^\d{4}-\d{2}-\d{2}$/.test(val) ? val : dateKeyOffset(0);
+  }catch(e){ return dateKeyOffset(0); }
+}
+function setLastCompraFecha(dateStr){
+  try{ localStorage.setItem(COMPRA_FECHA_KEY + currentModo, dateStr || ''); }catch(e){}
+}
+
+function handleCompraSubmit(e){
+  e.preventDefault();
+  const codigo = document.getElementById('cCodigo').value.trim();
+  const nombre = document.getElementById('cNombreInput').value.trim();
+  const cantidad = parseFloat(document.getElementById('cCantidad').value);
+  const precioCompra = parseFloat(document.getElementById('cPrecioCompra').value);
+
+  if(!codigo || !nombre){
+    toast('Ingresa el código y la descripción', 'error');
+    return;
+  }
+  if(!cantidad || cantidad <= 0){
+    toast('Ingresa una cantidad válida', 'error');
+    return;
+  }
+  if(isNaN(precioCompra) || precioCompra < 0){
+    toast('Ingresa un precio de compra válido', 'error');
+    return;
+  }
+
+  const actualizar = document.getElementById('cActualizarDatos').checked;
+  const marca = document.getElementById('cMarca').value.trim();
+  const precioVenta = parseFloat(document.getElementById('cPrecioVenta').value);
+
+  let p = getProductoByCodigo(codigo);
+  const esNuevo = !p;
+  if(esNuevo){
+    p = {
+      id: uid('producto'),
+      codigo,
+      nombre,
+      marca,
+      categoria: '',
+      codigoBarras: '',
+      precioCompra,
+      precioMarca: 0,
+      precioVenta: !isNaN(precioVenta) && precioVenta >= 0 ? precioVenta : 0,
+      stock: 0,
+      fechaCreacion: todayISO()
+    };
+    db.productos.push(p);
+  }
+
+  p.stock = (p.stock || 0) + cantidad;
+
+  // Opcional: actualiza los datos del producto (marca y precios). Las ventas
+  // ya registradas guardan su propio precio, así que NO cambian.
+  if(esNuevo || actualizar){
+    if(marca) p.marca = marca;
+    p.precioCompra = precioCompra;
+    if(!isNaN(precioVenta) && precioVenta >= 0) p.precioVenta = precioVenta;
+  }
+
+  const fechaElegida = document.getElementById('cFecha').value;
+  setLastCompraFecha(fechaElegida);
+  db.compras.unshift({
+    id: uid('compra'),
+    codigo,
+    nombre,
+    cantidad,
+    precioUnitario: precioCompra,
+    total: precioCompra * cantidad,
+    metodoPago: document.getElementById('cMetodoPago').value,
+    fecha: compraFechaFromInput(fechaElegida)
+  });
+  db.compras.sort((a,b)=> new Date(b.fecha) - new Date(a.fecha));
+
+  logInventarioHistorial(p, cantidad, 'compra');
+  saveDB();
+  renderCompras();
+  renderInventario();
+  renderProductos();
+  closeAllModals();
+  toast(`Compra registrada: ${nombre} → stock ${p.stock}`, 'success');
+
+  // Sigue escaneando el siguiente producto para registrar más compras seguido
+  openCompraScan();
 }
 
 /* -------------------------------------------------------------------------
@@ -1855,6 +2801,11 @@ const VIEW_TITLES = {
   productos: 'Productos',
   categorias: 'Categorías',
   ventas: 'Ventas',
+  compras: 'Compras',
+  finanzas: 'Estado Financiero',
+  retiros: 'Retiros',
+  deudas: 'Deudas',
+  gastos: 'Gastos del día',
   inventario: 'Inventario',
   historial: 'Historial',
   config: 'Configuración'
@@ -1870,7 +2821,7 @@ function updateInicioClock(){
 }
 
 function showView(name){
-  if(currentRole === 'guest' && (name === 'inventario' || name === 'config')){
+  if(currentRole === 'guest' && (name === 'inventario' || name === 'config' || name === 'compras' || name === 'finanzas' || name === 'retiros' || name === 'deudas' || name === 'gastos')){
     toast('Los invitados no tienen acceso a esa sección', 'error');
     name = 'productos';
   }
@@ -1891,6 +2842,11 @@ function showView(name){
   if(name === 'productos') renderProductos();
   if(name === 'categorias') renderCategorias();
   if(name === 'ventas') renderVentas();
+  if(name === 'compras') renderCompras();
+  if(name === 'finanzas') renderFinanzas();
+  if(name === 'retiros') renderRetiros();
+  if(name === 'deudas') renderDeudas();
+  if(name === 'gastos') renderGastos();
   if(name === 'inventario') renderInventario();
   if(name === 'historial') renderHistorial();
   if(name === 'escaner'){
@@ -2353,11 +3309,12 @@ function confirmDialog(title, message, onAccept){
   openModal('modalConfirm');
 }
 
-// Diálogo "¿Mantener inventario?" al borrar o vaciar ventas:
+// Diálogo "¿Mantener inventario?" al borrar o vaciar ventas/compras:
 //   onKeep    → Sí (el inventario NO se modifica).
 //   onRestore → No (el inventario sí se modifica).
 let ventaBorrarCallbacks = null;
-function ventaBorrarDialog(message, onKeep, onRestore){
+function ventaBorrarDialog(title, message, onKeep, onRestore){
+  if(title) document.getElementById('ventaBorrarTitle').textContent = title;
   document.getElementById('ventaBorrarMessage').textContent = message;
   ventaBorrarCallbacks = { onKeep, onRestore };
   openModal('modalVentaBorrar');
@@ -3156,9 +4113,124 @@ function setupEventListeners(){
     if(!delId) return;
     const v = db.ventas.find(x => x.id === delId);
     const nombre = v ? (v.nombre || v.codigo) : 'esta venta';
-    ventaBorrarDialog(`¿Eliminar "${nombre}"?\n\n¿Mantener el inventario?\n• Sí = el inventario NO se modifica.\n• No = la cantidad vuelve al stock.`,
+    ventaBorrarDialog('Eliminar venta', `¿Eliminar "${nombre}"?\n\n¿Mantener el inventario?\n• Sí = el inventario NO se modifica.\n• No = la cantidad vuelve al stock.`,
       ()=> deleteVenta(delId, true),
       ()=> deleteVenta(delId, false));
+  });
+
+  // Compras
+  document.getElementById('btnNuevaCompra').addEventListener('click', openCompraScan);
+  document.getElementById('btnCloseCompraScan').addEventListener('click', closeCompraScan);
+  document.getElementById('btnExportCompras').addEventListener('click', exportComprasCSV);
+  document.getElementById('btnImportCompras').addEventListener('click', ()=> document.getElementById('fileImportCompras').click());
+  document.getElementById('fileImportCompras').addEventListener('change', (e)=>{
+    if(e.target.files[0]) importComprasCSV(e.target.files[0]);
+    e.target.value = '';
+  });
+  document.getElementById('btnPurgeCompras').addEventListener('click', ()=>{
+    confirmDialog('Borrar compras antiguas', '¿Borrar las compras de hace más de 3 meses? Se recomienda exportarlas antes con "Exportar CSV". El stock de los productos no se modifica.', ()=>{
+      purgeComprasAntiguas();
+    });
+  });
+  document.getElementById('btnVaciarCompras').addEventListener('click', vaciarHistorialCompras);
+  document.getElementById('comprasDates').addEventListener('click', (e)=>{
+    const chip = e.target.closest('.compra-date-chip');
+    if(!chip) return;
+    compraDateFilter = chip.dataset.compraDate;
+    renderCompras();
+  });
+  document.getElementById('compraDateInput').addEventListener('change', (e)=>{
+    compraDateFilter = e.target.value || 'hoy';
+    renderCompras();
+  });
+  document.getElementById('exportCompraReminder').addEventListener('click', (e)=>{
+    if(e.target.id === 'btnCompraExportNow'){
+      exportComprasCSV();
+      markCompraExportPrompt();
+      maybeShowCompraReminder();
+    }else if(e.target.id === 'btnCompraDismiss'){
+      markCompraExportPrompt();
+      maybeShowCompraReminder();
+    }
+  });
+  document.getElementById('formCompra').addEventListener('submit', handleCompraSubmit);
+  document.getElementById('cCantidad').addEventListener('input', recalcCompraTotal);
+  document.getElementById('cPrecioCompra').addEventListener('input', recalcCompraTotal);
+  document.getElementById('cActualizarDatos').addEventListener('change', (e)=>{
+    document.getElementById('compraUpdateFields').style.display = e.target.checked ? 'grid' : 'none';
+  });
+  document.querySelectorAll('[data-compra-payment]').forEach(btn=>{
+    btn.addEventListener('click', ()=>{
+      document.querySelectorAll('[data-compra-payment]').forEach(b=>b.classList.remove('active'));
+      btn.classList.add('active');
+      document.getElementById('cMetodoPago').value = btn.dataset.compraPayment;
+    });
+  });
+  document.querySelector('#comprasTable tbody').addEventListener('click', (e)=>{
+    const delId = e.target.closest('[data-delete-compra]')?.dataset.deleteCompra;
+    if(!delId) return;
+    const c = db.compras.find(x => x.id === delId);
+    const nombre = c ? (c.nombre || c.codigo) : 'esta compra';
+    ventaBorrarDialog('Eliminar compra', `¿Eliminar "${nombre}"?\n\n¿Mantener el inventario?\n• Sí = el inventario NO se modifica.\n• No = la cantidad comprada se quita del stock.`,
+      ()=> deleteCompra(delId, true),
+      ()=> deleteCompra(delId, false));
+  });
+
+  // Estado Financiero / Retiros / Deudas
+  document.getElementById('btnEditarCaja').addEventListener('click', openEditarCajaModal);
+  document.getElementById('formEditarCaja').addEventListener('submit', handleEditarCajaSubmit);
+  document.getElementById('btnExportFinanzas').addEventListener('click', exportFinanzasCSV);
+  document.getElementById('btnNuevoRetiro').addEventListener('click', ()=> openRetiroModal());
+  document.getElementById('btnExportRetiros').addEventListener('click', exportRetirosCSV);
+  document.getElementById('formRetiro').addEventListener('submit', handleRetiroSubmit);
+  document.querySelector('#retirosTable tbody').addEventListener('click', (e)=>{
+    const editId = e.target.closest('[data-edit-retiro]')?.dataset.editRetiro;
+    const delId = e.target.closest('[data-delete-retiro]')?.dataset.deleteRetiro;
+    if(editId){
+      const r = (db.finanzas.retiros || []).find(x => x.id === editId);
+      if(r) openRetiroModal(r);
+    }
+    if(delId) deleteRetiro(delId);
+  });
+  document.getElementById('btnNuevaDeuda').addEventListener('click', ()=> openDeudaModal());
+  document.getElementById('btnExportDeudas').addEventListener('click', exportDeudasCSV);
+  document.getElementById('formDeuda').addEventListener('submit', handleDeudaSubmit);
+  document.getElementById('deudasGroups').addEventListener('click', (e)=>{
+    const editId = e.target.closest('[data-edit-deuda]')?.dataset.editDeuda;
+    const delId = e.target.closest('[data-delete-deuda]')?.dataset.deleteDeuda;
+    if(editId){
+      const d = (db.finanzas.deudas || []).find(x => x.id === editId);
+      if(d) openDeudaModal(d);
+    }
+    if(delId) deleteDeuda(delId);
+  });
+  document.getElementById('retirosMes').addEventListener('change', (e)=>{
+    retiroMesFilter = e.target.value;
+    renderRetiros();
+  });
+  document.getElementById('deudasMes').addEventListener('change', (e)=>{
+    deudaMesFilter = e.target.value;
+    renderDeudas();
+  });
+  document.getElementById('rObsPreset').addEventListener('change', (e)=>{
+    const obsInput = document.getElementById('rObs');
+    if(e.target.value){ obsInput.value = e.target.value; obsInput.disabled = true; }
+    else{ obsInput.disabled = false; obsInput.focus(); }
+  });
+
+  // Gastos del día
+  document.getElementById('btnNuevoGasto').addEventListener('click', ()=> openGastoModal());
+  document.getElementById('formGasto').addEventListener('submit', handleGastoSubmit);
+  document.getElementById('gCant').addEventListener('input', recalcGastoTotal);
+  document.getElementById('gBs').addEventListener('input', recalcGastoTotal);
+  document.querySelector('#gastosTable tbody').addEventListener('click', (e)=>{
+    const editId = e.target.closest('[data-edit-gasto]')?.dataset.editGasto;
+    const delId = e.target.closest('[data-delete-gasto]')?.dataset.deleteGasto;
+    if(editId){
+      const g = (db.gastos || []).find(x => x.id === editId);
+      if(g) openGastoModal(g);
+    }
+    if(delId) deleteGasto(delId);
   });
 
   // Inventario

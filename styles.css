@@ -227,9 +227,22 @@ input,select{font-family:inherit;}
 /* Los invitados no ven precio de compra ni precio de marca, y no tienen
    acceso a las pestañas de Inventario ni Configuración. */
 body.role-guest .nav-item[data-view="inventario"],
-body.role-guest .nav-item[data-view="config"]{display:none;}
+body.role-guest .nav-item[data-view="config"],
+body.role-guest .nav-item[data-view="compras"],
+body.role-guest .nav-item[data-view="finanzas"],
+body.role-guest .nav-item[data-view="retiros"],
+body.role-guest .nav-item[data-view="deudas"],
+body.role-guest .nav-item[data-view="gastos"]{display:none;}
 body.role-guest .price-guest-hide{display:none;}
 body.role-guest .admin-only{display:none !important;}
+
+/* Filtro por mes en Retiros y Deudas */
+.mes-filtro{display:flex; align-items:center; gap:8px; margin-bottom:12px; flex-wrap:wrap;}
+.mes-filtro label{font-size:13px; font-weight:600;}
+.mes-filtro .input{max-width:240px;}
+
+/* Gastos del día: fila de subtotal de cada día */
+.gasto-day-row td{background:rgba(0,0,0,0.05); font-weight:600; padding:8px 12px !important;}
 
 /* ---------- CONTRASEÑA POR MODO (barra lateral) ---------- */
 /* El botón para agregar contraseña aparece dentro de Herramientas Manuales
@@ -429,17 +442,20 @@ body.modo-invitado .sidebar-footer small{color:#fdba74;}
   .inicio-date{font-size:14px;}
 }
 
-/* ---------- VENTAS: FILTRO POR FECHAS ---------- */
+/* ---------- VENTAS Y COMPRAS: FILTRO POR FECHAS ---------- */
 .ventas-dates{
   display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin-bottom:12px;
 }
-.venta-date-chip{
+.venta-date-chip,
+.compra-date-chip{
   border:1px solid var(--border); background:#fff; color:var(--text);
   padding:6px 13px; border-radius:20px; font-size:12.5px; font-weight:600;
   cursor:pointer; transition:all .15s ease; font-family:inherit;
 }
-.venta-date-chip:hover{border-color:var(--primary); color:var(--primary);}
-.venta-date-chip.active{background:var(--primary); border-color:var(--primary); color:#fff;}
+.venta-date-chip:hover,
+.compra-date-chip:hover{border-color:var(--primary); color:var(--primary);}
+.venta-date-chip.active,
+.compra-date-chip.active{background:var(--primary); border-color:var(--primary); color:#fff;}
 .venta-date-picker{width:auto; padding:6px 10px;}
 .export-reminder{
   display:flex; flex-wrap:wrap; align-items:center; gap:10px;
@@ -448,6 +464,27 @@ body.modo-invitado .sidebar-footer small{color:#fdba74;}
 }
 .export-reminder span{flex:1; min-width:220px;}
 .btn-sm{padding:6px 12px; font-size:12.5px;}
+
+/* ---------- ESTADO FINANCIERO ---------- */
+.fin-stats{display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:14px;}
+.fin-card{
+  background:var(--bg); border:1px solid var(--border); border-radius:12px;
+  padding:18px; display:flex; flex-direction:column; gap:4px;
+}
+.fin-label{font-size:12.5px; font-weight:700; color:var(--text-muted); text-transform:uppercase; letter-spacing:.04em;}
+.fin-value{font-size:26px; font-weight:800; color:var(--text); line-height:1.15;}
+.fin-card:nth-child(2) .fin-value{color:var(--success);}
+.fin-card:nth-child(3) .fin-value{color:var(--primary);}
+.fin-sub{font-size:11.5px; color:var(--text-muted);}
+
+/* ---------- DEUDAS: agrupadas por marca ---------- */
+.deuda-group{background:var(--surface); border-radius:var(--radius); box-shadow:var(--shadow); margin-bottom:16px; overflow:hidden;}
+.deuda-group-header{
+  display:flex; align-items:center; justify-content:space-between; gap:10px;
+  padding:14px 18px; border-bottom:1px solid var(--border); background:var(--bg);
+}
+.deuda-group-header h3{margin:0; font-size:15px;}
+.deuda-group-header strong{font-size:16px; color:var(--danger);}
 
 /* ---------- TOASTS ---------- */
 .toast-container{position:fixed; bottom:20px; right:20px; z-index:400; display:flex; flex-direction:column; gap:10px;}

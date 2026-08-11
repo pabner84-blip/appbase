@@ -26,6 +26,11 @@
     <button class="nav-item" data-view="productos"><span>📦</span> Productos</button>
     <button class="nav-item" data-view="categorias"><span>🗂️</span> Categorías</button>
     <button class="nav-item" data-view="ventas"><span>💰</span> Ventas</button>
+    <button class="nav-item" data-view="compras"><span>🛒</span> Compras</button>
+    <button class="nav-item" data-view="finanzas"><span>📊</span> Estado Financiero</button>
+    <button class="nav-item" data-view="retiros"><span>🏧</span> Retiros</button>
+    <button class="nav-item" data-view="deudas"><span>📉</span> Deudas</button>
+    <button class="nav-item" data-view="gastos"><span>🧾</span> Gastos del día</button>
     <button class="nav-item" data-view="inventario"><span>📋</span> Inventario</button>
     <button class="nav-item" data-view="historial"><span>🕘</span> Historial</button>
     <button class="nav-item" data-view="config"><span>⚙️</span> Configuración</button>
@@ -186,6 +191,126 @@
             <tr>
               <th>Fecha</th><th>Código</th><th>Producto</th><th>Cant.</th>
               <th>Precio</th><th>Total</th><th class="admin-only">Ganancia neta</th><th>Pago</th><th class="admin-only">Acciones</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ---------- COMPRAS (solo dueño) ---------- -->
+    <section class="view" id="view-compras">
+      <div class="toolbar">
+        <button class="btn btn-primary" id="btnNuevaCompra">➕ Nueva compra</button>
+        <button class="btn btn-secondary" id="btnExportCompras">📤 Exportar CSV</button>
+        <button class="btn btn-secondary" id="btnImportCompras">📥 Importar CSV</button>
+        <button class="btn btn-secondary" id="btnPurgeCompras">🧹 Borrar antiguas</button>
+        <button class="btn btn-danger" id="btnVaciarCompras">🧹 Vaciar historial</button>
+      </div>
+      <div class="ventas-dates" id="comprasDates">
+        <button class="compra-date-chip active" data-compra-date="hoy">Hoy</button>
+        <button class="compra-date-chip" data-compra-date="ayer">Ayer</button>
+        <button class="compra-date-chip" data-compra-date="anteayer">Anteayer</button>
+        <input type="date" id="compraDateInput" class="input venta-date-picker" title="Ver compras de otra fecha">
+        <button class="compra-date-chip" data-compra-date="todas">Todas</button>
+      </div>
+      <div class="export-reminder" id="exportCompraReminder" style="display:none;"></div>
+      <p class="hint" id="comprasSummary" style="margin-bottom:12px;">0 compras</p>
+      <div class="table-wrap">
+        <table class="table" id="comprasTable">
+          <thead>
+            <tr>
+              <th>Fecha</th><th>Código</th><th>Producto</th><th>Cant.</th>
+              <th>P. Compra</th><th>Total</th><th>Pago</th><th>Acciones</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ---------- ESTADO FINANCIERO (solo dueño) ---------- -->
+    <section class="view" id="view-finanzas">
+      <div class="panel">
+        <div class="panel-header"><h3>📊 Estado financiero</h3></div>
+        <div class="panel-body">
+          <div class="fin-stats">
+            <div class="fin-card">
+              <span class="fin-label">Capital en productos</span>
+              <strong class="fin-value" id="finCapital">Bs 0.00</strong>
+              <span class="fin-sub">Inventario × precio de compra</span>
+            </div>
+            <div class="fin-card">
+              <span class="fin-label">Efectivo actual</span>
+              <strong class="fin-value" id="finCaja">Bs 0.00</strong>
+              <span class="fin-sub">Se ajusta con ventas y retiros</span>
+            </div>
+            <div class="fin-card">
+              <span class="fin-label">Patrimonio total</span>
+              <strong class="fin-value" id="finTotal">Bs 0.00</strong>
+              <span class="fin-sub">Productos + efectivo</span>
+            </div>
+          </div>
+          <div style="margin-top:14px;">
+            <button class="btn btn-secondary" id="btnEditarCaja">✏️ Editar efectivo</button>
+            <button class="btn btn-secondary" id="btnExportFinanzas">📤 Exportar CSV</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ---------- RETIROS DE DINERO (solo dueño) ---------- -->
+    <section class="view" id="view-retiros">
+      <div class="toolbar">
+        <button class="btn btn-danger" id="btnNuevoRetiro">➖ Nuevo retiro</button>
+        <button class="btn btn-secondary" id="btnExportRetiros">📤 Exportar CSV</button>
+      </div>
+      <div class="mes-filtro">
+        <label for="retirosMes">Mes:</label>
+        <select id="retirosMes" class="input">
+          <option value="">Todas las fechas</option>
+        </select>
+      </div>
+      <p class="hint" id="retirosSummary" style="margin-bottom:12px;">0 retiros</p>
+      <div class="table-wrap">
+        <table class="table" id="retirosTable">
+          <thead>
+            <tr>
+              <th>Fecha</th><th>Monto</th><th>Observación</th><th>Acciones</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ---------- DEUDAS (solo dueño) ---------- -->
+    <section class="view" id="view-deudas">
+      <div class="toolbar">
+        <button class="btn btn-primary" id="btnNuevaDeuda">➕ Nueva deuda</button>
+        <button class="btn btn-secondary" id="btnExportDeudas">📤 Exportar CSV</button>
+      </div>
+      <div class="mes-filtro">
+        <label for="deudasMes">Mes:</label>
+        <select id="deudasMes" class="input">
+          <option value="">Todas las fechas</option>
+        </select>
+      </div>
+      <p class="hint" id="deudasTotal" style="margin-bottom:12px;">Total de deudas: Bs 0.00</p>
+      <div id="deudasGroups"></div>
+    </section>
+
+    <!-- ---------- GASTOS DEL DÍA (solo dueño) ---------- -->
+    <section class="view" id="view-gastos">
+      <div class="toolbar">
+        <button class="btn btn-primary" id="btnNuevoGasto">🧾 Nuevo gasto</button>
+      </div>
+      <p class="hint" id="gastosSummary" style="margin-bottom:12px;">0 gastos</p>
+      <div class="table-wrap">
+        <table class="table" id="gastosTable">
+          <thead>
+            <tr>
+              <th>Fecha y hora</th><th>Cant.</th><th>Bs</th><th>Total</th><th>Observación</th><th>Acciones</th>
             </tr>
           </thead>
           <tbody></tbody>
@@ -421,6 +546,154 @@
   </div>
 </div>
 
+<!-- Modal: Escáner de Compras (reutiliza el mismo bloque de escáner) -->
+<div class="modal" id="modalCompraScan">
+  <div class="modal-header">
+    <h3>🛒 Registrar compra</h3>
+    <button class="modal-close" data-close-modal id="btnCloseCompraScan">✕</button>
+  </div>
+  <div class="modal-body">
+    <p class="hint" style="margin-top:0;">Escanea el código del producto que compraste. También puedes escribirlo en "Código" y presionar Enter.</p>
+    <div id="compraScannerBlockPlaceholder"></div>
+    <div id="compraScanResultBox" style="margin-top:14px;"></div>
+  </div>
+</div>
+
+<!-- Modal: Detalle de la compra (cantidad, precios y actualización opcional) -->
+<div class="modal modal-sm" id="modalCompraDetalle">
+  <div class="modal-header">
+    <h3>🛒 Registrar compra</h3>
+    <button class="modal-close" data-close-modal>✕</button>
+  </div>
+  <div class="modal-body">
+    <form id="formCompra" class="form-grid">
+      <input type="hidden" id="cCodigo">
+      <input type="hidden" id="cMetodoPago" value="efectivo">
+      <div class="product-info-box visible" style="grid-column:1/-1;">
+        📦 <strong id="cNombreDisplay"></strong>
+      </div>
+      <label style="grid-column:1/-1;">Descripción *<input type="text" id="cNombreInput" class="input" required></label>
+      <label>Cantidad *<input type="number" id="cCantidad" class="input" step="1" min="1" value="1" required></label>
+      <label>Precio de compra (c/u) *<input type="number" id="cPrecioCompra" class="input" step="0.01" min="0" required></label>
+      <label style="grid-column:1/-1;">Fecha de la compra<input type="date" id="cFecha" class="input" title="Fecha del recibo (si la compra fue de otro día, elige esa fecha)"></label>
+      <label style="grid-column:1/-1;">Total (calculado)<input type="text" id="cTotalDisplay" class="input" readonly tabindex="-1" style="background:var(--bg); color:var(--text-muted);"></label>
+      <label style="grid-column:1/-1;">Método de pago
+        <div class="scan-mode-tabs" style="margin-top:4px;">
+          <button type="button" class="scan-tab active" data-compra-payment="efectivo">💵 Efectivo</button>
+          <button type="button" class="scan-tab" data-compra-payment="qr">📱 QR</button>
+        </div>
+      </label>
+      <div id="compraUpdateBox" style="grid-column:1/-1; background:rgba(255,255,255,.05); border:1px dashed var(--border); border-radius:8px; padding:10px;">
+        <label id="compraUpdateToggle" style="display:flex; align-items:center; gap:8px; font-size:12.5px; font-weight:600; color:#374151; cursor:pointer; margin-bottom:4px;">
+          <input type="checkbox" id="cActualizarDatos" style="width:auto;"> Actualizar datos del producto (marca y precios)
+        </label>
+        <p class="hint" style="margin:0 0 8px; font-size:11.5px;">Los precios de ventas pasadas no cambian: solo afecta al producto y a las ventas futuras.</p>
+        <div id="compraUpdateFields" style="display:none; grid-template-columns:1fr 1fr; gap:10px;">
+          <label>Marca<input type="text" id="cMarca" class="input" placeholder="Opcional"></label>
+          <label>Precio de venta<input type="number" id="cPrecioVenta" class="input" step="0.01" min="0" placeholder="Opcional"></label>
+        </div>
+      </div>
+      <div class="form-actions">
+        <button type="submit" class="btn btn-success">Registrar compra</button>
+        <button type="button" class="btn btn-secondary" data-close-modal>Cancelar</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Modal: Editar efectivo actual -->
+<div class="modal modal-sm" id="modalEditarCaja">
+  <div class="modal-header">
+    <h3>✏️ Editar efectivo actual</h3>
+    <button class="modal-close" data-close-modal>✕</button>
+  </div>
+  <div class="modal-body">
+    <form id="formEditarCaja" class="form-grid">
+      <label style="grid-column:1/-1;">Efectivo actual (Bs) *<input type="number" id="cajaMonto" class="input" step="0.01" min="0" required></label>
+      <p class="hint" style="grid-column:1/-1; margin:0;">Este monto se modifica solo con este botón, con las ventas y con los retiros de dinero.</p>
+      <div class="form-actions">
+        <button type="submit" class="btn btn-primary">Guardar</button>
+        <button type="button" class="btn btn-secondary" data-close-modal>Cancelar</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Modal: Retiro de dinero -->
+<div class="modal modal-sm" id="modalRetiro">
+  <div class="modal-header">
+    <h3 id="retiroModalTitle">➖ Nuevo retiro</h3>
+    <button class="modal-close" data-close-modal>✕</button>
+  </div>
+  <div class="modal-body">
+    <form id="formRetiro" class="form-grid">
+      <input type="hidden" id="rId">
+      <label style="grid-column:1/-1;">Monto (Bs) *<input type="number" id="rMonto" class="input" step="0.01" min="0.01" required></label>
+      <label style="grid-column:1/-1;">Fecha del retiro<input type="date" id="rFecha" class="input" title="Fecha a la que corresponde el retiro (por defecto hoy y se recuerda)."></label>
+      <label style="grid-column:1/-1;">Concepto
+        <select id="rObsPreset" class="input">
+          <option value="">Otro (escribir)</option>
+          <option value="Pago Truper">Pago Truper</option>
+          <option value="Pago Ingco">Pago Ingco</option>
+          <option value="Pago Dyllu">Pago Dyllu</option>
+          <option value="Salarios">Salarios</option>
+        </select>
+      </label>
+      <label style="grid-column:1/-1;">Observación<input type="text" id="rObs" class="input" placeholder="Ej: Pago Truper, Pago Ingco, luz, gasolina..."></label>
+      <div class="form-actions">
+        <button type="submit" class="btn btn-danger">Guardar retiro</button>
+        <button type="button" class="btn btn-secondary" data-close-modal>Cancelar</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Modal: Deuda -->
+<div class="modal modal-sm" id="modalDeuda">
+  <div class="modal-header">
+    <h3 id="deudaModalTitle">➕ Nueva deuda</h3>
+    <button class="modal-close" data-close-modal>✕</button>
+  </div>
+  <div class="modal-body">
+    <form id="formDeuda" class="form-grid">
+      <input type="hidden" id="dId">
+      <label style="grid-column:1/-1;">Marca *<input type="text" id="dMarca" class="input" list="marcasDeudasList" placeholder="Ej: Truper, Ingco, Dyllu..." required></label>
+      <datalist id="marcasDeudasList"></datalist>
+      <label style="grid-column:1/-1;">Monto (Bs) *<input type="number" id="dMonto" class="input" step="0.01" min="0.01" required></label>
+      <label>Fecha de la deuda<input type="date" id="dFecha" class="input"></label>
+      <label>Vencimiento<input type="date" id="dVencimiento" class="input"></label>
+      <label style="grid-column:1/-1;">Observación<input type="text" id="dObs" class="input" placeholder="Ej: Pedido Truper #123"></label>
+      <div class="form-actions">
+        <button type="submit" class="btn btn-primary">Guardar deuda</button>
+        <button type="button" class="btn btn-secondary" data-close-modal>Cancelar</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Modal: Gasto del día -->
+<div class="modal modal-sm" id="modalGasto">
+  <div class="modal-header">
+    <h3 id="gastoModalTitle">🧾 Nuevo gasto</h3>
+    <button class="modal-close" data-close-modal>✕</button>
+  </div>
+  <div class="modal-body">
+    <form id="formGasto" class="form-grid">
+      <input type="hidden" id="gId">
+      <label style="grid-column:1/-1;">Cantidad *<input type="number" id="gCant" class="input" step="1" min="1" value="1" required></label>
+      <label style="grid-column:1/-1;">Bs (precio unitario) *<input type="number" id="gBs" class="input" step="0.01" min="0.01" required></label>
+      <label style="grid-column:1/-1;">Observación<input type="text" id="gObs" class="input" placeholder="Ej: pasaje, comida, gasolina, flete..."></label>
+      <label>Fecha del gasto<input type="date" id="gFecha" class="input" title="Fecha del gasto (por defecto hoy y se recuerda)."></label>
+      <label>Hora<input type="time" id="gHora" class="input" title="Hora del gasto (por defecto la actual)."></label>
+      <p class="hint" id="gTotalHint" style="grid-column:1/-1; margin:0;">Total: Bs 0.00</p>
+      <div class="form-actions">
+        <button type="submit" class="btn btn-danger">Guardar gasto</button>
+        <button type="button" class="btn btn-secondary" data-close-modal>Cancelar</button>
+      </div>
+    </form>
+  </div>
+</div>
+
 <!-- Modal: Escáner de código de barras (solo para el campo Código de barras) -->
 <div class="modal modal-sm" id="modalBarcodeScan">
   <div class="modal-header">
@@ -538,6 +811,7 @@
 <input type="file" id="fileImportProducts" accept=".csv" hidden>
 <input type="file" id="fileImportInventario" accept=".csv" hidden>
 <input type="file" id="fileImportVentas" accept=".csv" hidden>
+<input type="file" id="fileImportCompras" accept=".csv" hidden>
 <input type="file" id="fileImportBackup" accept=".json" hidden>
 
 <script src='https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js'></script>

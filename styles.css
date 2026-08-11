@@ -235,6 +235,9 @@ body.inicio-theme .nav-item.active{background:#fb923c; color:#0b0b0c;}
   background:transparent; border:none; box-shadow:none;
   padding:70px 20px 40px; text-align:center; max-width:640px; margin:0 auto;
 }
+.inicio-drill{
+  width:150px; height:auto; display:block; margin:0 auto 14px;
+}
 .inicio-welcome{
   font-size:104px; font-weight:800; color:#fb923c; letter-spacing:.02em;
   line-height:1.05; text-shadow:0 0 44px rgba(251,146,60,.45);
@@ -251,12 +254,14 @@ body.inicio-theme .nav-item.active{background:#fb923c; color:#0b0b0c;}
 }
 .inicio-clock-card .hint{color:#9ca3af; font-size:15px; margin-top:22px;}
 @media (max-width: 900px){
+  .inicio-drill{width:110px; margin-bottom:10px;}
   .inicio-welcome{font-size:80px;}
   .inicio-time{font-size:80px;}
   .inicio-date{font-size:26px;}
 }
 @media (max-width: 560px){
   .inicio-clock-card{padding:44px 16px 28px;}
+  .inicio-drill{width:76px; margin-bottom:6px;}
   .inicio-welcome{font-size:44px; margin-bottom:10px;}
   .inicio-time{font-size:56px;}
   .inicio-date{font-size:19px;}

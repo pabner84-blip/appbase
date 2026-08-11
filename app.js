@@ -454,6 +454,52 @@ function handleVentaSubmit(e){
    4. VISTA: ESCÁNER / RESULTADO
    ------------------------------------------------------------------------- */
 
+// Sonido tipo "silbido" que suena cuando la cámara detecta un código (en
+// cualquiera de los 3 modos: numérico, alfanumérico o código de barras).
+// Generado con Web Audio API (sin archivos externos): un tono que sube y
+// baja de frecuencia durante 1 segundo, a volumen estándar.
+let detectAudioCtx = null;
+function getDetectAudioCtx(){
+  if(!detectAudioCtx){
+    try{ detectAudioCtx = new (window.AudioContext || window.webkitAudioContext)(); }
+    catch(e){ return null; }
+  }
+  if(detectAudioCtx.state === 'suspended') detectAudioCtx.resume().catch(()=>{});
+  return detectAudioCtx;
+}
+
+function playDetectionSound(){
+  const ctx = getDetectAudioCtx();
+  if(!ctx) return;
+  try{
+    const duration = 1.0; // 1 segundo
+    const now = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'sine';
+    // Silbido: la frecuencia sube y luego baja durante el segundo
+    osc.frequency.setValueAtTime(700, now);
+    osc.frequency.exponentialRampToValueAtTime(1700, now + 0.35);
+    osc.frequency.exponentialRampToValueAtTime(900, now + duration);
+    // Volumen estándar, con una pequeña rampa de entrada/salida para evitar "clics"
+    gain.gain.setValueAtTime(0.0001, now);
+    gain.gain.exponentialRampToValueAtTime(0.35, now + 0.05);
+    gain.gain.setValueAtTime(0.35, now + duration - 0.12);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + duration);
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start(now);
+    osc.stop(now + duration + 0.02);
+  }catch(e){ /* si el navegador bloquea audio, se ignora silenciosamente */ }
+}
+
+// Baja automáticamente la pantalla hasta la tarjeta con la información del
+// producto detectado, para que se vea sin que el usuario tenga que hacer scroll.
+function scrollToScanResult(elementId){
+  const el = document.getElementById(elementId);
+  if(el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
 function renderScanResult(codigo){
   renderScanResultInto('scanResult', codigo, 'lookup');
 }
@@ -529,15 +575,23 @@ function renderScanResultInto(elementId, codigo, context){
 // cantidad desde la pestaña Inventario) — cambia qué pasa al detectar un código
 let scanContext = 'lookup';
 
-function handleScannedCode(codigo){
+function handleScannedCode(codigo, fromCamera){
   codigo = String(codigo).trim();
   if(!codigo) return;
   if(scanContext === 'inventario'){
     handleInventoryScan(codigo);
+    if(fromCamera){
+      playDetectionSound();
+      scrollToScanResult('invScanResultBox');
+    }
     return;
   }
   renderScanResult(codigo);
   logScanHistory(codigo);
+  if(fromCamera){
+    playDetectionSound();
+    scrollToScanResult('scanResult');
+  }
 }
 
 const HISTORY_MAX = 300;
@@ -1770,7 +1824,7 @@ async function runOcrCapture(){
       if(!(window.__lastOcrCode === best && now - (window.__lastOcrTime||0) < 3000)){
         window.__lastOcrCode = best;
         window.__lastOcrTime = now;
-        handleScannedCode(best);
+        handleScannedCode(best, true);
       }
       if(ocrActive) setOcrStatus('✅ Código detectado: ' + best);
     }else if(ocrActive){
@@ -1834,7 +1888,7 @@ async function captureShot(){
     const best = resolveScannedText(text);
 
     if(best){
-      handleScannedCode(best);
+      handleScannedCode(best, true);
       setOcrStatus('✅ Código detectado: ' + best);
     }else{
       const raw = String(text || '').replace(/\s+/g,' ').trim();
@@ -1920,7 +1974,7 @@ async function startZxingLiveScanner(){
       if(!(window.__lastOcrCode === code && now - (window.__lastOcrTime||0) < 3000)){
         window.__lastOcrCode = code;
         window.__lastOcrTime = now;
-        handleScannedCode(code);
+        handleScannedCode(code, true);
       }
       if(zxingLiveActive) setOcrStatus('✅ Código de barras detectado: ' + code);
     });

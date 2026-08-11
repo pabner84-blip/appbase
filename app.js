@@ -667,6 +667,7 @@ function handleVentaSubmit(e){
 
   const modoDestino = document.getElementById('vModoDestino') ? document.getElementById('vModoDestino').value : 'manual';
   saveVenta({ codigo, nombre, cantidad, total, metodoPago, modoDestino });
+  playCashRegisterSound();
   closeAllModals();
   renderInventario();
   renderProductos();
@@ -1742,6 +1743,7 @@ function showView(name){
   });
   document.getElementById('viewTitle').textContent = VIEW_TITLES[name] || '';
   document.body.classList.toggle('inicio-theme', name === 'inicio');
+  document.body.classList.remove('welcome-view');
   closeSidebarMobile();
   closeAllModals(); // por si venías con el escáner de inventario u otro modal abierto
   restoreScannerBlockHome();
@@ -1911,7 +1913,6 @@ function enterModo(modo){
 function showWelcomeForMode(modo){
   document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
   document.getElementById('view-welcome').classList.add('active');
-  document.getElementById('welcomeTitle').textContent = 'BIENVENIDO';
   const sub = modo === 'manual' ? 'Herramientas Manuales'
     : modo === 'electrico' ? 'Herramientas Eléctricas'
     : 'TIENDA 1';
@@ -1919,38 +1920,139 @@ function showWelcomeForMode(modo){
   document.querySelectorAll('.nav-item[data-view]').forEach(btn=> btn.classList.remove('active'));
   document.getElementById('viewTitle').textContent = sub;
   document.body.classList.remove('inicio-theme');
+  document.body.classList.add('welcome-view');
   closeSidebarMobile();
   closeAllModals();
   restoreScannerBlockHome();
   scanContext = 'lookup';
-  // Voz de asistente al entrar a las pantallas de bienvenida
-  setTimeout(()=> speak('Bienvenido, ' + sub), 350);
+  // Sonido de ingreso de sesión al entrar a las pantallas de bienvenida
+  setTimeout(playLoginSound, 350);
 }
 
-// Voz de asistente (mujer en español si está disponible) usando la API de
-// síntesis de voz del navegador.
-function speak(text){
-  if(!('speechSynthesis' in window)) return;
+// Sonido de "ingreso de sesión" (el clásico timbre/chime de bienvenida),
+// generado con Web Audio para no depender de archivos de audio.
+function playLoginSound(){
   try{
-    window.speechSynthesis.cancel();
-    const u = new SpeechSynthesisUtterance(text);
-    u.lang = 'es-ES';
-    u.rate = 0.95;
-    u.pitch = 1.05;
-    const pick = ()=>{
-      const voices = window.speechSynthesis.getVoices();
-      const es = voices.filter(v => (v.lang||'').toLowerCase().indexOf('es') === 0);
-      if(es.length){
-        const fem = es.find(v => /sabina|monica|paul|helena|laura|marcela|google/i.test(v.name)) || es.find(v => /female|femenina/i.test(v.name)) || es[0];
-        u.voice = fem;
-      }
-      window.speechSynthesis.speak(u);
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if(!AC) return;
+    const ctx = new AC();
+    if(ctx.state === 'suspended' && ctx.resume) ctx.resume();
+    const now = ctx.currentTime;
+
+    const tone = (freq, start, dur, vol) => {
+      const o = ctx.createOscillator();
+      const g = ctx.createGain();
+      o.type = 'sine';
+      o.frequency.value = freq;
+      o.connect(g);
+      g.connect(ctx.destination);
+      g.gain.setValueAtTime(0, now + start);
+      g.gain.linearRampToValueAtTime(vol, now + start + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, now + start + dur);
+      o.start(now + start);
+      o.stop(now + start + dur + 0.05);
     };
-    if(window.speechSynthesis.getVoices().length) pick();
-    else{
-      window.speechSynthesis.onvoiceschanged = ()=>{ window.speechSynthesis.onvoiceschanged = null; pick(); };
-      setTimeout(pick, 300);
-    }
+
+    // Chime ascendente cálido estilo "inicio de sesión"
+    tone(523.25, 0.00, 0.7, 0.35);  // Do5
+    tone(659.25, 0.00, 0.7, 0.28);  // Mi5
+    tone(783.99, 0.00, 0.7, 0.22);  // Sol5
+    tone(1046.5, 0.10, 0.8, 0.15);  // Do6 (brillo final)
+  }catch(e){}
+}
+
+// Sonido al apretar los botones del menú lateral (distinto al de ingreso de
+// sesión), generado con Web Audio. Chime suave, similar al de la pantalla de
+// inicio/bienvenida pero más corto y discreto.
+function playClickSound(){
+  try{
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if(!AC) return;
+    const ctx = new AC();
+    if(ctx.state === 'suspended' && ctx.resume) ctx.resume();
+    const now = ctx.currentTime;
+
+    const tone = (freq, start, dur, vol) => {
+      const o = ctx.createOscillator();
+      const g = ctx.createGain();
+      o.type = 'sine';
+      o.frequency.value = freq;
+      o.connect(g);
+      g.connect(ctx.destination);
+      g.gain.setValueAtTime(0, now + start);
+      g.gain.linearRampToValueAtTime(vol, now + start + 0.008);
+      g.gain.exponentialRampToValueAtTime(0.0001, now + start + dur);
+      o.start(now + start);
+      o.stop(now + start + dur + 0.05);
+    };
+
+    // Acorde mayor corto, en la línea del chime de bienvenida
+    tone(523.25, 0.00, 0.25, 0.14);  // Do5
+    tone(659.25, 0.00, 0.25, 0.12);  // Mi5
+    tone(783.99, 0.00, 0.25, 0.10);  // Sol5
+  }catch(e){}
+}
+
+// Sonido de caja registradora "Ka-Ching" clásico al registrar una venta,
+// generado con Web Audio: golpe mecánico ("ka"), resorte que sube ("zzzip")
+// y tintineo metálico del cajón ("ching").
+function playCashRegisterSound(){
+  try{
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if(!AC) return;
+    const ctx = new AC();
+    if(ctx.state === 'suspended' && ctx.resume) ctx.resume();
+    const now = ctx.currentTime;
+
+    // "Ching": campana metálica con varios parciales (brillo realista)
+    const ring = (freq, start, dur, vol) => {
+      [1, 2.01, 3.02].forEach((m, i) => {
+        const o = ctx.createOscillator();
+        const g = ctx.createGain();
+        o.type = 'sine';
+        o.frequency.value = freq * m;
+        o.connect(g);
+        g.connect(ctx.destination);
+        const a = now + start + i * 0.001;
+        g.gain.setValueAtTime(0, a);
+        g.gain.linearRampToValueAtTime(vol / (i + 1), a + 0.004);
+        g.gain.exponentialRampToValueAtTime(0.0001, a + dur);
+        o.start(a);
+        o.stop(a + dur + 0.05);
+      });
+    };
+
+    // "Ka": golpe mecánico de la caja
+    const o = ctx.createOscillator();
+    const g = ctx.createGain();
+    o.type = 'square';
+    o.frequency.setValueAtTime(180, now);
+    o.frequency.exponentialRampToValueAtTime(120, now + 0.09);
+    o.connect(g);
+    g.connect(ctx.destination);
+    g.gain.setValueAtTime(0, now);
+    g.gain.linearRampToValueAtTime(0.22, now + 0.004);
+    g.gain.exponentialRampToValueAtTime(0.0001, now + 0.10);
+    o.start(now);
+    o.stop(now + 0.12);
+
+    // "zzzip": resorte del cajón subiendo
+    const s = ctx.createOscillator();
+    const sg = ctx.createGain();
+    s.type = 'sawtooth';
+    s.frequency.setValueAtTime(600, now + 0.08);
+    s.frequency.exponentialRampToValueAtTime(1500, now + 0.16);
+    s.connect(sg);
+    sg.connect(ctx.destination);
+    sg.gain.setValueAtTime(0, now + 0.08);
+    sg.gain.linearRampToValueAtTime(0.10, now + 0.09);
+    sg.gain.exponentialRampToValueAtTime(0.0001, now + 0.18);
+    s.start(now + 0.08);
+    s.stop(now + 0.20);
+
+    // "Ching": tintineo metálico
+    ring(2093.0, 0.16, 0.9, 0.25);  // Do7
+    ring(2637.0, 0.28, 1.0, 0.20);  // Mi7
   }catch(e){}
 }
 
@@ -2625,6 +2727,11 @@ function setupEventListeners(){
     btn.addEventListener('click', ()=>{
       showView(btn.dataset.view);
     });
+  });
+
+  // Sonido de clic al apretar cualquier botón del menú lateral
+  document.getElementById('sidebar').addEventListener('click', (e)=>{
+    if(e.target.closest('button')) playClickSound();
   });
 
   // Sidebar móvil

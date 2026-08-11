@@ -299,51 +299,56 @@ body.inicio-theme .main-wrap{margin-left:0;}
 .inicio-modo-electrico{background:#2563eb; color:#fff; box-shadow:0 0 24px rgba(37,99,235,.35);}
 .inicio-modo-invitado{background:#16a34a; color:#fff; box-shadow:0 0 24px rgba(22,163,74,.35);}
 
-/* "Creado Por Abner Perez": esquina superior izquierda, fuente tipo Alphabet */
+/* "Creado Por Abner Perez": abajo a la izquierda, fuente empresarial elegante */
 #view-inicio{position:relative;}
 .inicio-footer{
-  position:absolute; top:6px; left:0; text-align:left; color:#9ca3af;
-  font-size:20px; font-weight:800; letter-spacing:.06em;
-  font-family:'Alfa Slab One','Impact','Arial Black',sans-serif;
+  position:absolute; bottom:6px; left:14px; right:auto; text-align:left;
+  color:#ffffff; font-size:20px; font-weight:600; letter-spacing:.05em;
+  font-family:'Playfair Display',Georgia,'Times New Roman',serif;
+  text-shadow:0 0 18px rgba(251,146,60,.25);
 }
 
 @media (max-width: 560px){
-  .inicio-footer{font-size:12px; top:2px;}
+  .inicio-footer{font-size:15px; bottom:4px; left:10px;}
 }
 
 /* ---------- PANTALLAS DE BIENVENIDA (una por modo) ---------- */
-/* Aparecen al entrar con un botón de Inicio: "BIENVENIDO" + nombre del modo,
-   cada una con su color respectivo (rojo/azul/verde). Conservan el menú
-   lateral (hamburguesa en el celular) para poder navegar. */
-.view-welcome.active{
+/* Aparecen al entrar con un botón de Inicio: solo el nombre del modo en su
+   color respectivo (rojo/azul/verde), a todo color sin bordes blancos.
+   Conservan el menú lateral (hamburguesa en el celular) para poder navegar. */
+body.welcome-view .content{padding:0; overflow:hidden;}
+body.welcome-view .view-welcome.active{
   display:flex; align-items:center; justify-content:center;
-  min-height:calc(100vh - 60px); text-align:center; padding:24px;
+  min-height:calc(100vh - 52px); text-align:center; padding:24px;
 }
-.welcome-title{
-  font-family:'Alfa Slab One','Impact','Arial Black',sans-serif;
-  font-size:64px; font-weight:800; letter-spacing:.04em; margin:0 0 10px;
-}
+body.welcome-view .topbar{border-bottom:none;}
+body.modo-manual.welcome-view .topbar{background:#1a0d0d;}
+body.modo-electrico.welcome-view .topbar{background:#0d1526;}
+body.modo-invitado.welcome-view .topbar{background:#052e16;}
+body.modo-manual.welcome-view .topbar h1,
+body.modo-manual.welcome-view .hamburger{color:#f87171;}
+body.modo-electrico.welcome-view .topbar h1,
+body.modo-electrico.welcome-view .hamburger{color:#60a5fa;}
+body.modo-invitado.welcome-view .topbar h1,
+body.modo-invitado.welcome-view .hamburger{color:#4ade80;}
 .welcome-subtitle{
-  font-size:30px; font-weight:700; letter-spacing:.02em; margin-bottom:34px;
+  font-family:'Alfa Slab One','Impact','Arial Black',sans-serif;
+  font-size:46px; font-weight:800; letter-spacing:.03em; margin:0;
 }
 .welcome-hint{font-size:13px; opacity:.75; margin-top:16px;}
 
 body.modo-manual .view-welcome{background:#1a0d0d;}
 body.modo-electrico .view-welcome{background:#0d1526;}
 body.modo-invitado .view-welcome{background:#052e16;}
-body.modo-manual .welcome-title{color:#f87171;}
-body.modo-manual .welcome-subtitle{color:#fca5a5;}
-body.modo-electrico .welcome-title{color:#60a5fa;}
-body.modo-electrico .welcome-subtitle{color:#93c5fd;}
-body.modo-invitado .welcome-title{color:#4ade80;}
-body.modo-invitado .welcome-subtitle{color:#86efac;}
+body.modo-manual .welcome-subtitle{color:#f87171;}
+body.modo-electrico .welcome-subtitle{color:#60a5fa;}
+body.modo-invitado .welcome-subtitle{color:#4ade80;}
 body.modo-manual .view-welcome .welcome-hint{color:#fca5a5;}
 body.modo-electrico .view-welcome .welcome-hint{color:#93c5fd;}
 body.modo-invitado .view-welcome .welcome-hint{color:#86efac;}
 
 @media (max-width: 560px){
-  .welcome-title{font-size:38px;}
-  .welcome-subtitle{font-size:21px;}
+  .welcome-subtitle{font-size:28px;}
 }
 
 /* ---------- MODO: HERRAMIENTAS MANUALES (rojo) ---------- */

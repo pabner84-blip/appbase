@@ -7,8 +7,35 @@
    ========================================================================= */
 
 const STORAGE_KEY = 'stockferre_catalogo_v1';
+// Fecha/hora del último registro de inventario por producto. Se guarda solo
+// en este dispositivo (LocalStorage) para no gastar la cuota de Firebase.
+const INV_UPDATES_KEY = 'stockferre_inv_actualizaciones_v1';
 
 let db = null;
+let invUpdates = {};
+
+function loadInvUpdates(){
+  try{
+    const raw = localStorage.getItem(INV_UPDATES_KEY);
+    invUpdates = raw ? JSON.parse(raw) : {};
+  }catch(e){
+    console.error('Error leyendo actualizaciones de inventario', e);
+    invUpdates = {};
+  }
+}
+
+function saveInvUpdates(){
+  try{
+    localStorage.setItem(INV_UPDATES_KEY, JSON.stringify(invUpdates));
+  }catch(e){
+    console.error('Error guardando actualizaciones de inventario', e);
+  }
+}
+
+function markInventarioActualizado(productoId){
+  invUpdates[productoId] = todayISO();
+  saveInvUpdates();
+}
 
 /* -------------------------------------------------------------------------
    1. MODELO DE DATOS + PERSISTENCIA (Firebase + LocalStorage)
@@ -287,56 +314,111 @@ function deleteProducto(id){
 
 function saveVenta(data){
   const cantidad = parseFloat(data.cantidad) || 0;
-  const precio = parseFloat(data.precio) || 0;
+  const total = parseFloat(data.total) || 0;
+  const precioUnitario = cantidad > 0 ? total / cantidad : 0;
   const venta = {
     id: uid('venta'),
     codigo: data.codigo,
     nombre: data.nombre,
     cantidad,
-    precioUnitario: precio,
-    total: cantidad * precio,
+    precioUnitario,
+    total,
     metodoPago: data.metodoPago,
     fecha: todayISO()
   };
   db.ventas.unshift(venta);
+
+  // Descuenta del stock del producto (si es un producto real, no "OTRO").
+  // Se permite que el stock quede en 0 o negativo: la venta nunca se bloquea.
+  const p = getProductoByCodigo(data.codigo);
+  if(p){
+    p.stock = (p.stock || 0) - cantidad;
+  }
+
   saveDB();
   return venta;
 }
 
 function deleteVenta(id){
-  confirmDialog('Eliminar venta', '¿Seguro que quieres eliminar este registro de venta?', ()=>{
+  confirmDialog('Eliminar venta', '¿Seguro que quieres eliminar este registro de venta? El stock del producto se restaurará.', ()=>{
+    const venta = db.ventas.find(v => v.id === id);
+    if(venta){
+      const p = getProductoByCodigo(venta.codigo);
+      if(p) p.stock = (p.stock || 0) + venta.cantidad;
+    }
     db.ventas = db.ventas.filter(v => v.id !== id);
     saveDB();
     renderVentas();
+    renderInventario();
+    renderProductos();
     toast('Venta eliminada', 'success');
   });
 }
 
+// Recalcula y muestra el Precio Unitario = Precio Total / Cantidad
+// cada vez que el usuario cambia alguno de esos dos campos.
+function recalcVentaPrecioUnitario(){
+  const cantidad = parseFloat(document.getElementById('vCantidad').value);
+  const total = parseFloat(document.getElementById('vPrecioTotal').value);
+  const unitarioEl = document.getElementById('vPrecioUnitario');
+  if(cantidad > 0 && !isNaN(total)){
+    unitarioEl.value = fmtMoney(total / cantidad);
+  }else{
+    unitarioEl.value = '';
+  }
+}
+
 function openVentaModal(producto){
+  document.getElementById('vEsOtro').value = '0';
+  document.getElementById('vNombreDisplayBox').style.display = '';
+  document.getElementById('vNombreOtroLabel').style.display = 'none';
   document.getElementById('vCodigo').value = producto.codigo;
   document.getElementById('vNombreDisplay').textContent = producto.nombre;
   document.getElementById('vNombre').value = producto.nombre;
   document.getElementById('vCantidad').value = 1;
-  document.getElementById('vPrecio').value = producto.precioVenta || 0;
+  document.getElementById('vPrecioTotal').value = producto.precioVenta || 0;
   document.querySelectorAll('[data-payment-method]').forEach(btn=>{
     btn.classList.toggle('active', btn.dataset.paymentMethod === 'efectivo');
   });
   document.getElementById('vMetodoPago').value = 'efectivo';
+  recalcVentaPrecioUnitario();
   openModal('modalVenta');
+}
+
+// Venta de un producto que NO está en el inventario: se pide una descripción
+// libre y un precio. Se registra en el historial de ventas, pero nunca se
+// crea como producto ni afecta ningún stock.
+function openVentaModalOtro(){
+  document.getElementById('vEsOtro').value = '1';
+  document.getElementById('vNombreDisplayBox').style.display = 'none';
+  document.getElementById('vNombreOtroLabel').style.display = '';
+  document.getElementById('vCodigo').value = '';
+  document.getElementById('vNombre').value = '';
+  document.getElementById('vNombreOtroInput').value = '';
+  document.getElementById('vCantidad').value = 1;
+  document.getElementById('vPrecioTotal').value = '';
+  document.querySelectorAll('[data-payment-method]').forEach(btn=>{
+    btn.classList.toggle('active', btn.dataset.paymentMethod === 'efectivo');
+  });
+  document.getElementById('vMetodoPago').value = 'efectivo';
+  recalcVentaPrecioUnitario();
+  openModal('modalVenta');
+  setTimeout(()=> document.getElementById('vNombreOtroInput').focus(), 50);
 }
 
 function handleVentaSubmit(e){
   e.preventDefault();
+  const esOtro = document.getElementById('vEsOtro').value === '1';
   const cantidad = parseFloat(document.getElementById('vCantidad').value);
-  const precio = parseFloat(document.getElementById('vPrecio').value);
+  const total = parseFloat(document.getElementById('vPrecioTotal').value);
   const metodoPago = document.getElementById('vMetodoPago').value;
 
   if(!cantidad || cantidad <= 0){
     toast('Ingresa una cantidad válida', 'error');
     return;
   }
-  if(precio === null || isNaN(precio) || precio < 0){
-    toast('Ingresa un precio válido', 'error');
+  if(total === null || isNaN(total) || total < 0){
+    toast('Ingresa un precio total válido', 'error');
     return;
   }
   if(!metodoPago){
@@ -344,12 +426,23 @@ function handleVentaSubmit(e){
     return;
   }
 
-  saveVenta({
-    codigo: document.getElementById('vCodigo').value,
-    nombre: document.getElementById('vNombre').value,
-    cantidad, precio, metodoPago
-  });
+  let codigo, nombre;
+  if(esOtro){
+    nombre = document.getElementById('vNombreOtroInput').value.trim();
+    if(!nombre){
+      toast('Escribe una descripción para el producto', 'error');
+      return;
+    }
+    codigo = 'OTRO';
+  }else{
+    codigo = document.getElementById('vCodigo').value;
+    nombre = document.getElementById('vNombre').value;
+  }
+
+  saveVenta({ codigo, nombre, cantidad, total, metodoPago });
   closeAllModals();
+  renderInventario();
+  renderProductos();
   toast('Venta registrada', 'success');
 }
 
@@ -512,19 +605,75 @@ function renderVentas(){
 function renderInventario(){
   const tbody = document.querySelector('#inventarioTable tbody');
   if(db.productos.length === 0){
-    tbody.innerHTML = `<tr class="empty-row"><td colspan="5">Todavía no hay productos.</td></tr>`;
+    tbody.innerHTML = `<tr class="empty-row"><td colspan="7">Todavía no hay productos.</td></tr>`;
     return;
   }
-  const list = db.productos.slice().sort((a,b)=> a.nombre.localeCompare(b.nombre, 'es'));
-  tbody.innerHTML = list.map(p => `
+
+  const search = normalize(document.getElementById('invSearch').value);
+  let list = db.productos.slice();
+  if(search){
+    list = list.filter(p =>
+      normalize(p.nombre).includes(search) ||
+      normalize(p.codigo).includes(search) ||
+      normalize(p.codigoBarras).includes(search)
+    );
+  }
+  list.sort((a,b)=> a.nombre.localeCompare(b.nombre, 'es'));
+
+  if(list.length === 0){
+    tbody.innerHTML = `<tr class="empty-row"><td colspan="7">No hay productos que coincidan.</td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = list.map(p => {
+    const stock = p.stock || 0;
+    const ultima = invUpdates[p.id] ? fmtHistoryDate(invUpdates[p.id]) : '-';
+    return `
     <tr>
       <td><strong>${escapeHtml(p.codigo)}</strong></td>
       <td>${escapeHtml(p.codigoBarras || '-')}</td>
       <td>${escapeHtml(p.nombre)}</td>
       <td>${p.categoria ? `<span class="badge badge-muted">${escapeHtml(p.categoria)}</span>` : '-'}</td>
-      <td><strong>${p.stock || 0}</strong></td>
+      <td><strong class="${stock < 0 ? 'stock-negative' : ''}">${stock}</strong></td>
+      <td>${ultima}</td>
+      <td><button class="btn-icon" title="Editar" data-edit-inventario="${p.id}">✏️</button></td>
     </tr>
-  `).join('');
+  `;
+  }).join('');
+}
+
+/* -------------------------------------------------------------------------
+   4c-bis. EDITAR INVENTARIO (corregir stock y código de barras a mano)
+   ------------------------------------------------------------------------- */
+
+function openEditarInventarioModal(producto){
+  document.getElementById('eInvId').value = producto.id;
+  document.getElementById('eInvNombreDisplay').textContent = producto.nombre;
+  document.getElementById('eInvStock').value = producto.stock || 0;
+  document.getElementById('eInvCodigoBarras').value = producto.codigoBarras || '';
+  openModal('modalEditarInventario');
+}
+
+function handleEditarInventarioSubmit(e){
+  e.preventDefault();
+  const id = document.getElementById('eInvId').value;
+  const p = getProductoById(id);
+  if(!p) return;
+
+  const stockVal = parseFloat(document.getElementById('eInvStock').value);
+  if(isNaN(stockVal)){
+    toast('Ingresa una cantidad de stock válida', 'error');
+    return;
+  }
+
+  p.stock = stockVal; // se permite negativo, no se bloquea
+  p.codigoBarras = document.getElementById('eInvCodigoBarras').value.trim();
+  markInventarioActualizado(p.id);
+  saveDB();
+  renderInventario();
+  renderProductos();
+  closeAllModals();
+  toast('Inventario actualizado', 'success');
 }
 
 // Mueve el bloque real del escáner (cámara, worker, botones) dentro de un
@@ -589,6 +738,7 @@ function handleInventarioSubmit(e){
 
   p.stock = (p.stock || 0) + cantidad;
   if(codigoBarras) p.codigoBarras = codigoBarras;
+  markInventarioActualizado(p.id);
   saveDB();
   renderInventario();
   renderProductos();
@@ -598,6 +748,43 @@ function handleInventarioSubmit(e){
   // Sigue escaneando el siguiente producto sin que el usuario tenga que
   // volver a tocar el botón (pensado para hacer un conteo físico seguido)
   openInventarioScan();
+}
+
+/* -------------------------------------------------------------------------
+   4d. NUEVA VENTA (buscar producto existente o vender algo "OTRO")
+   ------------------------------------------------------------------------- */
+
+function openNuevaVentaModal(){
+  document.getElementById('ventaSearchInput').value = '';
+  renderVentaSearchResults();
+  openModal('modalNuevaVenta');
+  setTimeout(()=> document.getElementById('ventaSearchInput').focus(), 50);
+}
+
+function renderVentaSearchResults(){
+  const search = normalize(document.getElementById('ventaSearchInput').value);
+  const container = document.getElementById('ventaSearchResults');
+
+  let list = db.productos.slice();
+  if(search){
+    list = list.filter(p =>
+      normalize(p.nombre).includes(search) ||
+      normalize(p.codigo).includes(search)
+    );
+  }
+  list.sort((a,b)=> a.nombre.localeCompare(b.nombre, 'es'));
+  list = list.slice(0, 30); // límite razonable para no saturar la lista
+
+  if(list.length === 0){
+    container.innerHTML = `<p class="hint" style="margin:0 0 8px;">No se encontró ningún producto. Usa "OTRO" para vender algo que no está en tu inventario.</p>`;
+    return;
+  }
+  container.innerHTML = list.map(p => `
+    <button type="button" class="venta-search-item" data-venta-select="${p.id}">
+      <span class="vsi-nombre">${escapeHtml(p.nombre)}</span>
+      <span class="vsi-meta">${escapeHtml(p.codigo)} · ${fmtMoney(p.precioVenta)}</span>
+    </button>
+  `).join('');
 }
 
 function exportInventarioCSV(){
@@ -987,9 +1174,12 @@ function importBackup(file){
 function factoryReset(){
   confirmDialog('Borrar todos los datos', 'Esto eliminará permanentemente todos los productos y categorías guardados en este dispositivo. ¿Estás seguro?', ()=>{
     db = defaultDB();
+    invUpdates = {};
+    saveInvUpdates();
     saveDB();
     renderProductos();
     renderCategorias();
+    renderInventario();
     document.getElementById('scanResult').innerHTML = '';
     toast('Datos borrados', 'success');
   });
@@ -1049,12 +1239,16 @@ function openModal(id){
 }
 function closeAllModals(){
   const inventarioScanWasOpen = document.getElementById('modalInventarioScan').classList.contains('open');
+  const barcodeScanWasOpen = document.getElementById('modalBarcodeScan').classList.contains('open');
   document.querySelectorAll('.modal.open').forEach(m => m.classList.remove('open'));
   document.getElementById('modalBackdrop').classList.remove('open');
   if(inventarioScanWasOpen){
     stopOcrScanner();
     restoreScannerBlockHome();
     scanContext = 'lookup';
+  }
+  if(barcodeScanWasOpen){
+    stopBarcodeScanner();
   }
 }
 
@@ -1467,6 +1661,71 @@ async function setScanCodeMode(mode){
 }
 
 /* -------------------------------------------------------------------------
+   12b. ESCÁNER DE CÓDIGO DE BARRAS (ZXing) — solo para el botón 📷 del
+   campo "Código de barras" en el registro de inventario. No toca ni
+   comparte nada con el escáner OCR de texto (Tesseract).
+   ------------------------------------------------------------------------- */
+
+let bcReader = null;
+let bcActive = false;
+
+function setBcStatus(msg){
+  const el = document.getElementById('bcStatus');
+  if(el) el.textContent = msg;
+}
+
+async function startBarcodeScanner(){
+  if(typeof ZXing === 'undefined'){
+    setBcStatus('No se pudo cargar el lector de códigos de barras (revisa tu conexión a internet).');
+    return;
+  }
+  try{
+    bcActive = true;
+    setBcStatus('Iniciando cámara...');
+    bcReader = new ZXing.BrowserMultiFormatReader();
+    let deviceId;
+    try{
+      const devices = await ZXing.BrowserCodeReader.listVideoInputDevices();
+      const back = devices.find(d => /back|rear|trasera|environment/i.test(d.label));
+      deviceId = (back || devices[devices.length - 1] || {}).deviceId;
+    }catch(e){ /* si falla la lista, ZXing usa la cámara por defecto */ }
+
+    await bcReader.decodeFromVideoDevice(deviceId, 'bcVideo', (result, err)=>{
+      if(!bcActive) return;
+      if(result){
+        const code = result.getText();
+        stopBarcodeScanner();
+        closeAllModals();
+        const input = document.getElementById('invCodigoBarras');
+        if(input) input.value = code;
+        toast('Código de barras detectado: ' + code, 'success');
+      }
+      // Los errores de "no se encontró código en este frame" son normales
+      // mientras se busca, así que se ignoran.
+    });
+    setBcStatus('🔎 Buscando código de barras...');
+  }catch(err){
+    console.error('Error al iniciar el escáner de código de barras', err);
+    setBcStatus('No se pudo acceder a la cámara.');
+  }
+}
+
+function stopBarcodeScanner(){
+  bcActive = false;
+  if(bcReader){
+    try{ bcReader.reset(); }catch(e){ /* ignorar */ }
+    bcReader = null;
+  }
+  const videoEl = document.getElementById('bcVideo');
+  if(videoEl) videoEl.srcObject = null;
+}
+
+function openBarcodeScanModal(){
+  openModal('modalBarcodeScan');
+  startBarcodeScanner();
+}
+
+/* -------------------------------------------------------------------------
    13. EVENTOS / INICIALIZACIÓN
    ------------------------------------------------------------------------- */
 
@@ -1542,7 +1801,22 @@ function setupEventListeners(){
   });
 
   // Ventas
+  document.getElementById('btnNuevaVenta').addEventListener('click', openNuevaVentaModal);
+  document.getElementById('ventaSearchInput').addEventListener('input', renderVentaSearchResults);
+  document.getElementById('ventaSearchResults').addEventListener('click', (e)=>{
+    const id = e.target.closest('[data-venta-select]')?.dataset.ventaSelect;
+    if(!id) return;
+    const p = getProductoById(id);
+    closeAllModals();
+    if(p) openVentaModal(p);
+  });
+  document.getElementById('btnVentaOtro').addEventListener('click', ()=>{
+    closeAllModals();
+    openVentaModalOtro();
+  });
   document.getElementById('formVenta').addEventListener('submit', handleVentaSubmit);
+  document.getElementById('vCantidad').addEventListener('input', recalcVentaPrecioUnitario);
+  document.getElementById('vPrecioTotal').addEventListener('input', recalcVentaPrecioUnitario);
   document.querySelectorAll('[data-payment-method]').forEach(btn=>{
     btn.addEventListener('click', ()=>{
       document.querySelectorAll('[data-payment-method]').forEach(b=>b.classList.remove('active'));
@@ -1556,6 +1830,7 @@ function setupEventListeners(){
   });
 
   // Inventario
+  document.getElementById('invSearch').addEventListener('input', renderInventario);
   document.getElementById('btnRegistroInventario').addEventListener('click', openInventarioScan);
   document.getElementById('btnCloseInventarioScan').addEventListener('click', closeInventarioScan);
   document.getElementById('btnExportInventario').addEventListener('click', exportInventarioCSV);
@@ -1565,6 +1840,15 @@ function setupEventListeners(){
     closeAllModals();
     openProductModal(null, codigo);
   });
+  document.querySelector('#inventarioTable tbody').addEventListener('click', (e)=>{
+    const editId = e.target.closest('[data-edit-inventario]')?.dataset.editInventario;
+    if(editId){
+      const p = getProductoById(editId);
+      if(p) openEditarInventarioModal(p);
+    }
+  });
+  document.getElementById('formEditarInventario').addEventListener('submit', handleEditarInventarioSubmit);
+  document.getElementById('btnScanBarcode').addEventListener('click', openBarcodeScanModal);
 
   // Historial
   document.getElementById('btnClearScanHistory').addEventListener('click', ()=>{
@@ -1604,6 +1888,7 @@ function setupEventListeners(){
 
 function init(){
   loadDB();
+  loadInvUpdates();
   setupEventListeners();
   showView('escaner');
   updateSidebarProductCount();

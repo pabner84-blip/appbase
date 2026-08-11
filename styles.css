@@ -209,6 +209,20 @@ input,select{font-family:inherit;}
 .scan-result-card .sr-row:last-child{border-bottom:none;}
 .scan-not-found{background:var(--warning-light); color:#92400e; border-radius:10px; padding:14px; font-size:13.5px;}
 
+/* ---------- NUEVA VENTA: lista de búsqueda ---------- */
+.venta-search-list{display:flex; flex-direction:column; gap:6px; max-height:340px; overflow-y:auto;}
+.venta-search-item{
+  display:flex; align-items:center; justify-content:space-between; gap:10px;
+  width:100%; text-align:left; background:var(--bg); border:1px solid var(--border);
+  border-radius:8px; padding:10px 12px; cursor:pointer; font-size:13.5px; color:var(--text);
+}
+.venta-search-item:hover{background:var(--primary-light); border-color:var(--primary);}
+.venta-search-item .vsi-nombre{font-weight:600;}
+.venta-search-item .vsi-meta{color:var(--text-muted); font-size:12px; white-space:nowrap;}
+
+/* ---------- STOCK NEGATIVO ---------- */
+.stock-negative{color:var(--danger);}
+
 /* ---------- TOASTS ---------- */
 .toast-container{position:fixed; bottom:20px; right:20px; z-index:400; display:flex; flex-direction:column; gap:10px;}
 .toast{

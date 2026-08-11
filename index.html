@@ -114,6 +114,9 @@
 
     <!-- ---------- VENTAS ---------- -->
     <section class="view" id="view-ventas">
+      <div class="toolbar">
+        <button class="btn btn-primary" id="btnNuevaVenta">➕ Nueva venta</button>
+      </div>
       <p class="hint" id="ventasSummary" style="margin-bottom:12px;">0 ventas</p>
       <div class="table-wrap">
         <table class="table" id="ventasTable">
@@ -131,6 +134,7 @@
     <!-- ---------- INVENTARIO ---------- -->
     <section class="view" id="view-inventario">
       <div class="toolbar">
+        <input type="text" id="invSearch" class="input" placeholder="🔍 Buscar por nombre o código...">
         <button class="btn btn-primary" id="btnRegistroInventario">📋 Registro de cantidad de inventario</button>
         <button class="btn btn-secondary" id="btnExportInventario">📤 Exportar CSV</button>
       </div>
@@ -138,7 +142,7 @@
         <table class="table" id="inventarioTable">
           <thead>
             <tr>
-              <th>Código</th><th>Cód. Barras</th><th>Descripción</th><th>Categoría</th><th>Stock</th>
+              <th>Código</th><th>Cód. Barras</th><th>Descripción</th><th>Categoría</th><th>Stock</th><th>Última actualización</th><th>Acciones</th>
             </tr>
           </thead>
           <tbody></tbody>
@@ -250,12 +254,17 @@
     <form id="formVenta" class="form-grid">
       <input type="hidden" id="vCodigo">
       <input type="hidden" id="vNombre">
+      <input type="hidden" id="vEsOtro" value="0">
       <input type="hidden" id="vMetodoPago" value="efectivo">
-      <div class="product-info-box visible" style="grid-column:1/-1;">
+      <div class="product-info-box visible" id="vNombreDisplayBox" style="grid-column:1/-1;">
         📦 <strong id="vNombreDisplay"></strong>
       </div>
+      <label id="vNombreOtroLabel" style="grid-column:1/-1; display:none;">Descripción *
+        <input type="text" id="vNombreOtroInput" class="input" placeholder="Describe el producto que estás vendiendo">
+      </label>
       <label>Cantidad *<input type="number" id="vCantidad" class="input" step="1" min="1" value="1" required></label>
-      <label>Precio de venta *<input type="number" id="vPrecio" class="input" step="0.01" min="0" required></label>
+      <label>Precio Total *<input type="number" id="vPrecioTotal" class="input" step="0.01" min="0" required></label>
+      <label style="grid-column:1/-1;">Precio Unitario (calculado)<input type="text" id="vPrecioUnitario" class="input" readonly tabindex="-1" style="background:var(--bg); color:var(--text-muted);"></label>
       <label style="grid-column:1/-1;">Método de pago
         <div class="scan-mode-tabs" style="margin-top:4px;">
           <button type="button" class="scan-tab active" data-payment-method="efectivo">💵 Efectivo</button>
@@ -267,6 +276,19 @@
         <button type="button" class="btn btn-secondary" data-close-modal>Cancelar</button>
       </div>
     </form>
+  </div>
+</div>
+
+<!-- Modal: Nueva Venta (buscar producto o elegir OTRO) -->
+<div class="modal" id="modalNuevaVenta">
+  <div class="modal-header">
+    <h3>➕ Nueva venta</h3>
+    <button class="modal-close" data-close-modal>✕</button>
+  </div>
+  <div class="modal-body">
+    <input type="text" id="ventaSearchInput" class="input" placeholder="🔍 Buscar por nombre o código..." style="margin-bottom:12px; width:100%;" autocomplete="off">
+    <div id="ventaSearchResults" class="venta-search-list"></div>
+    <button type="button" class="btn btn-secondary" id="btnVentaOtro" style="width:100%; margin-top:12px;">➕ OTRO (producto que no está en el inventario)</button>
   </div>
 </div>
 
@@ -304,9 +326,52 @@
         <span id="invStockActualDisplay" style="font-size:12px;"></span>
       </div>
       <label>Cantidad a agregar *<input type="number" id="invCantidad" class="input" step="1" min="1" value="1" required></label>
-      <label>Código de barras<input type="text" id="invCodigoBarras" class="input" placeholder="Opcional"></label>
+      <label>Código de barras
+        <div style="display:flex; gap:6px;">
+          <input type="text" id="invCodigoBarras" class="input" placeholder="Opcional" style="flex:1;">
+          <button type="button" class="btn btn-secondary" id="btnScanBarcode" title="Escanear código de barras">📷</button>
+        </div>
+      </label>
       <div class="form-actions">
         <button type="submit" class="btn btn-success">Registrar</button>
+        <button type="button" class="btn btn-secondary" data-close-modal>Cancelar</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Modal: Escáner de código de barras (solo para el campo Código de barras) -->
+<div class="modal modal-sm" id="modalBarcodeScan">
+  <div class="modal-header">
+    <h3>📷 Escanear código de barras</h3>
+    <button class="modal-close" data-close-modal>✕</button>
+  </div>
+  <div class="modal-body">
+    <div class="ocr-reader">
+      <video id="bcVideo" autoplay playsinline muted></video>
+      <div class="ocr-guide"></div>
+      <div class="ocr-status" id="bcStatus">Iniciando cámara...</div>
+    </div>
+    <p class="hint">Apunta la cámara al código de barras del producto.</p>
+  </div>
+</div>
+
+<!-- Modal: Editar inventario (corregir stock y código de barras) -->
+<div class="modal modal-sm" id="modalEditarInventario">
+  <div class="modal-header">
+    <h3>✏️ Editar inventario</h3>
+    <button class="modal-close" data-close-modal>✕</button>
+  </div>
+  <div class="modal-body">
+    <form id="formEditarInventario" class="form-grid">
+      <input type="hidden" id="eInvId">
+      <div class="product-info-box visible" style="grid-column:1/-1;">
+        📦 <strong id="eInvNombreDisplay"></strong>
+      </div>
+      <label style="grid-column:1/-1;">Cantidad en stock *<input type="number" id="eInvStock" class="input" step="1" required></label>
+      <label style="grid-column:1/-1;">Código de barras<input type="text" id="eInvCodigoBarras" class="input" placeholder="Opcional"></label>
+      <div class="form-actions">
+        <button type="submit" class="btn btn-primary">Guardar cambios</button>
         <button type="button" class="btn btn-secondary" data-close-modal>Cancelar</button>
       </div>
     </form>
@@ -336,6 +401,8 @@
 <input type="file" id="fileImportBackup" accept=".json" hidden>
 
 <script src='https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js'></script>
+<!-- ZXing: lector de códigos de barras (solo se usa en el botón 📷 de Código de barras) -->
+<script src='https://cdn.jsdelivr.net/npm/@zxing/library@0.20.0'></script>
 <!-- Firebase (opcional): si firebase-config.js está vacío, la app funciona 100% local -->
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js"></script>

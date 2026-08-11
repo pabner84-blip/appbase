@@ -472,24 +472,64 @@ function playDetectionSound(){
   const ctx = getDetectAudioCtx();
   if(!ctx) return;
   try{
-    const duration = 1.0; // 1 segundo
+    const duration = 0.32; // silbido rápido
     const now = ctx.currentTime;
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
     osc.type = 'sine';
-    // Silbido: la frecuencia sube y luego baja durante el segundo
-    osc.frequency.setValueAtTime(700, now);
-    osc.frequency.exponentialRampToValueAtTime(1700, now + 0.35);
-    osc.frequency.exponentialRampToValueAtTime(900, now + duration);
+    // Silbido: la frecuencia sube y luego baja, pero mucho más rápido que antes
+    osc.frequency.setValueAtTime(900, now);
+    osc.frequency.exponentialRampToValueAtTime(1900, now + 0.13);
+    osc.frequency.exponentialRampToValueAtTime(1100, now + duration);
     // Volumen estándar, con una pequeña rampa de entrada/salida para evitar "clics"
     gain.gain.setValueAtTime(0.0001, now);
-    gain.gain.exponentialRampToValueAtTime(0.35, now + 0.05);
-    gain.gain.setValueAtTime(0.35, now + duration - 0.12);
+    gain.gain.exponentialRampToValueAtTime(0.35, now + 0.025);
+    gain.gain.setValueAtTime(0.35, now + duration - 0.06);
     gain.gain.exponentialRampToValueAtTime(0.0001, now + duration);
     osc.connect(gain);
     gain.connect(ctx.destination);
     osc.start(now);
     osc.stop(now + duration + 0.02);
+  }catch(e){ /* si el navegador bloquea audio, se ignora silenciosamente */ }
+}
+
+// Sonido tipo "taladro" (motor + traqueteo) que suena al cambiar de pestaña
+// en la barra de navegación. Volumen estándar y duración menor a 1 segundo.
+function playTabChangeSound(){
+  const ctx = getDetectAudioCtx();
+  if(!ctx) return;
+  try{
+    const duration = 0.42; // menos de 1 segundo
+    const now = ctx.currentTime;
+
+    // Tono grave y áspero, como el motor de un taladro
+    const osc = ctx.createOscillator();
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(180, now);
+    osc.frequency.linearRampToValueAtTime(220, now + duration);
+
+    // Oscilador de modulación (tremolo rápido) que simula el "traqueteo" del taladro
+    const lfo = ctx.createOscillator();
+    lfo.type = 'square';
+    lfo.frequency.setValueAtTime(28, now);
+    const lfoGain = ctx.createGain();
+    lfoGain.gain.setValueAtTime(0.5, now);
+    lfo.connect(lfoGain);
+
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(0.0001, now);
+    gain.gain.exponentialRampToValueAtTime(0.28, now + 0.03);
+    gain.gain.setValueAtTime(0.28, now + duration - 0.08);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + duration);
+    lfoGain.connect(gain.gain);
+
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+
+    osc.start(now);
+    lfo.start(now);
+    osc.stop(now + duration + 0.02);
+    lfo.stop(now + duration + 0.02);
   }catch(e){ /* si el navegador bloquea audio, se ignora silenciosamente */ }
 }
 
@@ -919,6 +959,20 @@ const csvEscapeField = v => {
   return /[",\n]/.test(v) ? '"' + v.replace(/"/g,'""') + '"' : v;
 };
 
+// Formatea un número para el CSV exportado usando COMA como separador
+// decimal (Excel en español/Latinoamérica lo necesita así; si se exporta
+// con punto, Excel interpreta "120.50" como el número entero 12050).
+// Esto solo afecta al archivo CSV: el resto de la app sigue mostrando los
+// números con punto como siempre (fmtMoney, inputs, tablas, etc. no cambian).
+// Si el campo termina teniendo una coma, downloadCSV lo entrecomilla
+// automáticamente (ver csvEscapeField) para que Excel no lo separe en dos
+// columnas.
+function csvNumber(n, decimals){
+  n = Number(n) || 0;
+  const str = (typeof decimals === 'number') ? n.toFixed(decimals) : String(n);
+  return str.replace('.', ',');
+}
+
 function downloadCSV(filename, header, rows){
   const csv = [header, ...rows].map(r => r.map(csvEscapeField).join(',')).join('\n');
   const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
@@ -940,7 +994,7 @@ function exportProductosCSV(){
   const header = ['CODIGO','CODIGO DE BARRAS','DESCRIPCION','MARCA','CATEGORIA','PRECIO COMPRA','PRECIO MARCA','PRECIO VENTA','STOCK'];
   const rows = db.productos.map(p => [
     p.codigo, p.codigoBarras||'', p.nombre, p.marca||'', p.categoria||'',
-    p.precioCompra||0, p.precioMarca||0, p.precioVenta||0, p.stock||0
+    csvNumber(p.precioCompra, 2), csvNumber(p.precioMarca, 2), csvNumber(p.precioVenta, 2), csvNumber(p.stock)
   ]);
   downloadCSV(`stockferre_productos_${todayISO().slice(0,10)}.csv`, header, rows);
   toast('Productos exportados', 'success');
@@ -1008,7 +1062,7 @@ function exportVentasCSV(){
   }
   const header = ['FECHA','CODIGO','PRODUCTO','CANTIDAD','PRECIO UNITARIO','TOTAL','METODO DE PAGO'];
   const rows = db.ventas.map(v => [
-    v.fecha, v.codigo, v.nombre, v.cantidad, v.precioUnitario.toFixed(2), v.total.toFixed(2), v.metodoPago
+    v.fecha, v.codigo, v.nombre, csvNumber(v.cantidad), csvNumber(v.precioUnitario, 2), csvNumber(v.total, 2), v.metodoPago
   ]);
   downloadCSV(`stockferre_ventas_${todayISO().slice(0,10)}.csv`, header, rows);
   toast('Ventas exportadas', 'success');
@@ -1081,7 +1135,7 @@ function exportInventarioCSV(){
   }
   const header = ['CODIGO','DESCRIPCION','MARCA','CATEGORIA','CODIGO DE BARRAS','STOCK'];
   const rows = db.productos.map(p => [
-    p.codigo, p.nombre, p.marca||'', p.categoria||'', p.codigoBarras||'', p.stock||0
+    p.codigo, p.nombre, p.marca||'', p.categoria||'', p.codigoBarras||'', csvNumber(p.stock)
   ]);
   downloadCSV(`stockferre_inventario_${todayISO().slice(0,10)}.csv`, header, rows);
   toast('Inventario exportado', 'success');
@@ -2114,7 +2168,10 @@ function openBarcodeScanModal(){
 function setupEventListeners(){
   // Navegación
   document.querySelectorAll('.nav-item[data-view]').forEach(btn=>{
-    btn.addEventListener('click', ()=> showView(btn.dataset.view));
+    btn.addEventListener('click', ()=>{
+      playTabChangeSound();
+      showView(btn.dataset.view);
+    });
   });
 
   // Sidebar móvil

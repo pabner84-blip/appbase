@@ -327,6 +327,7 @@ async function connectFirebase(){
     fbUnsub = fbDocRef.onSnapshot(snap=>{
       if(snap.metadata.hasPendingWrites) return; // es un cambio que hicimos nosotros mismos
       if(!snap.exists) return;
+      const prevVentas = (db.ventas || []).map(v => v.id);
       const remote = normalizeDB(snap.data());
       remote.historialEscaneos = db.historialEscaneos;
       remote.historialBusquedas = db.historialBusquedas;
@@ -334,6 +335,7 @@ async function connectFirebase(){
       db = remote;
       persistLocalCache();
       rerenderCurrentView();
+      notifyNewRemoteSales(prevVentas, remote.ventas); // avisa ventas hechas en otro dispositivo
       setSyncStatus('synced');
     }, err=>{
       console.error('Error de sincronización Firebase', err);
@@ -550,20 +552,44 @@ function guestCommitVenta(venta, data, cantidad){
   renderProductos();
 }
 
-function deleteVenta(id){
-  confirmDialog('Eliminar venta', '¿Seguro que quieres eliminar este registro de venta? El stock del producto se restaurará.', ()=>{
-    const venta = db.ventas.find(v => v.id === id);
-    if(venta){
-      const p = getProductoByCodigo(venta.codigo);
-      if(p) p.stock = (p.stock || 0) + venta.cantidad;
-    }
-    db.ventas = db.ventas.filter(v => v.id !== id);
-    saveDB();
-    renderVentas();
-    renderInventario();
-    renderProductos();
-    toast('Venta eliminada', 'success');
-  });
+// Borra UNA venta. Antes de borrar se pregunta si se mantiene el inventario:
+//   mantenerInventario = true  → el stock NO se toca (solo sale la venta).
+//   mantenerInventario = false → la cantidad se devuelve al stock del producto.
+function deleteVenta(id, mantenerInventario){
+  const venta = db.ventas.find(v => v.id === id);
+  if(!venta) return;
+  if(!mantenerInventario){
+    const p = getProductoByCodigo(venta.codigo);
+    if(p) p.stock = (p.stock || 0) + venta.cantidad;
+  }
+  db.ventas = db.ventas.filter(v => v.id !== id);
+  saveDB();
+  renderVentas();
+  renderInventario();
+  renderProductos();
+  toast('Venta eliminada', 'success');
+}
+
+// Vacía TODO el historial de ventas (solo dueño en Manuales y Eléctricas).
+// Pregunta lo mismo que al borrar una: si mantener inventario.
+function vaciarHistorialVentas(){
+  ventaBorrarDialog('¿Vaciar todo el historial de ventas?\n\n¿Mantener el inventario?\n• Sí = el inventario NO se modifica.\n• No = las cantidades vuelven al stock.',
+    ()=> vaciarVentasConStock(false),
+    ()=> vaciarVentasConStock(true));
+}
+function vaciarVentasConStock(restaurarStock){
+  if(restaurarStock){
+    db.ventas.forEach(v => {
+      const p = getProductoByCodigo(v.codigo);
+      if(p) p.stock = (p.stock || 0) + v.cantidad;
+    });
+  }
+  db.ventas = [];
+  saveDB();
+  renderVentas();
+  renderInventario();
+  renderProductos();
+  toast('Historial de ventas vaciado', 'success');
 }
 
 // Recalcula y muestra el Precio Unitario = Precio Total / Cantidad
@@ -666,7 +692,8 @@ function handleVentaSubmit(e){
   }
 
   const modoDestino = document.getElementById('vModoDestino') ? document.getElementById('vModoDestino').value : 'manual';
-  saveVenta({ codigo, nombre, cantidad, total, metodoPago, modoDestino });
+  const ventaGuardada = saveVenta({ codigo, nombre, cantidad, total, metodoPago, modoDestino });
+  notifySale(ventaGuardada);
   playCashRegisterSound();
   closeAllModals();
   renderInventario();
@@ -928,17 +955,110 @@ function renderHistorial(){
 
 const PAYMENT_LABELS = { efectivo: '💵 Efectivo', qr: '📱 QR' };
 
+// Filtro de la vista Ventas: por defecto solo muestra las ventas de HOY.
+// 'hoy' | 'ayer' | 'anteayer' | 'todas' | 'YYYY-MM-DD'
+let ventaDateFilter = 'hoy';
+
+function localDateKey(d){
+  return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
+}
+function ventaFechaKey(iso){
+  try{ return localDateKey(new Date(iso)); }catch(e){ return ''; }
+}
+function dateKeyOffset(days){
+  const d = new Date();
+  d.setDate(d.getDate() - days);
+  return localDateKey(d);
+}
+function ventasFiltradas(){
+  return db.ventas.filter(v => {
+    const k = ventaFechaKey(v.fecha);
+    if(ventaDateFilter === 'todas') return true;
+    if(ventaDateFilter === 'hoy') return k === dateKeyOffset(0);
+    if(ventaDateFilter === 'ayer') return k === dateKeyOffset(1);
+    if(ventaDateFilter === 'anteayer') return k === dateKeyOffset(2);
+    if(/^\d{4}-\d{2}-\d{2}$/.test(ventaDateFilter)) return k === ventaDateFilter;
+    return true;
+  });
+}
+function ventasFilterLabel(){
+  const map = { hoy: 'de hoy', ayer: 'de ayer', anteayer: 'de anteayer', todas: 'de todas las fechas' };
+  return map[ventaDateFilter] || 'del ' + ventaDateFilter;
+}
+function syncVentasChips(){
+  document.querySelectorAll('.venta-date-chip').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.ventaDate === ventaDateFilter);
+  });
+  const input = document.getElementById('ventaDateInput');
+  if(input) input.value = /^\d{4}-\d{2}-\d{2}$/.test(ventaDateFilter) ? ventaDateFilter : '';
+}
+
+// Recordatorio semanal de respaldo: no es un export automático (el navegador
+// no puede descargar sin que toques nada), pero te lo recuerda cada 7 días.
+const EXPORT_PROMPT_KEY = 'stockferre_export_prompt_v1';
+const EXPORT_PROMPT_DAYS = 7;
+function getLastExportPrompt(){
+  try{ return localStorage.getItem(EXPORT_PROMPT_KEY) || ''; }catch(e){ return ''; }
+}
+function markExportPrompt(){
+  try{ localStorage.setItem(EXPORT_PROMPT_KEY, dateKeyOffset(0)); }catch(e){}
+}
+function daysSinceExportPrompt(){
+  const last = getLastExportPrompt();
+  if(!last) return Infinity;
+  try{ return Math.floor((new Date() - new Date(last)) / 86400000); }catch(e){ return Infinity; }
+}
+function maybeShowExportReminder(){
+  const el = document.getElementById('exportReminder');
+  if(!el) return;
+  if(currentRole === 'guest' || daysSinceExportPrompt() < EXPORT_PROMPT_DAYS){
+    el.style.display = 'none';
+    return;
+  }
+  el.style.display = 'block';
+  el.innerHTML = `
+    <span>💾 Hace más de una semana que no haces un respaldo de las ventas. Es recomendable exportarlas para que el registro no crezca demasiado.</span>
+    <button class="btn btn-secondary btn-sm" id="btnExportNow">📤 Exportar ahora</button>
+    <button class="btn btn-secondary btn-sm" id="btnDismissExport">Omitir</button>
+  `;
+}
+
+// Ganancia neta de una venta = (precio de venta por unidad − precio de compra)
+// × cantidad. Si el producto ya no existe (o fue "OTRO") no se puede calcular.
+function gananciaVenta(v){
+  const p = getProductoByCodigo(v.codigo);
+  if(!p) return null;
+  const costo = parseFloat(p.precioCompra) || 0;
+  const unit = parseFloat(v.precioUnitario) || 0;
+  return (unit - costo) * (parseFloat(v.cantidad) || 1);
+}
+
 function renderVentas(){
   const tbody = document.querySelector('#ventasTable tbody');
   const summary = document.getElementById('ventasSummary');
+  const colspan = currentRole === 'guest' ? 7 : 9;
 
   if(db.ventas.length === 0){
-    tbody.innerHTML = `<tr class="empty-row"><td colspan="${currentRole === 'guest' ? 7 : 8}">Todavía no registraste ninguna venta.</td></tr>`;
+    tbody.innerHTML = `<tr class="empty-row"><td colspan="${colspan}">Todavía no registraste ninguna venta.</td></tr>`;
     summary.textContent = '0 ventas';
+    syncVentasChips();
+    maybeShowExportReminder();
     return;
   }
 
-  tbody.innerHTML = db.ventas.map(v => `
+  const list = ventasFiltradas();
+  if(list.length === 0){
+    tbody.innerHTML = `<tr class="empty-row"><td colspan="${colspan}">No hay ventas ${ventasFilterLabel()}.</td></tr>`;
+    summary.textContent = `0 ventas ${ventasFilterLabel()}`;
+    syncVentasChips();
+    maybeShowExportReminder();
+    return;
+  }
+
+  tbody.innerHTML = list.map(v => {
+    const gan = gananciaVenta(v);
+    const ganCell = gan === null ? '<td class="admin-only">-</td>' : `<td class="admin-only"><strong>${fmtMoney(gan)}</strong></td>`;
+    return `
     <tr>
       <td>${fmtHistoryDate(v.fecha)}</td>
       <td><strong>${escapeHtml(v.codigo)}</strong></td>
@@ -946,13 +1066,31 @@ function renderVentas(){
       <td>${v.cantidad}</td>
       <td>${fmtMoney(v.precioUnitario)}</td>
       <td><strong>${fmtMoney(v.total)}</strong></td>
+      ${ganCell}
       <td>${PAYMENT_LABELS[v.metodoPago] || v.metodoPago}</td>
       ${currentRole === 'guest' ? '' : `<td><button class="btn-icon" title="Eliminar" data-delete-venta="${v.id}">🗑️</button></td>`}
-    </tr>
-  `).join('');
+    </tr>`;
+  }).join('');
 
-  const totalMonto = db.ventas.reduce((sum, v) => sum + v.total, 0);
-  summary.textContent = `${db.ventas.length} venta${db.ventas.length === 1 ? '' : 's'} · ${fmtMoney(totalMonto)} en total`;
+  const totalMonto = list.reduce((sum, v) => sum + v.total, 0);
+  summary.textContent = `${list.length} venta${list.length === 1 ? '' : 's'} ${ventasFilterLabel()} · ${fmtMoney(totalMonto)}`;
+  syncVentasChips();
+  maybeShowExportReminder();
+}
+
+// Borra ventas de hace más de 3 meses para que la base no crezca sin límite
+// (se recomienda exportarlas antes con "Exportar CSV").
+function purgeVentasAntiguas(){
+  const corte = new Date();
+  corte.setDate(corte.getDate() - 90);
+  const corteKey = localDateKey(corte);
+  const antes = db.ventas.length;
+  db.ventas = db.ventas.filter(v => ventaFechaKey(v.fecha) >= corteKey);
+  const borradas = antes - db.ventas.length;
+  saveDB();
+  renderVentas();
+  if(borradas > 0) toast(`${borradas} venta(s) antigua(s) eliminadas`, 'success');
+  else toast('No había ventas antiguas que borrar', 'warning');
 }
 
 /* -------------------------------------------------------------------------
@@ -1785,9 +1923,83 @@ function closeSidebarMobile(){
    ------------------------------------------------------------------------- */
 const MODO_KEY = 'stockferre_modo_v1';
 const ROLE_KEY = 'stockferre_role_v1';
+const REMEMBER_KEY = 'stockferre_remember_v1';
+const NOTIF_KEY = 'stockferre_notif_v1';
 const MODO_LABELS = { manual: 'Herramientas Manuales', electrico: 'Herramientas Eléctricas', invitado: 'Modo Invitado' };
 
 let pendingGateModo = null;
+
+// "Mantener sesión abierta": guarda qué modos no deben pedir contraseña en
+// ESTE dispositivo (localStorage). No afecta a otros celulares ni PCs.
+function getRememberedModes(){
+  try{ return JSON.parse(localStorage.getItem(REMEMBER_KEY)) || {}; }catch(e){ return {}; }
+}
+function isRemembered(modo){ return !!getRememberedModes()[modo]; }
+function setRememberedMode(modo, on){
+  const obj = getRememberedModes();
+  obj[modo] = !!on;
+  try{ localStorage.setItem(REMEMBER_KEY, JSON.stringify(obj)); }catch(e){}
+}
+function syncRememberSwitchUI(){
+  const sw = document.getElementById('rememberSwitch');
+  if(!sw) return;
+  sw.checked = currentModo === 'invitado' ? false : isRemembered(currentModo);
+}
+
+// "Activar notificaciones": avisa (con una notificación del navegador) cuando
+// se registra una venta, tanto aquí como la que llega sincronizada por
+// Firebase desde otro dispositivo. El permiso se pide al activar el suich y
+// solo se guarda en este dispositivo.
+function getNotifEnabled(){
+  try{ return JSON.parse(localStorage.getItem(NOTIF_KEY)) || {}; }catch(e){ return {}; }
+}
+function notifEnabled(modo){ return !!getNotifEnabled()[modo]; }
+function setNotifEnabled(modo, on){
+  const obj = getNotifEnabled();
+  obj[modo] = !!on;
+  try{ localStorage.setItem(NOTIF_KEY, JSON.stringify(obj)); }catch(e){}
+}
+function syncNotifSwitchUI(){
+  const sw = document.getElementById('notifySwitch');
+  if(!sw) return;
+  sw.checked = currentModo === 'invitado' ? false : notifEnabled(currentModo);
+}
+function notificationsSupported(){ return 'Notification' in window; }
+function requestNotifPermission(){
+  return new Promise(resolve => {
+    if(!notificationsSupported()){ resolve(false); return; }
+    if(Notification.permission === 'granted'){ resolve(true); return; }
+    if(Notification.permission === 'denied'){ resolve(false); return; }
+    try{
+      Notification.requestPermission().then(resolve).catch(()=> resolve(false));
+    }catch(e){ resolve(false); }
+  });
+}
+function notifySale(venta){
+  if(!notificationsSupported()) return;
+  if(Notification.permission !== 'granted') return;
+  if(!notifEnabled(currentModo)) return;
+  if(!venta) return;
+  try{
+    const total = (venta.total !== undefined && venta.total !== null) ? venta.total : 0;
+    const cantidad = venta.cantidad || 1;
+    const n = new Notification('💵 Nueva venta registrada', {
+      body: (venta.nombre || 'Producto') + ' — ' + fmtMoney(total) + ' (x' + cantidad + ')'
+    });
+    n.onclick = ()=>{ try{ window.focus(); }catch(e){ /* ignorar */ } n.close(); };
+  }catch(e){ /* ignorar */ }
+}
+// Compara las ventas antes/después de una sincronización remota y avisa las
+// nuevas (ventas registradas en otro dispositivo).
+function notifyNewRemoteSales(prevIds, newVentas){
+  if(!notificationsSupported()) return;
+  if(Notification.permission !== 'granted') return;
+  if(!notifEnabled(currentModo)) return;
+  const prev = new Set(prevIds || []);
+  (newVentas || []).forEach(v => {
+    if(v && v.id && !prev.has(v.id)) notifySale(v);
+  });
+}
 
 function passKeyFor(modo){ return 'stockferre_pass_' + modo + '_v1'; }
 
@@ -1859,6 +2071,8 @@ function switchModoData(modo){
   setSyncStatus('local');
   updateSidebarBrand();
   updatePasswordButtonLabel();
+  syncRememberSwitchUI();
+  syncNotifSwitchUI();
   if(modo === 'invitado') connectGuestFirebase();
   else connectFirebase();
 }
@@ -1875,6 +2089,14 @@ function attemptEnterModo(modo){
     }else{
       toast('Este modo no tiene contraseña. Pídele la contraseña al dueño.', 'warning');
     }
+    return;
+  }
+  // Sesión recordada en este dispositivo: entra directo como dueño, sin pedir
+  // contraseña (solo afecta al dispositivo local).
+  if(isRemembered(modo)){
+    currentRole = 'admin';
+    try{ localStorage.setItem(ROLE_KEY, 'admin'); }catch(e){}
+    enterModo(modo);
     return;
   }
   if(hasPassword(modo)){
@@ -1993,9 +2215,9 @@ function playClickSound(){
   }catch(e){}
 }
 
-// Sonido de caja registradora "Ka-Ching" clásico al registrar una venta,
-// generado con Web Audio: golpe mecánico ("ka"), resorte que sube ("zzzip")
-// y tintineo metálico del cajón ("ching").
+// Sonido de venta registrada, generado con Web Audio. Arpegio ascendente
+// suave y armónico (Cmaj7) con ondas puras: cálido y gentil con el oído,
+// sin sonidos bruscos.
 function playCashRegisterSound(){
   try{
     const AC = window.AudioContext || window.webkitAudioContext;
@@ -2004,55 +2226,27 @@ function playCashRegisterSound(){
     if(ctx.state === 'suspended' && ctx.resume) ctx.resume();
     const now = ctx.currentTime;
 
-    // "Ching": campana metálica con varios parciales (brillo realista)
-    const ring = (freq, start, dur, vol) => {
-      [1, 2.01, 3.02].forEach((m, i) => {
-        const o = ctx.createOscillator();
-        const g = ctx.createGain();
-        o.type = 'sine';
-        o.frequency.value = freq * m;
-        o.connect(g);
-        g.connect(ctx.destination);
-        const a = now + start + i * 0.001;
-        g.gain.setValueAtTime(0, a);
-        g.gain.linearRampToValueAtTime(vol / (i + 1), a + 0.004);
-        g.gain.exponentialRampToValueAtTime(0.0001, a + dur);
-        o.start(a);
-        o.stop(a + dur + 0.05);
-      });
+    // Nota suave: onda seno, ataque lento, caída larga y serena
+    const note = (freq, start, dur, vol) => {
+      const o = ctx.createOscillator();
+      const g = ctx.createGain();
+      o.type = 'sine';
+      o.frequency.value = freq;
+      o.connect(g);
+      g.connect(ctx.destination);
+      g.gain.setValueAtTime(0, now + start);
+      g.gain.linearRampToValueAtTime(vol, now + start + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, now + start + dur);
+      o.start(now + start);
+      o.stop(now + start + dur + 0.05);
     };
 
-    // "Ka": golpe mecánico de la caja
-    const o = ctx.createOscillator();
-    const g = ctx.createGain();
-    o.type = 'square';
-    o.frequency.setValueAtTime(180, now);
-    o.frequency.exponentialRampToValueAtTime(120, now + 0.09);
-    o.connect(g);
-    g.connect(ctx.destination);
-    g.gain.setValueAtTime(0, now);
-    g.gain.linearRampToValueAtTime(0.22, now + 0.004);
-    g.gain.exponentialRampToValueAtTime(0.0001, now + 0.10);
-    o.start(now);
-    o.stop(now + 0.12);
-
-    // "zzzip": resorte del cajón subiendo
-    const s = ctx.createOscillator();
-    const sg = ctx.createGain();
-    s.type = 'sawtooth';
-    s.frequency.setValueAtTime(600, now + 0.08);
-    s.frequency.exponentialRampToValueAtTime(1500, now + 0.16);
-    s.connect(sg);
-    sg.connect(ctx.destination);
-    sg.gain.setValueAtTime(0, now + 0.08);
-    sg.gain.linearRampToValueAtTime(0.10, now + 0.09);
-    sg.gain.exponentialRampToValueAtTime(0.0001, now + 0.18);
-    s.start(now + 0.08);
-    s.stop(now + 0.20);
-
-    // "Ching": tintineo metálico
-    ring(2093.0, 0.16, 0.9, 0.25);  // Do7
-    ring(2637.0, 0.28, 1.0, 0.20);  // Mi7
+    // Arpegio ascendente Cmaj7, cálido y armónico
+    note(523.25,  0.00, 1.1, 0.16);  // Do5
+    note(659.25,  0.10, 1.1, 0.14);  // Mi5
+    note(783.99,  0.20, 1.2, 0.13);  // Sol5
+    note(987.77,  0.30, 1.3, 0.12);  // Si5
+    note(1046.50, 0.42, 1.5, 0.10);  // Do6
   }catch(e){}
 }
 
@@ -2157,6 +2351,16 @@ function confirmDialog(title, message, onAccept){
   document.getElementById('confirmMessage').textContent = message;
   confirmCallback = onAccept;
   openModal('modalConfirm');
+}
+
+// Diálogo "¿Mantener inventario?" al borrar o vaciar ventas:
+//   onKeep    → Sí (el inventario NO se modifica).
+//   onRestore → No (el inventario sí se modifica).
+let ventaBorrarCallbacks = null;
+function ventaBorrarDialog(message, onKeep, onRestore){
+  document.getElementById('ventaBorrarMessage').textContent = message;
+  ventaBorrarCallbacks = { onKeep, onRestore };
+  openModal('modalVentaBorrar');
 }
 
 function toast(message, type){
@@ -2770,6 +2974,44 @@ function setupEventListeners(){
     enterModoAsGuest();
   });
 
+  // "Mantener sesión abierta": no pedir contraseña en este dispositivo
+  document.getElementById('rememberSwitch').addEventListener('change', (e)=>{
+    if(currentModo === 'invitado') return;
+    setRememberedMode(currentModo, e.target.checked);
+    toast(e.target.checked
+      ? 'Sesión abierta: ya no pedirá contraseña en este dispositivo'
+      : 'Se pedirá contraseña al entrar en este dispositivo', 'success');
+  });
+
+  // "Activar notificaciones": avisar al registrarse una venta
+  document.getElementById('notifySwitch').addEventListener('change', async (e)=>{
+    if(currentModo === 'invitado') return;
+    if(e.target.checked){
+      if(!notificationsSupported()){
+        e.target.checked = false;
+        toast('Este navegador no soporta notificaciones', 'error');
+        return;
+      }
+      if(Notification.permission === 'denied'){
+        e.target.checked = false;
+        toast('Notificaciones bloqueadas. Actívalas en la configuración del navegador.', 'error');
+        return;
+      }
+      const ok = await requestNotifPermission();
+      if(!ok){
+        e.target.checked = false;
+        toast('No se pudo activar las notificaciones', 'error');
+        return;
+      }
+      setNotifEnabled(currentModo, true);
+      toast('Notificaciones activadas', 'success');
+      notifySale({ nombre: 'Notificaciones activadas', total: 0, cantidad: 1 });
+    }else{
+      setNotifEnabled(currentModo, false);
+      toast('Notificaciones desactivadas', 'success');
+    }
+  });
+
   // Agregar/cambiar/quitar contraseña (dentro de Manuales y Eléctricas)
   document.getElementById('btnAddPassword').addEventListener('click', openSetPasswordModal);
   document.getElementById('formSetPassword').addEventListener('submit', handleSetPasswordSubmit);
@@ -2849,6 +3091,44 @@ function setupEventListeners(){
     if(e.target.files[0]) importVentasCSV(e.target.files[0]);
     e.target.value = '';
   });
+  document.getElementById('btnPurgeVentas').addEventListener('click', ()=>{
+    confirmDialog('Borrar ventas antiguas', '¿Borrar las ventas de hace más de 3 meses? Se recomienda exportarlas antes con "Exportar CSV". El stock de los productos no se modifica.', ()=>{
+      purgeVentasAntiguas();
+    });
+  });
+  document.getElementById('btnVaciarVentas').addEventListener('click', vaciarHistorialVentas);
+  document.getElementById('ventaBorrarKeepBtn').addEventListener('click', ()=>{
+    const cb = ventaBorrarCallbacks;
+    ventaBorrarCallbacks = null;
+    if(cb && cb.onKeep) cb.onKeep();
+    closeAllModals();
+  });
+  document.getElementById('ventaBorrarRestoreBtn').addEventListener('click', ()=>{
+    const cb = ventaBorrarCallbacks;
+    ventaBorrarCallbacks = null;
+    if(cb && cb.onRestore) cb.onRestore();
+    closeAllModals();
+  });
+  document.getElementById('ventasDates').addEventListener('click', (e)=>{
+    const chip = e.target.closest('.venta-date-chip');
+    if(!chip) return;
+    ventaDateFilter = chip.dataset.ventaDate;
+    renderVentas();
+  });
+  document.getElementById('ventaDateInput').addEventListener('change', (e)=>{
+    ventaDateFilter = e.target.value || 'hoy';
+    renderVentas();
+  });
+  document.getElementById('exportReminder').addEventListener('click', (e)=>{
+    if(e.target.id === 'btnExportNow'){
+      exportVentasCSV();
+      markExportPrompt();
+      maybeShowExportReminder();
+    }else if(e.target.id === 'btnDismissExport'){
+      markExportPrompt();
+      maybeShowExportReminder();
+    }
+  });
   document.getElementById('ventaSearchInput').addEventListener('input', renderVentaSearchResults);
   document.getElementById('ventaSearchResults').addEventListener('click', (e)=>{
     const id = e.target.closest('[data-venta-select]')?.dataset.ventaSelect;
@@ -2873,7 +3153,12 @@ function setupEventListeners(){
   });
   document.querySelector('#ventasTable tbody').addEventListener('click', (e)=>{
     const delId = e.target.closest('[data-delete-venta]')?.dataset.deleteVenta;
-    if(delId) deleteVenta(delId);
+    if(!delId) return;
+    const v = db.ventas.find(x => x.id === delId);
+    const nombre = v ? (v.nombre || v.codigo) : 'esta venta';
+    ventaBorrarDialog(`¿Eliminar "${nombre}"?\n\n¿Mantener el inventario?\n• Sí = el inventario NO se modifica.\n• No = la cantidad vuelve al stock.`,
+      ()=> deleteVenta(delId, true),
+      ()=> deleteVenta(delId, false));
   });
 
   // Inventario
@@ -2947,13 +3232,25 @@ function init(){
   loadInvUpdates();
   migrateLegacyPasswords(); // sube contraseñas viejas para sincronizarlas
   setupEventListeners();
-  showView('inicio');
-  updateInicioClock();
-  setInterval(updateInicioClock, 1000);
+  syncRememberSwitchUI();
+  syncNotifSwitchUI();
   updateSidebarProductCount();
   updateSidebarBrand();
   updatePasswordButtonLabel();
-  connectFirebase(); // no bloquea el arranque; si no está configurado, sigue todo local
+  // Si en este dispositivo se dejó la sesión abierta para el modo guardado,
+  // vuelve directo a la app sin pedir contraseña ni pasar por Inicio.
+  let savedMode = null;
+  try{ savedMode = localStorage.getItem(MODO_KEY); }catch(e){}
+  if(savedMode && savedMode !== 'invitado' && isRemembered(savedMode)){
+    switchModoData(savedMode); // ya conecta Firebase para ese modo
+    applyRoleUI();
+    showView('escaner');
+  }else{
+    showView('inicio');
+    connectFirebase(); // no bloquea el arranque; si no está configurado, sigue todo local
+  }
+  updateInicioClock();
+  setInterval(updateInicioClock, 1000);
 }
 
 document.addEventListener('DOMContentLoaded', init);

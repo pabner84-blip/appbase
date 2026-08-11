@@ -6,7 +6,7 @@
 <title>TIENDA 1 — Consulta de Productos</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Alfa+Slab+One&family=Playfair+Display:ital,wght@1,600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Alfa+Slab+One&family=Cormorant+Garamond:ital,wght@1,300&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -36,6 +36,22 @@
     <small id="sidebarSyncStatus">💾 Solo en este dispositivo</small>
     <button id="btnAddPassword">🔒 Agregar contraseña</button>
     <button class="btn btn-secondary" id="btnVolverInicio">🏠 Volver al Inicio</button>
+    <label class="remember-switch" id="rememberSwitchRow" title="Mantener sesión abierta en este dispositivo">
+      <input type="checkbox" id="rememberSwitch">
+      <span class="switch-track"><span class="switch-thumb"></span></span>
+      <span class="remember-text">
+        <strong>Mantener sesión abierta</strong>
+        <small>No pedir contraseña aquí</small>
+      </span>
+    </label>
+    <label class="remember-switch" id="notifySwitchRow" title="Recibir avisos de ventas registradas en este dispositivo">
+      <input type="checkbox" id="notifySwitch">
+      <span class="switch-track"><span class="switch-thumb"></span></span>
+      <span class="remember-text">
+        <strong>Activar notificaciones</strong>
+        <small>Avisar cuando se registre una venta</small>
+      </span>
+    </label>
   </div>
 </aside>
 
@@ -66,7 +82,7 @@
           <button class="inicio-modo-btn inicio-modo-invitado" id="btnModoInvitado">👤 INGRESAR</button>
         </div>
       </div>
-      <div class="inicio-footer">Creado Por Abner Perez</div>
+      <div class="inicio-footer">Creado por Abner Pérez</div>
     </section>
 
     <!-- ---------- BIENVENIDA (una por modo, se muestra al entrar) ---------- -->
@@ -152,14 +168,24 @@
         <button class="btn btn-primary" id="btnNuevaVenta">➕ Nueva venta</button>
         <button class="btn btn-secondary" id="btnExportVentas">📤 Exportar CSV</button>
         <button class="btn btn-secondary admin-only" id="btnImportVentas">📥 Importar CSV</button>
+        <button class="btn btn-secondary admin-only" id="btnPurgeVentas">🧹 Borrar antiguas</button>
+        <button class="btn btn-danger admin-only" id="btnVaciarVentas">🧹 Vaciar historial</button>
       </div>
+      <div class="ventas-dates" id="ventasDates">
+        <button class="venta-date-chip active" data-venta-date="hoy">Hoy</button>
+        <button class="venta-date-chip" data-venta-date="ayer">Ayer</button>
+        <button class="venta-date-chip" data-venta-date="anteayer">Anteayer</button>
+        <input type="date" id="ventaDateInput" class="input venta-date-picker" title="Ver ventas de otra fecha">
+        <button class="venta-date-chip" data-venta-date="todas">Todas</button>
+      </div>
+      <div class="export-reminder" id="exportReminder" style="display:none;"></div>
       <p class="hint" id="ventasSummary" style="margin-bottom:12px;">0 ventas</p>
       <div class="table-wrap">
         <table class="table" id="ventasTable">
           <thead>
             <tr>
               <th>Fecha</th><th>Código</th><th>Producto</th><th>Cant.</th>
-              <th>Precio</th><th>Total</th><th>Pago</th><th class="admin-only">Acciones</th>
+              <th>Precio</th><th>Total</th><th class="admin-only">Ganancia neta</th><th>Pago</th><th class="admin-only">Acciones</th>
             </tr>
           </thead>
           <tbody></tbody>
@@ -486,6 +512,21 @@
     <div class="form-actions">
       <button class="btn btn-danger" id="confirmAcceptBtn">Confirmar</button>
       <button class="btn btn-secondary" data-close-modal>Cancelar</button>
+    </div>
+  </div>
+</div>
+
+<!-- Mantener inventario al borrar/vaciar ventas -->
+<div class="modal modal-sm" id="modalVentaBorrar">
+  <div class="modal-header">
+    <h3 id="ventaBorrarTitle">Borrar ventas</h3>
+    <button class="modal-close" data-close-modal>✕</button>
+  </div>
+  <div class="modal-body">
+    <p id="ventaBorrarMessage" style="white-space:pre-line;"></p>
+    <div class="form-actions">
+      <button class="btn btn-secondary" id="ventaBorrarKeepBtn">Sí, mantener inventario</button>
+      <button class="btn btn-danger" id="ventaBorrarRestoreBtn">No, modificar inventario</button>
     </div>
   </div>
 </div>

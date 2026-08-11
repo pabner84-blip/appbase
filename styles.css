@@ -239,6 +239,35 @@ body.role-guest .admin-only{display:none !important;}
 body.modo-manual:not(.role-guest) #btnAddPassword,
 body.modo-electrico:not(.role-guest) #btnAddPassword{display:block;}
 
+/* ---------- MANTENER SESIÓN ABIERTA (solo dueño, este dispositivo) ---------- */
+/* Si está activado, este dispositivo no volverá a pedir la contraseña al
+   entrar a ese modo (ni al recargar la página). Solo afecta al dispositivo. */
+#rememberSwitchRow{display:none;}
+#notifySwitchRow{display:none;}
+body.modo-manual:not(.role-guest) #rememberSwitchRow,
+body.modo-electrico:not(.role-guest) #rememberSwitchRow,
+body.modo-manual:not(.role-guest) #notifySwitchRow,
+body.modo-electrico:not(.role-guest) #notifySwitchRow{display:flex;}
+.remember-switch{
+  display:flex; align-items:center; gap:6px; cursor:pointer;
+  margin:3px 0; padding:3px 6px; border-radius:6px;
+  background:rgba(255,255,255,.04);
+}
+.remember-switch input{display:none;}
+.switch-track{
+  width:19px; height:11px; border-radius:11px; background:#374151;
+  position:relative; transition:background .2s ease; flex:none;
+}
+.switch-thumb{
+  position:absolute; top:2px; left:2px; width:7px; height:7px;
+  border-radius:50%; background:#fff; transition:left .2s ease;
+}
+.remember-switch input:checked + .switch-track{background:#16a34a;}
+.remember-switch input:checked + .switch-track .switch-thumb{left:10px;}
+.remember-text{display:flex; flex-direction:column; line-height:1.2;}
+.remember-text strong{font-size:10px; color:#e5e7eb; font-weight:600;}
+.remember-text small{font-size:9px; color:#9ca3af;}
+
 /* ---------- INICIO: pantalla completa negro + naranja ---------- */
 body.inicio-theme .main-wrap{background:#0b0b0c;}
 body.inicio-theme .content{background:#0b0b0c;}
@@ -299,17 +328,23 @@ body.inicio-theme .main-wrap{margin-left:0;}
 .inicio-modo-electrico{background:#2563eb; color:#fff; box-shadow:0 0 24px rgba(37,99,235,.35);}
 .inicio-modo-invitado{background:#16a34a; color:#fff; box-shadow:0 0 24px rgba(22,163,74,.35);}
 
-/* "Creado Por Abner Perez": abajo a la izquierda, fuente empresarial elegante */
+/* "Creado Por Abner Perez": centro abajo, fuente formal delgada y elegante */
 #view-inicio{position:relative;}
 .inicio-footer{
-  position:absolute; bottom:6px; left:14px; right:auto; text-align:left;
-  color:#ffffff; font-size:20px; font-weight:600; letter-spacing:.05em;
-  font-family:'Playfair Display',Georgia,'Times New Roman',serif;
-  text-shadow:0 0 18px rgba(251,146,60,.25);
+  position:absolute; bottom:8px; left:0; right:0; text-align:center;
+  color:#fef3e2; font-size:22px; font-weight:300; letter-spacing:.14em;
+  font-family:'Cormorant Garamond',Georgia,'Times New Roman',serif;
+  font-style:italic;
+  text-transform:capitalize;
+  text-shadow:0 0 22px rgba(251,146,60,.55), 0 2px 6px rgba(0,0,0,.6);
+}
+.inicio-footer::before{
+  content:""; display:block; width:64px; height:1px; margin:0 auto 10px;
+  background:linear-gradient(90deg, transparent, rgba(251,146,60,.8), transparent);
 }
 
 @media (max-width: 560px){
-  .inicio-footer{font-size:15px; bottom:4px; left:10px;}
+  .inicio-footer{font-size:16px; bottom:4px;}
 }
 
 /* ---------- PANTALLAS DE BIENVENIDA (una por modo) ---------- */
@@ -393,6 +428,26 @@ body.modo-invitado .sidebar-footer small{color:#fdba74;}
   .inicio-time{font-size:30px;}
   .inicio-date{font-size:14px;}
 }
+
+/* ---------- VENTAS: FILTRO POR FECHAS ---------- */
+.ventas-dates{
+  display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin-bottom:12px;
+}
+.venta-date-chip{
+  border:1px solid var(--border); background:#fff; color:var(--text);
+  padding:6px 13px; border-radius:20px; font-size:12.5px; font-weight:600;
+  cursor:pointer; transition:all .15s ease; font-family:inherit;
+}
+.venta-date-chip:hover{border-color:var(--primary); color:var(--primary);}
+.venta-date-chip.active{background:var(--primary); border-color:var(--primary); color:#fff;}
+.venta-date-picker{width:auto; padding:6px 10px;}
+.export-reminder{
+  display:flex; flex-wrap:wrap; align-items:center; gap:10px;
+  background:var(--warning-light); border:1px solid var(--warning);
+  color:#92400e; border-radius:10px; padding:12px 14px; font-size:13px; margin-bottom:12px;
+}
+.export-reminder span{flex:1; min-width:220px;}
+.btn-sm{padding:6px 12px; font-size:12.5px;}
 
 /* ---------- TOASTS ---------- */
 .toast-container{position:fixed; bottom:20px; right:20px; z-index:400; display:flex; flex-direction:column; gap:10px;}

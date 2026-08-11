@@ -451,7 +451,16 @@ function handleVentaSubmit(e){
    ------------------------------------------------------------------------- */
 
 function renderScanResult(codigo){
-  const resultDiv = document.getElementById('scanResult');
+  renderScanResultInto('scanResult', codigo, 'lookup');
+}
+
+// Renderiza la misma tarjeta de resultado (usada en la pestaña "Escanear")
+// dentro de cualquier contenedor. En la pestaña Inventario es exactamente
+// igual, solo que el botón de acción dice "Registrar" y lleva al registro
+// de cantidad en vez de abrir la venta.
+function renderScanResultInto(elementId, codigo, context){
+  const resultDiv = document.getElementById(elementId);
+  if(!resultDiv) return;
   const p = getProductoByCodigo(codigo);
 
   if(!p){
@@ -459,14 +468,19 @@ function renderScanResult(codigo){
       <div class="scan-not-found">
         ⚠️ No se encontró ningún producto con el código <strong>${escapeHtml(codigo)}</strong>.
         <div style="margin-top:10px;">
-          <button class="btn btn-primary btn-sm" id="btnCreateFromScan">+ Crear producto con este código</button>
+          <button class="btn btn-primary btn-sm" id="btnCreateFromScan_${elementId}">+ Crear producto con este código</button>
         </div>
       </div>`;
-    document.getElementById('btnCreateFromScan').addEventListener('click', ()=>{
+    document.getElementById(`btnCreateFromScan_${elementId}`).addEventListener('click', ()=>{
+      if(context === 'inventario') closeInventarioScan();
       openProductModal(null, codigo);
     });
     return;
   }
+
+  const secondBtnHtml = context === 'inventario'
+    ? `<button class="btn btn-primary btn-sm" id="btnActionFromScan_${elementId}">📋 Registrar</button>`
+    : `<button class="btn btn-success btn-sm" id="btnActionFromScan_${elementId}">💰 Venderlo</button>`;
 
   resultDiv.innerHTML = `
     <div class="scan-result-card">
@@ -478,15 +492,21 @@ function renderScanResult(codigo){
       <div class="sr-row"><span>Precio de marca</span><strong>${fmtMoney(p.precioMarca)}</strong></div>
       <div class="sr-row"><span>Precio de venta</span><strong>${fmtMoney(p.precioVenta)}</strong></div>
       <div style="margin-top:12px; display:flex; gap:8px; flex-wrap:wrap;">
-        <button class="btn btn-secondary btn-sm" id="btnEditFromScan">✏️ Editar producto</button>
-        <button class="btn btn-success btn-sm" id="btnSellFromScan">💰 Venderlo</button>
+        <button class="btn btn-secondary btn-sm" id="btnEditFromScan_${elementId}">✏️ Editar producto</button>
+        ${secondBtnHtml}
       </div>
     </div>`;
-  document.getElementById('btnEditFromScan').addEventListener('click', ()=>{
+
+  document.getElementById(`btnEditFromScan_${elementId}`).addEventListener('click', ()=>{
     openProductModal(p);
   });
-  document.getElementById('btnSellFromScan').addEventListener('click', ()=>{
-    openVentaModal(p);
+  document.getElementById(`btnActionFromScan_${elementId}`).addEventListener('click', ()=>{
+    if(context === 'inventario'){
+      closeInventarioScan();
+      openInventarioDetalleForm(p, codigo);
+    }else{
+      openVentaModal(p);
+    }
   });
 }
 
@@ -693,18 +713,9 @@ function restoreScannerBlockHome(){
 function openInventarioScan(){
   scanContext = 'inventario';
   moveScannerBlockTo('scannerBlockPlaceholder');
-  clearInventoryScanResult();
+  document.getElementById('invScanResultBox').innerHTML = '';
   openModal('modalInventarioScan');
-  if(!ocrActive){
-    startOcrScanner();
-  }else{
-    // La cámara ya estaba encendida (venimos de registrar el producto anterior
-    // y seguimos contando): solo hay que reanudar el análisis, sin reabrirla.
-    ocrPaused = false;
-    window.__lastOcrCode = null;
-    setOcrStatus('🔎 Buscando código...');
-    scheduleNextOcrCapture();
-  }
+  if(!ocrActive) startOcrScanner();
 }
 
 function closeInventarioScan(){
@@ -713,75 +724,12 @@ function closeInventarioScan(){
   closeAllModals();
 }
 
-// Producto (o código, si no se encontró) detectado en el escáner de inventario,
-// pendiente de que el usuario toque "Registrar" para pasar al recuadro de cantidad.
-let invScanPendingCodigo = null;
-let invScanPendingProducto = null;
-
-function clearInventoryScanResult(){
-  const box = document.getElementById('invScanResultBox');
-  if(box) box.innerHTML = '';
-  invScanPendingCodigo = null;
-  invScanPendingProducto = null;
-}
-
-// Al detectar un código en la pestaña de Inventario, la cámara NO se cierra:
-// el resultado aparece debajo de ella, y solo al tocar "Registrar" se pasa
-// al recuadro de cantidad y código de barras.
+// Al detectar un código en la pestaña de Inventario, el comportamiento es
+// idéntico al de la pestaña "Escanear" (misma cámara, mismo resultado debajo):
+// la única diferencia es que el botón de acción dice "Registrar" y lleva al
+// recuadro de cantidad / código de barras en vez de abrir una venta.
 function handleInventoryScan(codigo){
-  const p = getProductoByCodigo(codigo);
-  invScanPendingCodigo = codigo;
-  invScanPendingProducto = p || null;
-
-  // Pausa el análisis (la cámara sigue encendida) para no seguir detectando
-  // el mismo código una y otra vez mientras se muestra el resultado.
-  ocrPaused = true;
-  if(ocrTimer){ clearTimeout(ocrTimer); ocrTimer = null; }
-
-  const box = document.getElementById('invScanResultBox');
-  if(!box) return;
-
-  if(p){
-    box.innerHTML = `
-      <div class="scan-result-card">
-        <h4>📦 Producto encontrado</h4>
-        <div class="sr-row"><span>Descripción</span><strong>${escapeHtml(p.nombre)}</strong></div>
-        <div class="sr-row"><span>Código</span><strong>${escapeHtml(p.codigo)}</strong></div>
-        <div class="sr-row"><span>Código de barras</span><strong>${escapeHtml(p.codigoBarras || '(sin registrar)')}</strong></div>
-        <div class="sr-row"><span>Stock actual</span><strong>${p.stock || 0}</strong></div>
-        <div style="margin-top:12px; display:flex; gap:8px; flex-wrap:wrap;">
-          <button type="button" class="btn btn-primary btn-sm" id="btnInvRegistrarDesdeScan">📋 Registrar</button>
-          <button type="button" class="btn btn-secondary btn-sm" id="btnInvEscanearOtro">🔄 Escanear otro código</button>
-        </div>
-      </div>`;
-    document.getElementById('btnInvRegistrarDesdeScan').addEventListener('click', ()=>{
-      closeInventarioScan();
-      openInventarioDetalleForm(p, codigo);
-    });
-  }else{
-    box.innerHTML = `
-      <div class="scan-not-found">
-        ⚠️ El código <strong>${escapeHtml(codigo)}</strong> no está en tu inventario de productos.
-        <div style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap;">
-          <button type="button" class="btn btn-primary btn-sm" id="btnCrearDesdeInventarioScan">+ Crear nuevo producto</button>
-          <button type="button" class="btn btn-secondary btn-sm" id="btnInvEscanearOtro">🔄 Escanear otro código</button>
-        </div>
-      </div>`;
-    document.getElementById('btnCrearDesdeInventarioScan').addEventListener('click', ()=>{
-      closeInventarioScan();
-      openProductModal(null, codigo);
-    });
-  }
-
-  document.getElementById('btnInvEscanearOtro').addEventListener('click', ()=>{
-    clearInventoryScanResult();
-    window.__lastOcrCode = null;
-    if(ocrActive){
-      ocrPaused = false;
-      setOcrStatus('🔎 Buscando código...');
-      scheduleNextOcrCapture();
-    }
-  });
+  renderScanResultInto('invScanResultBox', codigo, 'inventario');
 }
 
 // Abre el recuadro de "Registrar inventario" ya con la descripción del
@@ -1288,6 +1236,7 @@ function showView(name){
     btn.classList.toggle('active', btn.dataset.view === name);
   });
   document.getElementById('viewTitle').textContent = VIEW_TITLES[name] || '';
+  document.body.classList.toggle('inicio-theme', name === 'inicio');
   closeSidebarMobile();
   closeAllModals(); // por si venías con el escáner de inventario u otro modal abierto
   restoreScannerBlockHome();

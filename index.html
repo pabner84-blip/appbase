@@ -49,9 +49,9 @@
     <!-- ---------- INICIO ---------- -->
     <section class="view active" id="view-inicio">
       <div class="inicio-clock-card">
+        <div class="inicio-welcome" id="inicioWelcome">Bienvenido a la Tienda 1</div>
         <div class="inicio-time" id="inicioTime">--:--:--</div>
         <div class="inicio-date" id="inicioDate">-</div>
-        <p class="hint" style="margin-top:14px;">Bienvenido a TIENDA 1</p>
       </div>
     </section>
 
@@ -61,6 +61,7 @@
       <div class="scan-mode-tabs">
         <button class="scan-tab active" data-scan-code-mode="numerico">🔢 Código numérico</button>
         <button class="scan-tab" data-scan-code-mode="alfanumerico">🔤 Código alfanumérico</button>
+        <button class="scan-tab" data-scan-code-mode="codigobarras">📷 Código de barras</button>
       </div>
 
       <div class="scan-manual">
@@ -98,6 +99,7 @@
         <input type="text" id="prodSearch" class="input" placeholder="🔍 Buscar por nombre, código o marca...">
         <select id="prodFilterCategoria" class="input select"><option value="">Todas las categorías</option></select>
         <button class="btn btn-primary" id="btnNewProduct">+ Nuevo producto</button>
+        <button class="btn btn-secondary" id="btnExportProducts">📤 Exportar CSV</button>
         <button class="btn btn-secondary" id="btnImportProducts">📥 Importar CSV</button>
       </div>
       <div class="table-wrap">
@@ -126,6 +128,8 @@
     <section class="view" id="view-ventas">
       <div class="toolbar">
         <button class="btn btn-primary" id="btnNuevaVenta">➕ Nueva venta</button>
+        <button class="btn btn-secondary" id="btnExportVentas">📤 Exportar CSV</button>
+        <button class="btn btn-secondary" id="btnImportVentas">📥 Importar CSV</button>
       </div>
       <p class="hint" id="ventasSummary" style="margin-bottom:12px;">0 ventas</p>
       <div class="table-wrap">
@@ -147,6 +151,7 @@
         <input type="text" id="invSearch" class="input" placeholder="🔍 Buscar por nombre o código...">
         <button class="btn btn-primary" id="btnRegistroInventario">📋 Registro de cantidad de inventario</button>
         <button class="btn btn-secondary" id="btnExportInventario">📤 Exportar CSV</button>
+        <button class="btn btn-secondary" id="btnImportInventario">📥 Importar CSV</button>
       </div>
       <div class="table-wrap">
         <table class="table" id="inventarioTable">
@@ -172,6 +177,23 @@
             <table class="table" id="scanHistoryTable">
               <thead>
                 <tr><th>Código</th><th>Producto</th><th>Estado</th><th>Fecha</th></tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-header">
+          <h3>📋 Registros de inventario</h3>
+          <button class="btn btn-sm btn-secondary" id="btnClearInventarioHistory">Borrar</button>
+        </div>
+        <div class="panel-body" style="padding:0;">
+          <div class="table-wrap" style="box-shadow:none; border-radius:0;">
+            <table class="table" id="inventarioHistoryTable">
+              <thead>
+                <tr><th>Código</th><th>Producto</th><th>Cantidad</th><th>Stock resultante</th><th>Tipo</th><th>Fecha y hora</th></tr>
               </thead>
               <tbody></tbody>
             </table>
@@ -403,6 +425,8 @@
 
 <!-- Hidden file inputs -->
 <input type="file" id="fileImportProducts" accept=".csv" hidden>
+<input type="file" id="fileImportInventario" accept=".csv" hidden>
+<input type="file" id="fileImportVentas" accept=".csv" hidden>
 <input type="file" id="fileImportBackup" accept=".json" hidden>
 
 <script src='https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js'></script>

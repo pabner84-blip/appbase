@@ -48,6 +48,7 @@ function defaultDB(){
     contador: { producto: 1, venta: 1 },
     historialEscaneos: [],
     historialBusquedas: [],
+    historialInventario: [],
     ventas: []
   };
 }
@@ -61,6 +62,7 @@ function normalizeDB(obj){
   obj.contador.producto = obj.contador.producto || 1;
   obj.historialEscaneos = obj.historialEscaneos || [];
   obj.historialBusquedas = obj.historialBusquedas || [];
+  obj.historialInventario = obj.historialInventario || [];
   obj.ventas = obj.ventas || [];
   obj.productos.forEach(p=>{
     p.codigoBarras = p.codigoBarras || '';
@@ -96,7 +98,7 @@ function persistLocalCache(){
 function saveDB(){
   persistLocalCache();
   if(fbReady && fbDocRef){
-    const { historialEscaneos, historialBusquedas, ...syncData } = db;
+    const { historialEscaneos, historialBusquedas, historialInventario, ...syncData } = db;
     fbDocRef.set(syncData).then(()=>{
       setSyncStatus('synced');
     }).catch(err=>{
@@ -162,12 +164,13 @@ async function connectFirebase(){
       const remote = normalizeDB(snap.data());
       remote.historialEscaneos = db.historialEscaneos;
       remote.historialBusquedas = db.historialBusquedas;
+      remote.historialInventario = db.historialInventario;
       db = remote;
       persistLocalCache();
       rerenderCurrentView();
     }else{
       // Primera vez: sube los datos locales como semilla inicial de la nube
-      const { historialEscaneos, historialBusquedas, ...syncData } = db;
+      const { historialEscaneos, historialBusquedas, historialInventario, ...syncData } = db;
       await fbDocRef.set(syncData);
     }
 
@@ -177,6 +180,7 @@ async function connectFirebase(){
       const remote = normalizeDB(snap.data());
       remote.historialEscaneos = db.historialEscaneos;
       remote.historialBusquedas = db.historialBusquedas;
+      remote.historialInventario = db.historialInventario;
       db = remote;
       persistLocalCache();
       rerenderCurrentView();
@@ -482,15 +486,26 @@ function renderScanResultInto(elementId, codigo, context){
     ? `<button class="btn btn-primary btn-sm" id="btnActionFromScan_${elementId}">📋 Registrar</button>`
     : `<button class="btn btn-success btn-sm" id="btnActionFromScan_${elementId}">💰 Venderlo</button>`;
 
+  // En el contexto de Inventario NO se muestra información de precios: solo
+  // descripción, código, código de barras y stock actual.
+  const stockRowHtml = `<div class="sr-row"><span>Stock actual</span><strong class="${(p.stock||0) < 0 ? 'stock-negative' : ''}">${p.stock || 0}</strong></div>`;
+  const detailRowsHtml = context === 'inventario'
+    ? `
+      <div class="sr-row"><span>Código de barras</span><strong>${escapeHtml(p.codigoBarras || '-')}</strong></div>
+      ${stockRowHtml}`
+    : `
+      <div class="sr-row"><span>Marca</span><strong>${escapeHtml(p.marca || '-')}</strong></div>
+      <div class="sr-row"><span>Categoría</span><strong>${escapeHtml(p.categoria || '-')}</strong></div>
+      ${stockRowHtml}
+      <div class="sr-row"><span>Precio de compra</span><strong>${fmtMoney(p.precioCompra)}</strong></div>
+      <div class="sr-row"><span>Precio de marca</span><strong>${fmtMoney(p.precioMarca)}</strong></div>
+      <div class="sr-row"><span>Precio de venta</span><strong>${fmtMoney(p.precioVenta)}</strong></div>`;
+
   resultDiv.innerHTML = `
     <div class="scan-result-card">
       <h4>📦 ${escapeHtml(p.nombre)}</h4>
       <div class="sr-row"><span>Código</span><strong>${escapeHtml(p.codigo)}</strong></div>
-      <div class="sr-row"><span>Marca</span><strong>${escapeHtml(p.marca || '-')}</strong></div>
-      <div class="sr-row"><span>Categoría</span><strong>${escapeHtml(p.categoria || '-')}</strong></div>
-      <div class="sr-row"><span>Precio de compra</span><strong>${fmtMoney(p.precioCompra)}</strong></div>
-      <div class="sr-row"><span>Precio de marca</span><strong>${fmtMoney(p.precioMarca)}</strong></div>
-      <div class="sr-row"><span>Precio de venta</span><strong>${fmtMoney(p.precioVenta)}</strong></div>
+      ${detailRowsHtml}
       <div style="margin-top:12px; display:flex; gap:8px; flex-wrap:wrap;">
         <button class="btn btn-secondary btn-sm" id="btnEditFromScan_${elementId}">✏️ Editar producto</button>
         ${secondBtnHtml}
@@ -554,6 +569,23 @@ function logSearchHistory(query){
   saveDB();
 }
 
+// Registra cada registro de inventario (por escaneo o ajuste manual) con
+// fecha y hora. Se guarda solo en LocalStorage de este dispositivo (ver
+// saveDB/connectFirebase, que excluyen historialInventario de Firebase).
+function logInventarioHistorial(producto, cantidad, tipo){
+  db.historialInventario.unshift({
+    codigo: producto.codigo,
+    nombre: producto.nombre,
+    cantidad,
+    stockResultante: producto.stock || 0,
+    tipo: tipo || 'registro',
+    fecha: todayISO()
+  });
+  if(db.historialInventario.length > HISTORY_MAX){
+    db.historialInventario.length = HISTORY_MAX;
+  }
+}
+
 function fmtHistoryDate(iso){
   try{
     const d = new Date(iso);
@@ -574,6 +606,24 @@ function renderHistorial(){
         <td>${fmtHistoryDate(h.fecha)}</td>
       </tr>
     `).join('');
+  }
+
+  const invBody = document.querySelector('#inventarioHistoryTable tbody');
+  if(invBody){
+    if(db.historialInventario.length === 0){
+      invBody.innerHTML = `<tr class="empty-row"><td colspan="6">Todavía no hay registros de inventario.</td></tr>`;
+    }else{
+      invBody.innerHTML = db.historialInventario.map(h => `
+        <tr>
+          <td><strong>${escapeHtml(h.codigo)}</strong></td>
+          <td>${escapeHtml(h.nombre)}</td>
+          <td>${h.cantidad > 0 ? '+' : ''}${h.cantidad}</td>
+          <td>${h.stockResultante}</td>
+          <td>${escapeHtml(h.tipo)}</td>
+          <td>${fmtHistoryDate(h.fecha)}</td>
+        </tr>
+      `).join('');
+    }
   }
 
   const searchList = document.getElementById('searchHistoryList');
@@ -686,9 +736,11 @@ function handleEditarInventarioSubmit(e){
     return;
   }
 
+  const stockAnterior = p.stock || 0;
   p.stock = stockVal; // se permite negativo, no se bloquea
   p.codigoBarras = document.getElementById('eInvCodigoBarras').value.trim();
   markInventarioActualizado(p.id);
+  logInventarioHistorial(p, stockVal - stockAnterior, 'ajuste manual');
   saveDB();
   renderInventario();
   renderProductos();
@@ -715,11 +767,11 @@ function openInventarioScan(){
   moveScannerBlockTo('scannerBlockPlaceholder');
   document.getElementById('invScanResultBox').innerHTML = '';
   openModal('modalInventarioScan');
-  if(!ocrActive) startOcrScanner();
+  if(!ocrActive && !zxingLiveActive) startActiveScanner();
 }
 
 function closeInventarioScan(){
-  stopOcrScanner();
+  stopActiveScanner();
   restoreScannerBlockHome();
   closeAllModals();
 }
@@ -759,6 +811,7 @@ function handleInventarioSubmit(e){
   p.stock = (p.stock || 0) + cantidad;
   if(codigoBarras) p.codigoBarras = codigoBarras;
   markInventarioActualizado(p.id);
+  logInventarioHistorial(p, cantidad, 'registro (escáner)');
   saveDB();
   renderInventario();
   renderProductos();
@@ -807,6 +860,166 @@ function renderVentaSearchResults(){
   `).join('');
 }
 
+const csvEscapeField = v => {
+  v = String(v ?? '');
+  return /[",\n]/.test(v) ? '"' + v.replace(/"/g,'""') + '"' : v;
+};
+
+function downloadCSV(filename, header, rows){
+  const csv = [header, ...rows].map(r => r.map(csvEscapeField).join(',')).join('\n');
+  const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+function exportProductosCSV(){
+  if(db.productos.length === 0){
+    toast('No hay productos para exportar', 'error');
+    return;
+  }
+  const header = ['CODIGO','CODIGO DE BARRAS','DESCRIPCION','MARCA','CATEGORIA','PRECIO COMPRA','PRECIO MARCA','PRECIO VENTA','STOCK'];
+  const rows = db.productos.map(p => [
+    p.codigo, p.codigoBarras||'', p.nombre, p.marca||'', p.categoria||'',
+    p.precioCompra||0, p.precioMarca||0, p.precioVenta||0, p.stock||0
+  ]);
+  downloadCSV(`stockferre_productos_${todayISO().slice(0,10)}.csv`, header, rows);
+  toast('Productos exportados', 'success');
+}
+
+// Importa un CSV de inventario (CODIGO, DESCRIPCION, ..., STOCK) para
+// actualizar el stock y el código de barras de productos que YA existen.
+// No crea productos nuevos (para eso está la importación de Productos, que
+// sí incluye precios).
+function importInventarioCSV(file){
+  const reader = new FileReader();
+  reader.onload = (e)=>{
+    try{
+      const rows = parseCSV(e.target.result);
+      if(rows.length < 2){
+        toast('El archivo CSV no tiene datos', 'error');
+        return;
+      }
+      const headers = rows[0].map(normalizeHeader);
+      const idx = {
+        codigo: headers.indexOf('CODIGO'),
+        codigoBarras: headers.findIndex(h => h.includes('BARRA') || h.includes('BARCODE')),
+        stock: headers.findIndex(h => h.includes('STOCK') || h.includes('CANTIDAD'))
+      };
+      if(idx.codigo === -1 || idx.stock === -1){
+        toast('El CSV debe tener al menos columnas CODIGO y STOCK', 'error');
+        return;
+      }
+      let actualizados = 0, noEncontrados = 0;
+      for(let i = 1; i < rows.length; i++){
+        const r = rows[i];
+        const codigo = String(r[idx.codigo] || '').trim();
+        if(!codigo) continue;
+        const p = getProductoByCodigo(codigo);
+        if(!p){ noEncontrados++; continue; }
+        const stockAnterior = p.stock || 0;
+        const nuevoStock = parseFloat(String(r[idx.stock] ?? '').replace(',','.'));
+        if(!isNaN(nuevoStock)) p.stock = nuevoStock;
+        if(idx.codigoBarras > -1){
+          const cb = String(r[idx.codigoBarras] || '').trim();
+          if(cb) p.codigoBarras = cb;
+        }
+        markInventarioActualizado(p.id);
+        logInventarioHistorial(p, p.stock - stockAnterior, 'importación CSV');
+        actualizados++;
+      }
+      saveDB();
+      renderInventario();
+      renderProductos();
+      renderHistorial();
+      toast(`Inventario importado: ${actualizados} actualizados${noEncontrados ? ', ' + noEncontrados + ' no encontrados' : ''}`, 'success');
+    }catch(err){
+      console.error(err);
+      toast('No se pudo leer el archivo CSV. Verifica el formato.', 'error');
+    }
+  };
+  reader.onerror = ()=> toast('Error al leer el archivo', 'error');
+  reader.readAsText(file, 'UTF-8');
+}
+
+function exportVentasCSV(){
+  if(db.ventas.length === 0){
+    toast('No hay ventas para exportar', 'error');
+    return;
+  }
+  const header = ['FECHA','CODIGO','PRODUCTO','CANTIDAD','PRECIO UNITARIO','TOTAL','METODO DE PAGO'];
+  const rows = db.ventas.map(v => [
+    v.fecha, v.codigo, v.nombre, v.cantidad, v.precioUnitario.toFixed(2), v.total.toFixed(2), v.metodoPago
+  ]);
+  downloadCSV(`stockferre_ventas_${todayISO().slice(0,10)}.csv`, header, rows);
+  toast('Ventas exportadas', 'success');
+}
+
+// Importa ventas desde un CSV (por ejemplo, un backup exportado antes). Se
+// agregan como nuevos registros al historial de ventas; NO vuelve a
+// descontar del stock (para evitar descontarlo dos veces si esas ventas ya
+// habían afectado el stock cuando se registraron originalmente).
+function importVentasCSV(file){
+  const reader = new FileReader();
+  reader.onload = (e)=>{
+    try{
+      const rows = parseCSV(e.target.result);
+      if(rows.length < 2){
+        toast('El archivo CSV no tiene datos', 'error');
+        return;
+      }
+      const headers = rows[0].map(normalizeHeader);
+      const idx = {
+        fecha: headers.indexOf('FECHA'),
+        codigo: headers.indexOf('CODIGO'),
+        nombre: headers.findIndex(h => h.includes('PRODUCTO') || h.includes('DESCRIPCION')),
+        cantidad: headers.indexOf('CANTIDAD'),
+        precioUnitario: headers.findIndex(h => h.includes('PRECIO') && h.includes('UNITARIO')),
+        total: headers.indexOf('TOTAL'),
+        metodoPago: headers.findIndex(h => h.includes('PAGO'))
+      };
+      if(idx.codigo === -1 || idx.nombre === -1 || idx.total === -1){
+        toast('El CSV debe tener al menos columnas CODIGO, PRODUCTO y TOTAL', 'error');
+        return;
+      }
+      let importadas = 0;
+      for(let i = 1; i < rows.length; i++){
+        const r = rows[i];
+        const nombre = String(r[idx.nombre] || '').trim();
+        if(!nombre) continue;
+        const cantidad = idx.cantidad > -1 ? (parseFloat(String(r[idx.cantidad]).replace(',','.')) || 1) : 1;
+        const total = parsePrecio(r[idx.total]);
+        const precioUnitario = idx.precioUnitario > -1 ? parsePrecio(r[idx.precioUnitario]) : (cantidad > 0 ? total / cantidad : 0);
+        db.ventas.push({
+          id: uid('venta'),
+          codigo: String(r[idx.codigo] || '').trim() || 'OTRO',
+          nombre,
+          cantidad,
+          precioUnitario,
+          total,
+          metodoPago: idx.metodoPago > -1 ? (String(r[idx.metodoPago]||'').toLowerCase().includes('qr') ? 'qr' : 'efectivo') : 'efectivo',
+          fecha: idx.fecha > -1 ? (r[idx.fecha] || todayISO()) : todayISO()
+        });
+        importadas++;
+      }
+      db.ventas.sort((a,b)=> new Date(b.fecha) - new Date(a.fecha));
+      saveDB();
+      renderVentas();
+      toast(`Ventas importadas: ${importadas} (no se modificó el stock)`, 'success');
+    }catch(err){
+      console.error(err);
+      toast('No se pudo leer el archivo CSV. Verifica el formato.', 'error');
+    }
+  };
+  reader.onerror = ()=> toast('Error al leer el archivo', 'error');
+  reader.readAsText(file, 'UTF-8');
+}
+
 function exportInventarioCSV(){
   if(db.productos.length === 0){
     toast('No hay productos para exportar', 'error');
@@ -816,20 +1029,7 @@ function exportInventarioCSV(){
   const rows = db.productos.map(p => [
     p.codigo, p.nombre, p.marca||'', p.categoria||'', p.codigoBarras||'', p.stock||0
   ]);
-  const csvEscape = v => {
-    v = String(v ?? '');
-    return /[",\n]/.test(v) ? '"' + v.replace(/"/g,'""') + '"' : v;
-  };
-  const csv = [header, ...rows].map(r => r.map(csvEscape).join(',')).join('\n');
-  const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `stockferre_inventario_${todayISO().slice(0,10)}.csv`;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
+  downloadCSV(`stockferre_inventario_${todayISO().slice(0,10)}.csv`, header, rows);
   toast('Inventario exportado', 'success');
 }
 
@@ -1250,9 +1450,9 @@ function showView(name){
   if(name === 'historial') renderHistorial();
   if(name === 'escaner'){
     document.getElementById('scanResult').innerHTML = '';
-    if(!ocrActive) startOcrScanner();
+    if(!ocrActive && !zxingLiveActive) startActiveScanner();
   }else{
-    stopOcrScanner();
+    stopActiveScanner();
   }
 }
 
@@ -1285,7 +1485,7 @@ function closeAllModals(){
   document.querySelectorAll('.modal.open').forEach(m => m.classList.remove('open'));
   document.getElementById('modalBackdrop').classList.remove('open');
   if(inventarioScanWasOpen){
-    stopOcrScanner();
+    stopActiveScanner();
     restoreScannerBlockHome();
     scanContext = 'lookup';
   }
@@ -1688,14 +1888,97 @@ function stopOcrScanner(){
   setOcrStatus('Iniciando cámara...');
 }
 
+// Escaneo en vivo de código de barras (ZXing) reutilizando el mismo
+// contenedor de cámara ("ocr-reader") que los modos numérico/alfanumérico
+// (Tesseract). Es el tercer modo del escáner principal, y como el bloque
+// del escáner se comparte entre la pestaña "Escanear" y el registro de
+// cantidad de inventario, funciona igual en los dos lugares.
+let zxingLiveReader = null;
+let zxingLiveActive = false;
+
+async function startZxingLiveScanner(){
+  if(zxingLiveActive) return;
+  if(typeof ZXing === 'undefined'){
+    setOcrStatus('No se pudo cargar el lector de códigos de barras (revisa tu conexión a internet).');
+    return;
+  }
+  zxingLiveActive = true;
+  setOcrStatus('Iniciando cámara...');
+  try{
+    zxingLiveReader = new ZXing.BrowserMultiFormatReader();
+    let deviceId;
+    try{
+      const devices = await ZXing.BrowserCodeReader.listVideoInputDevices();
+      const back = devices.find(d => /back|rear|trasera|environment/i.test(d.label));
+      deviceId = (back || devices[devices.length - 1] || {}).deviceId;
+    }catch(e){ /* si falla la lista, ZXing usa la cámara por defecto */ }
+
+    await zxingLiveReader.decodeFromVideoDevice(deviceId, 'ocrVideo', (result, err)=>{
+      if(!zxingLiveActive || !result) return;
+      const code = result.getText();
+      const now = Date.now();
+      if(!(window.__lastOcrCode === code && now - (window.__lastOcrTime||0) < 3000)){
+        window.__lastOcrCode = code;
+        window.__lastOcrTime = now;
+        handleScannedCode(code);
+      }
+      if(zxingLiveActive) setOcrStatus('✅ Código de barras detectado: ' + code);
+    });
+    setOcrStatus('🔎 Buscando código de barras...');
+  }catch(err){
+    console.warn('Error al iniciar el escáner de código de barras', err);
+    setOcrStatus('No se pudo acceder a la cámara. Verifica los permisos del navegador o usa la búsqueda manual.');
+    zxingLiveActive = false;
+  }
+}
+
+function stopZxingLiveScanner(){
+  zxingLiveActive = false;
+  if(zxingLiveReader){
+    try{ zxingLiveReader.reset(); }catch(e){ /* ignorar */ }
+    zxingLiveReader = null;
+  }
+  const videoEl = document.getElementById('ocrVideo');
+  if(videoEl) videoEl.srcObject = null;
+}
+
+// Envoltorios: arrancan/paran el mecanismo de cámara correcto según el modo
+// de escaneo activo (Tesseract para numérico/alfanumérico, ZXing para
+// código de barras), sin que el resto del código tenga que saber cuál es.
+function startActiveScanner(){
+  if(scanCodeMode === 'codigobarras') startZxingLiveScanner();
+  else startOcrScanner();
+}
+function stopActiveScanner(){
+  stopOcrScanner();
+  stopZxingLiveScanner();
+}
+
 async function setScanCodeMode(mode){
-  if(!OCR_MODES[mode] || mode === scanCodeMode) return;
+  if(mode === scanCodeMode) return;
+  if(mode !== 'codigobarras' && !OCR_MODES[mode]) return;
+
+  // Cambiar desde/hacia código de barras usa un mecanismo de cámara distinto
+  // (ZXing en vez de Tesseract), así que ahí sí hace falta reiniciar la
+  // cámara. Entre numérico y alfanumérico se mantiene la cámara encendida y
+  // solo se actualiza la lista de caracteres permitidos.
+  const switchingEngine = (mode === 'codigobarras') || (scanCodeMode === 'codigobarras');
+  const wasActive = ocrActive || zxingLiveActive;
+
+  if(switchingEngine && wasActive) stopActiveScanner();
+
   scanCodeMode = mode;
   document.querySelectorAll('[data-scan-code-mode]').forEach(btn=>{
     btn.classList.toggle('active', btn.dataset.scanCodeMode === mode);
   });
-  // Si el lector ya está activo, actualiza el whitelist de caracteres sin reiniciar la cámara
-  if(ocrWorker){
+  const captureRow = document.querySelector('.scan-capture-row');
+  if(captureRow) captureRow.style.display = (mode === 'codigobarras') ? 'none' : '';
+
+  if(switchingEngine){
+    if(wasActive) startActiveScanner();
+  }else if(ocrWorker){
+    // Si el lector Tesseract ya está activo, actualiza el whitelist de
+    // caracteres sin reiniciar la cámara
     try{
       await ocrWorker.setParameters({ tessedit_char_whitelist: OCR_MODES[mode].whitelist });
     }catch(err){ console.warn(err); }
@@ -1820,6 +2103,7 @@ function setupEventListeners(){
 
   // Productos
   document.getElementById('btnNewProduct').addEventListener('click', ()=> openProductModal());
+  document.getElementById('btnExportProducts').addEventListener('click', exportProductosCSV);
   document.getElementById('formProducto').addEventListener('submit', handleProductSubmit);
   document.getElementById('prodSearch').addEventListener('input', renderProductos);
   document.getElementById('prodSearch').addEventListener('change', (e)=>{
@@ -1847,6 +2131,12 @@ function setupEventListeners(){
 
   // Ventas
   document.getElementById('btnNuevaVenta').addEventListener('click', openNuevaVentaModal);
+  document.getElementById('btnExportVentas').addEventListener('click', exportVentasCSV);
+  document.getElementById('btnImportVentas').addEventListener('click', ()=> document.getElementById('fileImportVentas').click());
+  document.getElementById('fileImportVentas').addEventListener('change', (e)=>{
+    if(e.target.files[0]) importVentasCSV(e.target.files[0]);
+    e.target.value = '';
+  });
   document.getElementById('ventaSearchInput').addEventListener('input', renderVentaSearchResults);
   document.getElementById('ventaSearchResults').addEventListener('click', (e)=>{
     const id = e.target.closest('[data-venta-select]')?.dataset.ventaSelect;
@@ -1879,6 +2169,11 @@ function setupEventListeners(){
   document.getElementById('btnRegistroInventario').addEventListener('click', openInventarioScan);
   document.getElementById('btnCloseInventarioScan').addEventListener('click', closeInventarioScan);
   document.getElementById('btnExportInventario').addEventListener('click', exportInventarioCSV);
+  document.getElementById('btnImportInventario').addEventListener('click', ()=> document.getElementById('fileImportInventario').click());
+  document.getElementById('fileImportInventario').addEventListener('change', (e)=>{
+    if(e.target.files[0]) importInventarioCSV(e.target.files[0]);
+    e.target.value = '';
+  });
   document.getElementById('formInventario').addEventListener('submit', handleInventarioSubmit);
   document.querySelector('#inventarioTable tbody').addEventListener('click', (e)=>{
     const editId = e.target.closest('[data-edit-inventario]')?.dataset.editInventario;
@@ -1897,6 +2192,14 @@ function setupEventListeners(){
       saveDB();
       renderHistorial();
       toast('Historial de escaneos borrado', 'success');
+    });
+  });
+  document.getElementById('btnClearInventarioHistory').addEventListener('click', ()=>{
+    confirmDialog('Borrar historial de inventario', '¿Seguro que quieres borrar todo el historial de registros de inventario?', ()=>{
+      db.historialInventario = [];
+      saveDB();
+      renderHistorial();
+      toast('Historial de inventario borrado', 'success');
     });
   });
   document.getElementById('btnClearSearchHistory').addEventListener('click', ()=>{

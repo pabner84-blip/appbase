@@ -253,6 +253,7 @@ function connectGuestFirebase(){
 let fbReady = false;
 let fbDocRef = null;
 let fbUnsub = null;
+let fbOtherUnsub = null; // suscripción al OTRO modo (mantiene su contraseña/datos en caché)
 
 // Cada modo se guarda en un documento de Firestore distinto para que sean
 // bases de datos completamente separadas dentro del mismo proyecto.
@@ -260,6 +261,7 @@ function firebaseDocId(){ return 'inventario_' + currentModo; }
 
 function disconnectFirebase(){
   if(fbUnsub){ try{ fbUnsub(); }catch(e){ /* ignorar */ } fbUnsub = null; }
+  if(fbOtherUnsub){ try{ fbOtherUnsub(); }catch(e){ /* ignorar */ } fbOtherUnsub = null; }
   fbReady = false;
   fbDocRef = null;
 }
@@ -339,10 +341,38 @@ async function connectFirebase(){
     });
 
     setSyncStatus('synced');
+
+    // Mantiene también en caché el OTRO modo (Manuales ↔ Eléctricas). Así la
+    // contraseña y los datos de ambos quedan listos en este dispositivo aunque
+    // todavía no hayas entrado en ese modo (clave para pedir la contraseña
+    // desde la pantalla de Inicio en un celular recién configurado).
+    const otherModo = currentModo === 'manual' ? 'electrico' : 'manual';
+    try{
+      const otherRef = fbFirestore.collection('stockferre').doc('inventario_' + otherModo);
+      const otherSnap = await otherRef.get();
+      if(otherSnap.exists) cacheRemoteModo(otherSnap.data(), otherModo);
+      fbOtherUnsub = otherRef.onSnapshot(snap=>{
+        if(snap.metadata.hasPendingWrites) return;
+        if(snap.exists) cacheRemoteModo(snap.data(), otherModo);
+      }, ()=>{ /* ignorar */ });
+    }catch(err){ /* la caché del otro modo es opcional */ }
   }catch(err){
     console.error('No se pudo conectar a Firebase', err);
     setSyncStatus('error');
   }
+}
+
+// Guarda en LocalStorage los datos de UN modo recibidos de Firebase,
+// conservando los historiales locales de ese modo.
+function cacheRemoteModo(data, modo){
+  try{
+    const prev = loadModoDB(modo);
+    const remote = normalizeDB(data);
+    remote.historialEscaneos = prev.historialEscaneos;
+    remote.historialBusquedas = prev.historialBusquedas;
+    remote.historialInventario = prev.historialInventario;
+    localStorage.setItem('stockferre_catalogo_v1_' + modo, JSON.stringify(remote));
+  }catch(e){ /* ignorar */ }
 }
 
 
@@ -1764,17 +1794,53 @@ function passKeyFor(modo){ return 'stockferre_pass_' + modo + '_v1'; }
 // acceso entre los dos dueños del negocio.
 function encodePass(pass){ return btoa(unescape(encodeURIComponent('sf::' + pass))); }
 
-function hasPassword(modo){
-  try{ return !!localStorage.getItem(passKeyFor(modo)); }catch(e){ return false; }
+// La contraseña de cada modo se guarda DENTRO de la base de ese modo (campo
+// _passEnc). Como la base se sincroniza por Firebase (ver saveDB/persistModoDB),
+// la contraseña que pones en la PC también existe en el celular y al revés.
+// La clave local antigua (passKeyFor) se conserva como respaldo y para migrar.
+function getPassEnc(modo){
+  try{
+    const enc = loadModoDB(modo)._passEnc;
+    if(enc) return enc;
+  }catch(e){ /* ignorar */ }
+  try{ return localStorage.getItem(passKeyFor(modo)); }catch(e){ return null; }
 }
+function hasPassword(modo){ return !!getPassEnc(modo); }
 function setPassword(modo, pass){
-  try{ localStorage.setItem(passKeyFor(modo), encodePass(pass)); }catch(e){}
+  const enc = encodePass(pass);
+  const dbObj = loadModoDB(modo);
+  dbObj._passEnc = enc;
+  persistModoDB(modo, dbObj);
+  if(modo === currentModo && db) db._passEnc = enc; // para que saveDB() no la borre
+  try{ localStorage.setItem(passKeyFor(modo), enc); }catch(e){}
 }
 function removePassword(modo){
+  const dbObj = loadModoDB(modo);
+  delete dbObj._passEnc;
+  persistModoDB(modo, dbObj);
+  if(modo === currentModo && db) delete db._passEnc; // para que saveDB() no la reescriba
   try{ localStorage.removeItem(passKeyFor(modo)); }catch(e){}
 }
 function checkPassword(modo, pass){
-  try{ return localStorage.getItem(passKeyFor(modo)) === encodePass(pass); }catch(e){ return false; }
+  return getPassEnc(modo) === encodePass(pass);
+}
+
+// Si el dueño ya tenía una contraseña en la clave local antigua, la pasa a la
+// base del modo y la sube a Firebase una sola vez para que se sincronice a
+// los demás celulares.
+function migrateLegacyPasswords(){
+  ['manual','electrico'].forEach(modo=>{
+    try{
+      const old = localStorage.getItem(passKeyFor(modo));
+      if(!old) return;
+      const dbObj = loadModoDB(modo);
+      if(!dbObj._passEnc){
+        dbObj._passEnc = old;
+        persistModoDB(modo, dbObj);
+        if(modo === currentModo && db) db._passEnc = old;
+      }
+    }catch(e){ /* ignorar */ }
+  });
 }
 
 // Cambia la base de datos activa (LocalStorage + Firebase) al modo indicado.
@@ -2718,6 +2784,7 @@ function init(){
   restoreModo(); // decide qué modo/rol estaba activo ANTES de cargar datos
   loadDB();
   loadInvUpdates();
+  migrateLegacyPasswords(); // sube contraseñas viejas para sincronizarlas
   setupEventListeners();
   showView('inicio');
   updateInicioClock();

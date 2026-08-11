@@ -67,8 +67,10 @@
           <line x1="198" y1="50" x2="202" y2="64" stroke="#0b0b0c" stroke-width="2"/>
         </svg>
         <div class="inicio-welcome" id="inicioWelcome">Bienvenido a la Tienda 1</div>
-        <div class="inicio-time" id="inicioTime">--:--:--</div>
-        <div class="inicio-date" id="inicioDate">-</div>
+        <div class="inicio-clock">
+          <div class="inicio-time" id="inicioTime">--:--:--</div>
+          <div class="inicio-date" id="inicioDate">-</div>
+        </div>
 
         <div class="inicio-modos">
           <button class="inicio-modo-btn inicio-modo-manual" id="btnModoManual">🔧 Herramientas Manuales</button>
@@ -76,7 +78,7 @@
           <button class="inicio-modo-btn inicio-modo-invitado" id="btnModoInvitado">👤 INGRESAR</button>
         </div>
       </div>
-      <div class="inicio-footer">Creado por Abner Pérez</div>
+      <div class="inicio-footer">Creado Por Abner Perez</div>
     </section>
 
     <!-- ---------- ESCÁNER (pantalla principal) ---------- -->
@@ -468,7 +470,7 @@
       <label style="grid-column:1/-1;">Confirmar contraseña *
         <input type="password" id="setPassConfirm" class="input" autocomplete="off" required>
       </label>
-      <p class="hint" style="grid-column:1/-1; margin:0;">Solo se guarda en este dispositivo. Si alguien no la sabe, siempre puede entrar como invitado.</p>
+      <p class="hint" style="grid-column:1/-1; margin:0;">La contraseña se sincroniza a los dispositivos conectados a la misma cuenta de Firebase. Si alguien no la sabe, siempre puede entrar como invitado.</p>
       <div class="form-actions" style="justify-content:space-between;">
         <button type="button" class="btn btn-danger" id="btnRemovePassword" style="display:none;">Quitar contraseña</button>
         <button type="submit" class="btn btn-primary">Guardar</button>

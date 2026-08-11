@@ -311,6 +311,7 @@
   <div class="modal-body">
     <p class="hint" style="margin-top:0;">Escanea el código del producto para registrar cuánta cantidad tienes en stock.</p>
     <div id="scannerBlockPlaceholder"></div>
+    <div id="invScanResultBox" style="margin-top:14px;"></div>
   </div>
 </div>
 
@@ -321,28 +322,9 @@
     <button class="modal-close" data-close-modal>✕</button>
   </div>
   <div class="modal-body">
-    <div id="invNoEncontrado" style="display:none;">
-      <div class="scan-not-found">
-        ⚠️ El código <strong id="invCodigoNoEncontrado"></strong> no está en tu inventario de productos.
-        <div style="margin-top:10px;">
-          <button class="btn btn-primary btn-sm" id="btnCrearDesdeInventario">+ Crear nuevo producto</button>
-        </div>
-      </div>
-    </div>
-
-    <!-- Paso 1: confirmar que el producto detectado es el correcto -->
-    <div id="invConfirmacion" style="display:none;">
-      <div class="scan-result-card" style="margin-bottom:14px;">
-        <h4>📦 Producto encontrado</h4>
-        <div class="sr-row"><span>Descripción</span><strong id="invConfNombre"></strong></div>
-        <div class="sr-row"><span>Código</span><strong id="invConfCodigo"></strong></div>
-        <div class="sr-row"><span>Código de barras</span><strong id="invConfCodigoBarras"></strong></div>
-      </div>
-      <button type="button" class="btn btn-primary" id="btnInvConfirmarRegistro" style="width:100%;">📋 Registrar</button>
-    </div>
-
-    <!-- Paso 2: cantidad y código de barras (aparece después de confirmar) -->
-    <form id="formInventario" class="form-grid" style="display:none;">
+    <!-- La confirmación del producto ya se muestra debajo de la cámara, antes de
+         llegar a este recuadro; aquí solo se pide cantidad y código de barras. -->
+    <form id="formInventario" class="form-grid">
       <input type="hidden" id="invCodigo">
       <div class="product-info-box visible" style="grid-column:1/-1;">
         📦 <strong id="invNombreDisplay"></strong><br>

@@ -693,8 +693,18 @@ function restoreScannerBlockHome(){
 function openInventarioScan(){
   scanContext = 'inventario';
   moveScannerBlockTo('scannerBlockPlaceholder');
+  clearInventoryScanResult();
   openModal('modalInventarioScan');
-  if(!ocrActive) startOcrScanner();
+  if(!ocrActive){
+    startOcrScanner();
+  }else{
+    // La cámara ya estaba encendida (venimos de registrar el producto anterior
+    // y seguimos contando): solo hay que reanudar el análisis, sin reabrirla.
+    ocrPaused = false;
+    window.__lastOcrCode = null;
+    setOcrStatus('🔎 Buscando código...');
+    scheduleNextOcrCapture();
+  }
 }
 
 function closeInventarioScan(){
@@ -703,32 +713,85 @@ function closeInventarioScan(){
   closeAllModals();
 }
 
+// Producto (o código, si no se encontró) detectado en el escáner de inventario,
+// pendiente de que el usuario toque "Registrar" para pasar al recuadro de cantidad.
+let invScanPendingCodigo = null;
+let invScanPendingProducto = null;
+
+function clearInventoryScanResult(){
+  const box = document.getElementById('invScanResultBox');
+  if(box) box.innerHTML = '';
+  invScanPendingCodigo = null;
+  invScanPendingProducto = null;
+}
+
+// Al detectar un código en la pestaña de Inventario, la cámara NO se cierra:
+// el resultado aparece debajo de ella, y solo al tocar "Registrar" se pasa
+// al recuadro de cantidad y código de barras.
 function handleInventoryScan(codigo){
-  closeInventarioScan();
   const p = getProductoByCodigo(codigo);
+  invScanPendingCodigo = codigo;
+  invScanPendingProducto = p || null;
 
-  document.getElementById('invCodigo').value = codigo;
+  // Pausa el análisis (la cámara sigue encendida) para no seguir detectando
+  // el mismo código una y otra vez mientras se muestra el resultado.
+  ocrPaused = true;
+  if(ocrTimer){ clearTimeout(ocrTimer); ocrTimer = null; }
+
+  const box = document.getElementById('invScanResultBox');
+  if(!box) return;
+
   if(p){
-    document.getElementById('invNoEncontrado').style.display = 'none';
-    document.getElementById('formInventario').style.display = 'none';
-
-    // Paso 1: mostrar los datos del producto detectado para confirmar
-    document.getElementById('invConfNombre').textContent = p.nombre;
-    document.getElementById('invConfCodigo').textContent = p.codigo;
-    document.getElementById('invConfCodigoBarras').textContent = p.codigoBarras || '(sin registrar)';
-    document.getElementById('invConfirmacion').style.display = '';
-
-    // Prepara el formulario del paso 2 (queda oculto hasta tocar "Registrar")
-    document.getElementById('invNombreDisplay').textContent = p.nombre;
-    document.getElementById('invStockActualDisplay').textContent = `Stock actual: ${p.stock || 0}`;
-    document.getElementById('invCantidad').value = 1;
-    document.getElementById('invCodigoBarras').value = p.codigoBarras || '';
+    box.innerHTML = `
+      <div class="scan-result-card">
+        <h4>📦 Producto encontrado</h4>
+        <div class="sr-row"><span>Descripción</span><strong>${escapeHtml(p.nombre)}</strong></div>
+        <div class="sr-row"><span>Código</span><strong>${escapeHtml(p.codigo)}</strong></div>
+        <div class="sr-row"><span>Código de barras</span><strong>${escapeHtml(p.codigoBarras || '(sin registrar)')}</strong></div>
+        <div class="sr-row"><span>Stock actual</span><strong>${p.stock || 0}</strong></div>
+        <div style="margin-top:12px; display:flex; gap:8px; flex-wrap:wrap;">
+          <button type="button" class="btn btn-primary btn-sm" id="btnInvRegistrarDesdeScan">📋 Registrar</button>
+          <button type="button" class="btn btn-secondary btn-sm" id="btnInvEscanearOtro">🔄 Escanear otro código</button>
+        </div>
+      </div>`;
+    document.getElementById('btnInvRegistrarDesdeScan').addEventListener('click', ()=>{
+      closeInventarioScan();
+      openInventarioDetalleForm(p, codigo);
+    });
   }else{
-    document.getElementById('invConfirmacion').style.display = 'none';
-    document.getElementById('invNoEncontrado').style.display = '';
-    document.getElementById('formInventario').style.display = 'none';
-    document.getElementById('invCodigoNoEncontrado').textContent = codigo;
+    box.innerHTML = `
+      <div class="scan-not-found">
+        ⚠️ El código <strong>${escapeHtml(codigo)}</strong> no está en tu inventario de productos.
+        <div style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap;">
+          <button type="button" class="btn btn-primary btn-sm" id="btnCrearDesdeInventarioScan">+ Crear nuevo producto</button>
+          <button type="button" class="btn btn-secondary btn-sm" id="btnInvEscanearOtro">🔄 Escanear otro código</button>
+        </div>
+      </div>`;
+    document.getElementById('btnCrearDesdeInventarioScan').addEventListener('click', ()=>{
+      closeInventarioScan();
+      openProductModal(null, codigo);
+    });
   }
+
+  document.getElementById('btnInvEscanearOtro').addEventListener('click', ()=>{
+    clearInventoryScanResult();
+    window.__lastOcrCode = null;
+    if(ocrActive){
+      ocrPaused = false;
+      setOcrStatus('🔎 Buscando código...');
+      scheduleNextOcrCapture();
+    }
+  });
+}
+
+// Abre el recuadro de "Registrar inventario" ya con la descripción del
+// producto lista, pidiendo solo cantidad y código de barras.
+function openInventarioDetalleForm(producto, codigo){
+  document.getElementById('invCodigo').value = codigo;
+  document.getElementById('invNombreDisplay').textContent = producto.nombre;
+  document.getElementById('invStockActualDisplay').textContent = `Stock actual: ${producto.stock || 0}`;
+  document.getElementById('invCantidad').value = 1;
+  document.getElementById('invCodigoBarras').value = producto.codigoBarras || '';
   openModal('modalInventarioDetalle');
 }
 
@@ -1257,6 +1320,16 @@ function openModal(id){
   document.getElementById('modalBackdrop').classList.add('open');
   document.getElementById(id).classList.add('open');
 }
+// Cierra únicamente el modal indicado, sin tocar otros modales que puedan
+// estar abiertos debajo (por ejemplo el escáner de código de barras, que se
+// abre "encima" del recuadro de registrar inventario).
+function closeModalById(id){
+  const modal = document.getElementById(id);
+  if(modal) modal.classList.remove('open');
+  if(!document.querySelector('.modal.open')){
+    document.getElementById('modalBackdrop').classList.remove('open');
+  }
+}
 function closeAllModals(){
   const inventarioScanWasOpen = document.getElementById('modalInventarioScan').classList.contains('open');
   const barcodeScanWasOpen = document.getElementById('modalBarcodeScan').classList.contains('open');
@@ -1715,7 +1788,10 @@ async function startBarcodeScanner(){
       if(result){
         const code = result.getText();
         stopBarcodeScanner();
-        closeAllModals();
+        // Solo cierra el recuadro de la cámara de código de barras: el recuadro
+        // de "Registrar inventario" (cantidad / código de barras) debe seguir
+        // abierto detrás, con el campo ya lleno, listo para tocar "Registrar".
+        closeModalById('modalBarcodeScan');
         const input = document.getElementById('invCodigoBarras');
         if(input) input.value = code;
         toast('Código de barras detectado: ' + code, 'success');
@@ -1855,11 +1931,6 @@ function setupEventListeners(){
   document.getElementById('btnCloseInventarioScan').addEventListener('click', closeInventarioScan);
   document.getElementById('btnExportInventario').addEventListener('click', exportInventarioCSV);
   document.getElementById('formInventario').addEventListener('submit', handleInventarioSubmit);
-  document.getElementById('btnCrearDesdeInventario').addEventListener('click', ()=>{
-    const codigo = document.getElementById('invCodigo').value;
-    closeAllModals();
-    openProductModal(null, codigo);
-  });
   document.querySelector('#inventarioTable tbody').addEventListener('click', (e)=>{
     const editId = e.target.closest('[data-edit-inventario]')?.dataset.editInventario;
     if(editId){
@@ -1869,10 +1940,6 @@ function setupEventListeners(){
   });
   document.getElementById('formEditarInventario').addEventListener('submit', handleEditarInventarioSubmit);
   document.getElementById('btnScanBarcode').addEventListener('click', openBarcodeScanModal);
-  document.getElementById('btnInvConfirmarRegistro').addEventListener('click', ()=>{
-    document.getElementById('invConfirmacion').style.display = 'none';
-    document.getElementById('formInventario').style.display = '';
-  });
 
   // Historial
   document.getElementById('btnClearScanHistory').addEventListener('click', ()=>{

@@ -223,15 +223,26 @@ input,select{font-family:inherit;}
 /* ---------- STOCK NEGATIVO ---------- */
 .stock-negative{color:var(--danger);}
 
-/* ---------- INICIO: reloj y fecha ---------- */
+/* ---------- INICIO: reloj y fecha (negro + naranjado + plomo claro) ---------- */
 .inicio-clock-card{
-  background:var(--surface); border-radius:var(--radius); box-shadow:var(--shadow);
-  padding:40px 24px; text-align:center; max-width:420px; margin:24px auto 0;
+  background:linear-gradient(180deg,#1a1a1a 0%,#0d0d0d 100%);
+  border-radius:16px; box-shadow:0 12px 32px rgba(0,0,0,.35);
+  padding:56px 28px; text-align:center; max-width:460px; margin:28px auto 0;
+  border:1px solid rgba(249,115,22,.28);
 }
-.inicio-time{font-size:44px; font-weight:800; color:var(--text); letter-spacing:.02em; font-variant-numeric:tabular-nums;}
-.inicio-date{font-size:15px; color:var(--text-muted); margin-top:8px; text-transform:capitalize;}
+.inicio-time{
+  font-size:68px; font-weight:800; color:#fb923c; letter-spacing:.03em;
+  font-variant-numeric:tabular-nums; text-shadow:0 0 26px rgba(251,146,60,.35);
+}
+.inicio-date{
+  font-size:22px; font-weight:600; color:#e5e7eb; margin-top:16px;
+  text-transform:capitalize; letter-spacing:.01em;
+}
+.inicio-clock-card .hint{color:#9ca3af; font-size:14px;}
 @media (max-width: 560px){
-  .inicio-time{font-size:34px;}
+  .inicio-clock-card{padding:38px 18px;}
+  .inicio-time{font-size:46px;}
+  .inicio-date{font-size:17px;}
 }
 
 /* ---------- TOASTS ---------- */

@@ -22,41 +22,62 @@
   </div>
 
   <nav class="sidebar-nav">
-    <button class="nav-item active" data-view="escaner"><span>📷</span> Escanear</button>
+    <button class="nav-item" data-view="escaner"><span>📷</span> Escanear</button>
     <button class="nav-item" data-view="productos"><span>📦</span> Productos</button>
     <button class="nav-item" data-view="categorias"><span>🗂️</span> Categorías</button>
     <button class="nav-item" data-view="ventas"><span>💰</span> Ventas</button>
+    <button class="nav-item nav-pro-only" data-view="topventas"><span>🏆</span> Más vendidos</button>
+    <button class="nav-item" data-view="pedidos"><span>📋</span> Pedidos</button>
     <button class="nav-item" data-view="compras"><span>🛒</span> Compras</button>
-    <button class="nav-item" data-view="finanzas"><span>📊</span> Estado Financiero</button>
-    <button class="nav-item" data-view="retiros"><span>🏧</span> Retiros</button>
-    <button class="nav-item" data-view="deudas"><span>📉</span> Deudas</button>
-    <button class="nav-item" data-view="gastos"><span>🧾</span> Gastos del día</button>
+    <button class="nav-item nav-pro-only" data-view="gastos"><span>🧾</span> Gastos del día</button>
     <button class="nav-item" data-view="inventario"><span>📋</span> Inventario</button>
+    <button class="nav-item nav-pro-only" data-view="finanzas"><span>📊</span> Estado Financiero</button>
+    <button class="nav-item nav-pro-only" data-view="retiros"><span>💸</span> Pagos</button>
+    <button class="nav-item nav-pro-only" data-view="deudas"><span>📉</span> Deudas</button>
     <button class="nav-item" data-view="historial"><span>🕘</span> Historial</button>
     <button class="nav-item" data-view="config"><span>⚙️</span> Configuración</button>
   </nav>
 
   <div class="sidebar-footer">
-    <small id="sidebarProductCount">0 productos</small>
-    <small id="sidebarSyncStatus">💾 Solo en este dispositivo</small>
-    <button id="btnAddPassword">🔒 Agregar contraseña</button>
-    <button class="btn btn-secondary" id="btnVolverInicio">🏠 Volver al Inicio</button>
-    <label class="remember-switch" id="rememberSwitchRow" title="Mantener sesión abierta en este dispositivo">
-      <input type="checkbox" id="rememberSwitch">
-      <span class="switch-track"><span class="switch-thumb"></span></span>
-      <span class="remember-text">
-        <strong>Mantener sesión abierta</strong>
-        <small>No pedir contraseña aquí</small>
-      </span>
-    </label>
-    <label class="remember-switch" id="notifySwitchRow" title="Recibir avisos de ventas registradas en este dispositivo">
-      <input type="checkbox" id="notifySwitch">
-      <span class="switch-track"><span class="switch-thumb"></span></span>
-      <span class="remember-text">
-        <strong>Activar notificaciones</strong>
-        <small>Avisar cuando se registre una venta</small>
-      </span>
-    </label>
+    <button class="btn btn-secondary" id="btnToggleOptions">⚙️ Opciones</button>
+    <div class="sidebar-options" id="sidebarOptions">
+      <small id="sidebarProductCount">0 productos</small>
+      <small id="sidebarSyncStatus">💾 Solo en este dispositivo</small>
+      <button id="btnAddPassword">🔒 Agregar contraseña</button>
+      <label class="remember-switch" id="rememberSwitchRow" title="Mantener sesión abierta en este dispositivo">
+        <input type="checkbox" id="rememberSwitch">
+        <span class="switch-track"><span class="switch-thumb"></span></span>
+        <span class="remember-text">
+          <strong>Mantener sesión abierta</strong>
+          <small>No pedir contraseña aquí</small>
+        </span>
+      </label>
+      <label class="remember-switch" id="notifySwitchRow" title="Recibir avisos de ventas registradas en este dispositivo">
+        <input type="checkbox" id="notifySwitch">
+        <span class="switch-track"><span class="switch-thumb"></span></span>
+        <span class="remember-text">
+          <strong>Activar notificaciones</strong>
+          <small>Avisar cuando se registre una venta</small>
+        </span>
+      </label>
+      <label class="remember-switch" id="themeSwitchRow" title="Tema: blanco (claro) o dorado (modo pro)">
+        <input type="checkbox" id="themeSwitch">
+        <span class="switch-track"><span class="switch-thumb"></span></span>
+        <span class="remember-text">
+          <strong>🎨 Tema: blanco / dorado</strong>
+          <small>Dorado = modo pro</small>
+        </span>
+      </label>
+      <label class="remember-switch pro-switch" id="proModeRow" title="Modo Pro: todo dorado, plateado y brillante">
+        <input type="checkbox" id="proModeSwitch">
+        <span class="switch-track"><span class="switch-thumb"></span></span>
+        <span class="remember-text">
+          <strong>👑 Activar modo pro</strong>
+          <small>Todo dorado y reluciente</small>
+        </span>
+      </label>
+      <button class="btn btn-secondary" id="btnVolverInicio">🏠 Volver al Inicio</button>
+    </div>
   </div>
 </aside>
 
@@ -150,7 +171,7 @@
           <thead>
             <tr>
               <th>Código</th><th>Cód. Barras</th><th>Descripción</th><th>Marca</th><th>Categoría</th>
-              <th class="price-guest-hide">P. Compra</th><th class="price-guest-hide">P. Marca</th><th>P. Venta</th><th class="admin-only">Acciones</th>
+              <th class="price-guest-hide">P. Compra</th><th class="price-guest-hide">P. Marca</th><th>P. Venta</th><th>Stock</th><th>Stock mín.</th><th class="admin-only">Acciones</th>
             </tr>
           </thead>
           <tbody></tbody>
@@ -250,6 +271,11 @@
               <strong class="fin-value" id="finTotal">Bs 0.00</strong>
               <span class="fin-sub">Productos + efectivo</span>
             </div>
+            <div class="fin-card">
+              <span class="fin-label">Deuda pendiente</span>
+              <strong class="fin-value" id="finDeuda">Bs 0.00</strong>
+              <span class="fin-sub">Deudas − pagos registrados</span>
+            </div>
           </div>
           <div style="margin-top:14px;">
             <button class="btn btn-secondary" id="btnEditarCaja">✏️ Editar efectivo</button>
@@ -259,10 +285,10 @@
       </div>
     </section>
 
-    <!-- ---------- RETIROS DE DINERO (solo dueño) ---------- -->
+    <!-- ---------- PAGOS (retiros de dinero, solo dueño) ---------- -->
     <section class="view" id="view-retiros">
       <div class="toolbar">
-        <button class="btn btn-danger" id="btnNuevoRetiro">➖ Nuevo retiro</button>
+        <button class="btn btn-danger" id="btnNuevoRetiro">➖ Nuevo pago</button>
         <button class="btn btn-secondary" id="btnExportRetiros">📤 Exportar CSV</button>
       </div>
       <div class="mes-filtro">
@@ -271,12 +297,12 @@
           <option value="">Todas las fechas</option>
         </select>
       </div>
-      <p class="hint" id="retirosSummary" style="margin-bottom:12px;">0 retiros</p>
+      <p class="hint" id="retirosSummary" style="margin-bottom:12px;">0 pagos</p>
       <div class="table-wrap">
         <table class="table" id="retirosTable">
           <thead>
             <tr>
-              <th>Fecha</th><th>Monto</th><th>Observación</th><th>Acciones</th>
+              <th>Fecha</th><th>Marca</th><th>Monto</th><th>Observación</th><th>Acciones</th>
             </tr>
           </thead>
           <tbody></tbody>
@@ -316,6 +342,55 @@
           <tbody></tbody>
         </table>
       </div>
+    </section>
+
+    <!-- ---------- PRODUCTOS MÁS VENDIDOS (solo dueño) ---------- -->
+    <section class="view" id="view-topventas">
+      <div class="toolbar">
+        <div class="mes-filtro">
+          <label for="topVentasMes">Período:</label>
+          <select id="topVentasMes" class="input">
+            <option value="">Todo el año</option>
+          </select>
+        </div>
+        <button class="btn btn-secondary" id="btnExportTopVentas">📤 Exportar CSV</button>
+        <button class="btn btn-secondary" id="btnImportTopVentas">📥 Importar CSV</button>
+      </div>
+      <p class="hint" id="topVentasSummary" style="margin-bottom:12px;">0 productos</p>
+      <div class="table-wrap">
+        <table class="table" id="topVentasTable">
+          <thead>
+            <tr>
+              <th>#</th><th>Producto</th><th>Vendidos</th><th>Stock</th><th>Stock mínimo</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <p class="hint" style="margin-top:10px;">⭐ Los 20 primeros son los más vendidos. El stock mínimo se edita escribiendo el número en su casilla. "Importar CSV" solo actualiza el stock mínimo (columna STOCK_MINIMO).</p>
+    </section>
+
+    <!-- ---------- PEDIDOS / REPOSICIÓN (solo dueño) ---------- -->
+    <section class="view" id="view-pedidos">
+      <div class="toolbar">
+        <select id="pedidoMarcaFilter" class="input" title="Filtrar por marca">
+          <option value="">Todas las marcas</option>
+        </select>
+        <button class="btn btn-secondary" id="btnExportPedidos">📤 Exportar CSV</button>
+        <button class="btn btn-secondary" id="btnImportPedidos">📥 Importar CSV</button>
+      </div>
+      <p class="hint" id="pedidoSummary" style="margin-bottom:12px;">0 productos · 0 unidades · Bs 0.00</p>
+      <div class="table-wrap">
+        <table class="table" id="pedidosTable">
+          <thead>
+            <tr>
+              <th>#</th><th>Marca</th><th>Producto</th><th>Stock</th><th>Stock mín.</th><th>Cant. a pedir</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <p class="hint" style="margin-top:10px;">Ordenados de menor a mayor stock (primero los agotados, después stock 1, 2, etc. hasta el último). La cantidad a pedir viene prellenada con lo que falta para alcanzar el stock mínimo, y puedes editarla escribiendo el número. "Importar CSV" actualiza stock mínimo (en la base) y cantidades a pedir.</p>
     </section>
 
     <!-- ---------- INVENTARIO ---------- -->
@@ -619,29 +694,30 @@
   </div>
 </div>
 
-<!-- Modal: Retiro de dinero -->
+<!-- Modal: Pago (retiro de dinero hacia una marca) -->
 <div class="modal modal-sm" id="modalRetiro">
   <div class="modal-header">
-    <h3 id="retiroModalTitle">➖ Nuevo retiro</h3>
+    <h3 id="retiroModalTitle">➖ Nuevo pago</h3>
     <button class="modal-close" data-close-modal>✕</button>
   </div>
   <div class="modal-body">
     <form id="formRetiro" class="form-grid">
       <input type="hidden" id="rId">
       <label style="grid-column:1/-1;">Monto (Bs) *<input type="number" id="rMonto" class="input" step="0.01" min="0.01" required></label>
-      <label style="grid-column:1/-1;">Fecha del retiro<input type="date" id="rFecha" class="input" title="Fecha a la que corresponde el retiro (por defecto hoy y se recuerda)."></label>
-      <label style="grid-column:1/-1;">Concepto
-        <select id="rObsPreset" class="input">
-          <option value="">Otro (escribir)</option>
-          <option value="Pago Truper">Pago Truper</option>
-          <option value="Pago Ingco">Pago Ingco</option>
-          <option value="Pago Dyllu">Pago Dyllu</option>
+      <label style="grid-column:1/-1;">Marca *
+        <select id="rMarca" class="input" required>
+          <option value="Ingco">Ingco</option>
+          <option value="Truper">Truper</option>
+          <option value="Dyllu">Dyllu</option>
           <option value="Salarios">Salarios</option>
+          <option value="__nueva__">➕ Añadir nueva marca...</option>
         </select>
       </label>
-      <label style="grid-column:1/-1;">Observación<input type="text" id="rObs" class="input" placeholder="Ej: Pago Truper, Pago Ingco, luz, gasolina..."></label>
+      <label style="grid-column:1/-1; display:none;" id="rNuevaMarcaRow">Nueva marca<input type="text" id="rNuevaMarca" class="input" placeholder="Nombre de la nueva marca" maxlength="40"></label>
+      <label style="grid-column:1/-1;">Fecha del pago<input type="date" id="rFecha" class="input" title="Fecha a la que corresponde el pago (por defecto hoy y se recuerda)."></label>
+      <label style="grid-column:1/-1;">Observación<input type="text" id="rObs" class="input" placeholder="Opcional: detalle del pago..."></label>
       <div class="form-actions">
-        <button type="submit" class="btn btn-danger">Guardar retiro</button>
+        <button type="submit" class="btn btn-danger">Guardar pago</button>
         <button type="button" class="btn btn-secondary" data-close-modal>Cancelar</button>
       </div>
     </form>
@@ -657,8 +733,15 @@
   <div class="modal-body">
     <form id="formDeuda" class="form-grid">
       <input type="hidden" id="dId">
-      <label style="grid-column:1/-1;">Marca *<input type="text" id="dMarca" class="input" list="marcasDeudasList" placeholder="Ej: Truper, Ingco, Dyllu..." required></label>
-      <datalist id="marcasDeudasList"></datalist>
+      <label style="grid-column:1/-1;">Marca *
+        <select id="dMarca" class="input" required>
+          <option value="Ingco">Ingco</option>
+          <option value="Truper">Truper</option>
+          <option value="Dyllu">Dyllu</option>
+          <option value="__nueva__">➕ Añadir nueva marca...</option>
+        </select>
+      </label>
+      <label style="grid-column:1/-1; display:none;" id="dNuevaMarcaRow">Nueva marca<input type="text" id="dNuevaMarca" class="input" placeholder="Nombre de la nueva marca" maxlength="40"></label>
       <label style="grid-column:1/-1;">Monto (Bs) *<input type="number" id="dMonto" class="input" step="0.01" min="0.01" required></label>
       <label>Fecha de la deuda<input type="date" id="dFecha" class="input"></label>
       <label>Vencimiento<input type="date" id="dVencimiento" class="input"></label>
@@ -812,6 +895,8 @@
 <input type="file" id="fileImportInventario" accept=".csv" hidden>
 <input type="file" id="fileImportVentas" accept=".csv" hidden>
 <input type="file" id="fileImportCompras" accept=".csv" hidden>
+<input type="file" id="fileImportTopVentas" accept=".csv" hidden>
+<input type="file" id="fileImportPedidos" accept=".csv" hidden>
 <input type="file" id="fileImportBackup" accept=".json" hidden>
 
 <script src='https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js'></script>

@@ -55,7 +55,49 @@ input,select{font-family:inherit;}
 .nav-item:hover{background:rgba(255,255,255,.06); color:#fff;}
 .nav-item.active{background:var(--primary); color:#fff;}
 
+/* Pestañas exclusivas del modo pro (ESTADO FINANCIERO / PAGOS / DEUDAS y
+   también MÁS VENDIDOS / GASTOS DEL DÍA): ocultas en el menú normal, aparecen
+   cuando se activa el modo pro. Salen UNA POR UNA, cada una con un barrido de
+   brillo dorado (la demora de cada una se define con --reveal-delay en app.js).
+   El modo pro (body.pro-mode) muestra las pestañas; el tema dorado
+   (body.gold-theme) solo cambia los colores. */
+.nav-pro-only{display:none;}
+body.pro-mode:not(.role-guest) .nav-pro-only{
+  display:flex;
+  position:relative;
+  overflow:hidden;
+  animation:navProReveal .6s ease forwards;
+  animation-delay:var(--reveal-delay, 0s);
+}
+body.pro-mode:not(.role-guest) .nav-pro-only::after{
+  content:''; position:absolute; top:0; left:-70%; width:45%; height:100%;
+  background:linear-gradient(105deg, transparent, rgba(255,255,255,.65), transparent);
+  transform:skewX(-20deg); pointer-events:none;
+  animation:navProShine .7s ease forwards;
+  animation-delay:var(--reveal-delay, 0s);
+}
+@keyframes navProReveal{
+  0%{opacity:0; transform:translateX(-16px) scale(.96); box-shadow:0 0 0 rgba(255,215,0,0);}
+  40%{opacity:1; transform:translateX(0) scale(1.02); filter:brightness(1.55); box-shadow:0 0 18px rgba(255,215,0,.75);}
+  100%{opacity:1; transform:translateX(0) scale(1); filter:none; box-shadow:0 0 0 rgba(255,215,0,0);}
+}
+@keyframes navProShine{
+  0%{opacity:0; left:-70%;}
+  20%{opacity:1;}
+  60%{opacity:0;}
+  100%{opacity:0; left:120%;}
+}
+
+/* Panel de Opciones (recuadro inferior): todo apilado, uno debajo de otro */
+.sidebar-options #proModeRow{width:100%; box-sizing:border-box; border:1px solid rgba(255,215,0,.28);}
+.sidebar-options #btnVolverInicio{margin-top:4px;}
+
 .sidebar-footer{padding:14px 18px; border-top:1px solid rgba(255,255,255,.08); color:#6b7280; display:flex; flex-direction:column; gap:4px;}
+
+/* Botón "Opciones": abre/cierra el panel inferior del menú */
+#btnToggleOptions{width:100%; margin:0; font-size:14px;}
+.sidebar-options{display:none;}
+.sidebar-options.open{display:flex; flex-direction:column; gap:4px; margin-top:4px;}
 
 .sidebar-overlay{
   display:none; position:fixed; inset:0; background:rgba(0,0,0,.45); z-index:90;
@@ -232,7 +274,9 @@ body.role-guest .nav-item[data-view="compras"],
 body.role-guest .nav-item[data-view="finanzas"],
 body.role-guest .nav-item[data-view="retiros"],
 body.role-guest .nav-item[data-view="deudas"],
-body.role-guest .nav-item[data-view="gastos"]{display:none;}
+body.role-guest .nav-item[data-view="gastos"],
+body.role-guest .nav-item[data-view="topventas"],
+body.role-guest .nav-item[data-view="pedidos"]{display:none;}
 body.role-guest .price-guest-hide{display:none;}
 body.role-guest .admin-only{display:none !important;}
 
@@ -243,6 +287,16 @@ body.role-guest .admin-only{display:none !important;}
 
 /* Gastos del día: fila de subtotal de cada día */
 .gasto-day-row td{background:rgba(0,0,0,0.05); font-weight:600; padding:8px 12px !important;}
+
+/* Productos más vendidos */
+.top-row td{background:rgba(255,215,0,0.08);}
+.top-star{color:#d4a017; font-weight:700; white-space:nowrap;}
+.stock-min-input{width:90px; padding:4px 8px; font-size:13px;}
+
+/* Pedidos / reposición */
+.pedido-bajo td{background:rgba(255,0,0,0.05);}
+.pedido-stockmin-input{width:80px; padding:4px 8px; font-size:13px;}
+.pedido-cant-input{width:80px; padding:4px 8px; font-size:13px; font-weight:700;}
 
 /* ---------- CONTRASEÑA POR MODO (barra lateral) ---------- */
 /* El botón para agregar contraseña aparece dentro de Herramientas Manuales
@@ -483,8 +537,9 @@ body.modo-invitado .sidebar-footer small{color:#fdba74;}
   display:flex; align-items:center; justify-content:space-between; gap:10px;
   padding:14px 18px; border-bottom:1px solid var(--border); background:var(--bg);
 }
-.deuda-group-header h3{margin:0; font-size:15px;}
+.deuda-group-header h3{margin:0 0 2px; font-size:15px;}
 .deuda-group-header strong{font-size:16px; color:var(--danger);}
+.deuda-group-header .hint{margin:0; display:block; font-size:12px;}
 
 /* ---------- TOASTS ---------- */
 .toast-container{position:fixed; bottom:20px; right:20px; z-index:400; display:flex; flex-direction:column; gap:10px;}
@@ -518,3 +573,200 @@ code{background:var(--bg); padding:2px 6px; border-radius:4px; font-size:12px;}
   .ocr-reader{height:220px; max-width:100%;}
   .scan-manual{flex-direction:column;}
 }
+
+/* ============================================================
+   TEMA DORADO: TODO DORADO · PLATEADO BRILLOSO · BRILLOS/RELUCIRES
+   Se activa con el suich de tema (body.gold-theme). Independiente del
+   modo pro: solo cambia los colores (y sus sonidos), no las pestañas.
+   ============================================================ */
+body.gold-theme{
+  --primary:#d4af37;
+  --primary-dark:#a8862a;
+  --primary-light:#f7e9b0;
+  --success:#b8860b;
+  --success-light:#f7e9b0;
+  --danger:#b45309;
+  --danger-light:#fde9b8;
+  --warning:#ca8a04;
+  --warning-light:#fbe8a0;
+  --bg:#171105;
+  --surface:#2a210b;
+  --border:#4a3c12;
+  --text:#f6e7ad;
+  --text-muted:#c9b877;
+  --sidebar-bg:#120d02;
+  --sidebar-text:#e6d9a8;
+  --sidebar-active:#3d2f08;
+  overflow-x:hidden;
+}
+
+/* ---- Relucir de pantalla: barrido de luz diagonal cada rato ---- */
+body.gold-theme::before{
+  content:''; position:fixed; top:-10%; left:-70%; width:45%; height:120%;
+  background:linear-gradient(100deg, transparent 0%, rgba(255,215,0,.10) 35%,
+    rgba(255,255,255,.22) 50%, rgba(255,215,0,.10) 65%, transparent 100%);
+  transform:skewX(-14deg); pointer-events:none; z-index:9998;
+  animation:proSweep 5.5s ease-in-out infinite;
+}
+@keyframes proSweep{
+  0%{left:-70%;}
+  60%{left:130%;}
+  100%{left:130%;}
+}
+
+/* ---- Destellos (estrellitas) que titilan por toda la pantalla ---- */
+body.gold-theme::after{
+  content:''; position:fixed; inset:0; pointer-events:none; z-index:9997;
+  background-image:
+    radial-gradient(1.6px 1.6px at 12% 22%, rgba(255,255,255,.9), transparent 60%),
+    radial-gradient(1.2px 1.2px at 32% 70%, rgba(255,220,120,.9), transparent 60%),
+    radial-gradient(1.8px 1.8px at 55% 15%, rgba(255,255,255,.85), transparent 60%),
+    radial-gradient(1.2px 1.2px at 70% 45%, rgba(255,235,150,.9), transparent 60%),
+    radial-gradient(1.5px 1.5px at 85% 75%, rgba(255,255,255,.8), transparent 60%),
+    radial-gradient(1.3px 1.3px at 92% 25%, rgba(255,220,120,.9), transparent 60%),
+    radial-gradient(1.7px 1.7px at 8% 55%, rgba(255,255,255,.85), transparent 60%),
+    radial-gradient(1.1px 1.1px at 45% 90%, rgba(255,235,150,.85), transparent 60%),
+    radial-gradient(1.4px 1.4px at 22% 8%, rgba(255,255,255,.8), transparent 60%);
+  background-size:100% 100%;
+  animation:proTwinkle 4s ease-in-out infinite;
+  mix-blend-mode:screen;
+}
+@keyframes proTwinkle{
+  0%,100%{opacity:.25;}
+  50%{opacity:.85;}
+}
+
+/* ---- Fondo principal ---- */
+body.gold-theme .main-wrap,
+body.gold-theme .content{background:radial-gradient(1200px 700px at 70% -10%, #3a2d0a 0%, #171105 55%);}
+
+/* ---- Cartas, paneles y tablas: brillo dorado pulsante ---- */
+body.gold-theme .stat-card,
+body.gold-theme .panel,
+body.gold-theme .table-wrap,
+body.gold-theme .modal-content{
+  background:linear-gradient(150deg, #30260c 0%, #241c07 60%, #2b2108 100%);
+  border:1px solid rgba(255,215,0,.22);
+  animation:proGlow 3s ease-in-out infinite;
+}
+@keyframes proGlow{
+  0%,100%{box-shadow:0 0 6px rgba(255,215,0,.12);}
+  50%{box-shadow:0 0 24px rgba(255,215,0,.42);}
+}
+
+/* ---- Barra superior ---- */
+body.gold-theme .topbar{
+  background:linear-gradient(180deg, #241c07, #191203);
+  border-bottom:1px solid rgba(255,215,0,.35);
+}
+body.gold-theme .topbar h1,
+body.gold-theme .sidebar-brand strong{
+  background:linear-gradient(180deg, #fff6cf 0%, #f7d774 45%, #c99700 80%);
+  -webkit-background-clip:text; background-clip:text;
+  color:transparent; -webkit-text-fill-color:transparent;
+  text-shadow:0 0 18px rgba(255,215,0,.35);
+}
+body.gold-theme .hamburger{color:#f7d774;}
+
+/* ---- Menú lateral dorado ---- */
+body.gold-theme .sidebar{
+  background:linear-gradient(180deg, #1a1303 0%, #120d02 100%);
+  border-right:1px solid rgba(255,215,0,.25);
+}
+body.gold-theme .sidebar-brand{border-bottom-color:rgba(255,215,0,.25);}
+body.gold-theme .nav-item:hover{background:rgba(255,215,0,.10); color:#fff; box-shadow:0 0 10px rgba(255,215,0,.18) inset;}
+body.gold-theme .nav-item.active{
+  background:linear-gradient(135deg, #f7d774 0%, #d4af37 55%, #b8912a 100%);
+  color:#241a04; font-weight:700;
+  box-shadow:0 0 16px rgba(255,215,0,.55);
+}
+/* Iconos del menú con halo plateado */
+body.gold-theme .nav-item span{filter:drop-shadow(0 0 6px rgba(220,228,255,.9));}
+body.gold-theme .brand-icon{filter:drop-shadow(0 0 10px rgba(255,215,0,.9));}
+
+/* ---- Textos plateados brillosos ---- */
+body.gold-theme .brand-text small,
+body.gold-theme .remember-text strong,
+body.gold-theme .table th,
+body.gold-theme .stat-card .stat-value{
+  background:linear-gradient(180deg, #ffffff 0%, #cfd6e0 45%, #8f97a7 85%);
+  -webkit-background-clip:text; background-clip:text;
+  color:transparent; -webkit-text-fill-color:transparent;
+  animation:proSilver 4s ease-in-out infinite;
+}
+@keyframes proSilver{
+  0%,100%{filter:drop-shadow(0 0 2px rgba(220,228,255,.35));}
+  50%{filter:drop-shadow(0 0 10px rgba(220,228,255,.95));}
+}
+body.gold-theme .remember-text small{color:#c9b877;}
+
+/* ---- Botones ---- */
+body.gold-theme .btn-primary{
+  background:linear-gradient(135deg, #f7d774 0%, #d4af37 55%, #b8912a 100%);
+  color:#fff7d6; border:1px solid rgba(255,255,255,.18);
+  box-shadow:0 2px 14px rgba(212,175,55,.45);
+}
+body.gold-theme .btn-secondary{
+  background:linear-gradient(135deg, #e4e8ee 0%, #b9bec7 100%);
+  color:#1f2937; border:1px solid rgba(255,255,255,.5);
+  box-shadow:0 2px 10px rgba(200,210,230,.35);
+}
+body.gold-theme .btn-danger{
+  background:linear-gradient(135deg, #f7b267 0%, #b45309 100%);
+  color:#fff7d6;
+}
+body.gold-theme .btn-success{
+  background:linear-gradient(135deg, #f0d878 0%, #a8862a 100%);
+  color:#241a04;
+}
+body.gold-theme .btn:hover{filter:brightness(1.08) drop-shadow(0 0 8px rgba(255,215,0,.6));}
+
+/* ---- Tablas ---- */
+body.gold-theme .table th{
+  background:linear-gradient(180deg, #3a2f0e 0%, #2c240a 100%);
+  border-bottom:1px solid #5a4a12; color:transparent;
+}
+body.gold-theme .table td{border-bottom-color:#3d3010;}
+body.gold-theme .table tbody tr:hover{background:rgba(255,215,0,.07);}
+body.gold-theme .top-row td{background:rgba(255,215,0,.16);}
+body.gold-theme .pedido-bajo td{background:rgba(255,120,20,.14);}
+body.gold-theme .gasto-day-row td{background:rgba(255,215,0,.10);}
+
+/* ---- Inputs ---- */
+body.gold-theme .input{
+  background:#1f1807; color:#f6e7ad; border-color:#5a4a12;
+}
+body.gold-theme .input:focus{
+  outline-color:rgba(255,215,0,.4); border-color:#d4af37;
+  box-shadow:0 0 12px rgba(255,215,0,.25);
+}
+
+/* ---- Insignias ---- */
+body.gold-theme .badge-muted{background:#4a3c12; color:#e9d890;}
+body.gold-theme .badge-success-soft{background:#3d3010; color:#f7e9b0;}
+body.gold-theme .badge-danger-soft{background:#3a2108; color:#fda4a4;}
+
+/* ---- Filtros de fecha y detalles ---- */
+body.gold-theme .venta-date-chip,
+body.gold-theme .compra-date-chip{
+  background:#241c07; border-color:#5a4a12; color:#e9d890;
+}
+body.gold-theme .venta-date-chip.active,
+body.gold-theme .compra-date-chip.active{
+  background:linear-gradient(135deg, #f7d774, #d4af37);
+  border-color:#d4af37; color:#241a04;
+}
+body.gold-theme .deuda-group-header{background:linear-gradient(180deg, #2c240a, #221b06);}
+
+/* ---- Suich modo pro: su propio carril dorado ---- */
+body.gold-theme .pro-switch{
+  background:linear-gradient(90deg, rgba(212,175,55,.18), rgba(255,215,0,.06));
+  border:1px solid rgba(255,215,0,.35);
+}
+body.gold-theme .pro-switch input:checked + .switch-track{background:linear-gradient(90deg, #f7d774, #b8912a); box-shadow:0 0 10px rgba(255,215,0,.8);}
+
+/* ---- Pantalla de Inicio (negro+naranja) también dorada ---- */
+body.gold-theme.inicio-theme .main-wrap,
+body.gold-theme.inicio-theme .content{background:radial-gradient(1100px 650px at 60% -10%, #2c2105 0%, #0c0901 60%);}
+body.gold-theme.inicio-theme .topbar{background:#0c0901; border-bottom-color:rgba(255,215,0,.35);}
+body.gold-theme.inicio-theme .topbar h1{color:transparent;}

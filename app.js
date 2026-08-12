@@ -20,6 +20,9 @@ let currentModo = 'manual';
 // (invitado: no ve precios de compra/marca ni puede entrar a Inventario o
 // Configuración).
 let currentRole = 'admin';
+// Vista activa actual (para saber si el usuario está en una pestaña exclusiva
+// del modo pro cuando este se desactiva).
+let currentView = 'inicio';
 
 function storageKey(){ return 'stockferre_catalogo_v1_' + currentModo; }
 function invUpdatesKey(){ return 'stockferre_inv_actualizaciones_v1_' + currentModo; }
@@ -92,6 +95,7 @@ function normalizeDB(obj){
   obj.productos.forEach(p=>{
     p.codigoBarras = p.codigoBarras || '';
     p.stock = typeof p.stock === 'number' ? p.stock : 0;
+    p.stockMin = typeof p.stockMin === 'number' ? p.stockMin : 0;
   });
   return obj;
 }
@@ -294,6 +298,8 @@ function rerenderCurrentView(){
   if(name === 'productos') renderProductos();
   if(name === 'categorias') renderCategorias();
   if(name === 'ventas') renderVentas();
+  if(name === 'topventas') renderTopVentas();
+  if(name === 'pedidos') renderPedidos();
   if(name === 'compras') renderCompras();
   if(name === 'finanzas') renderFinanzas();
   if(name === 'retiros') renderRetiros();
@@ -818,6 +824,11 @@ function renderScanResultInto(elementId, codigo, context){
 
   const btnEdit = document.getElementById(`btnEditFromScan_${elementId}`);
   if(btnEdit) btnEdit.addEventListener('click', ()=>{
+    // Si venimos del registro de inventario, hay que cerrar el modal del
+    // escáner antes de abrir el de edición: como ambos modales comparten
+    // z-index, el del escáner (que está después en el DOM) taparía el de
+    // editar producto y el clic parecería "no funcionar".
+    if(context === 'inventario') closeInventarioScan();
     openProductModal(p);
   });
   document.getElementById(`btnActionFromScan_${elementId}`).addEventListener('click', ()=>{
@@ -854,6 +865,26 @@ function ensureAudioCtx(){
   return audioCtx;
 }
 
+// Programa un sonido SOLO cuando el contexto de audio ya está corriendo.
+// Sin esto, si el contexto arranca en 'suspended' (política de autoplay de
+// los navegadores) y las notas se programan antes de que reanude, se pierden
+// y el sonido "no suena". Al esperar a que resume() termine, las notas se
+// programan con el reloj ya avanzando y sí se escuchan.
+function scheduleOnAudio(fn){
+  const ctx = ensureAudioCtx();
+  if(!ctx) return;
+  const run = ()=>{ try{ fn(ctx); }catch(e){} };
+  if(ctx.state === 'suspended'){
+    try{
+      const p = ctx.resume();
+      if(p && p.then) p.then(run).catch(run);
+      else setTimeout(run, 80);
+    }catch(e){ setTimeout(run, 80); }
+  }else{
+    run();
+  }
+}
+
 function playTone(freq, delay, dur, vol, type){
   const ctx = ensureAudioCtx();
   if(!ctx) return;
@@ -882,6 +913,202 @@ function playOcrBeep(){
 function playBarcodeBeep(){
   playTone(2000, 0, 0.10, 0.18, 'square');
   playTone(1400, 0.13, 0.14, 0.18, 'square');
+}
+
+// Sonido de activar el modo pro: REVELACIÓN PREMIUM. Base cálida y profunda
+// (La mayor add9) que se enciende suavemente, arpegio de campanitas de cristal
+// ascendente, destello de brillo y un acorde dorado final largo y elegante.
+// Refinado y lujoso, como desbloquear un nivel de oro.
+function playProModeSound(){
+  scheduleOnAudio(ctx => {
+    const now = ctx.currentTime;
+    const t0 = now + 0.02;
+
+    // Base cálida profunda: acorde La mayor add9 (A2 E3 A3 C#4 B4) que respira
+    const warm = (freq, t, dur, vol) => {
+      const o = ctx.createOscillator();
+      const g = ctx.createGain();
+      o.type = 'sine';
+      o.frequency.value = freq;
+      o.connect(g);
+      g.connect(ctx.destination);
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.linearRampToValueAtTime(vol, t + 0.3);
+      g.gain.setValueAtTime(vol, t + dur * 0.7);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+      o.start(t);
+      o.stop(t + dur + 0.05);
+    };
+    warm(110.00, t0, 2.1, 0.07);      // A2
+    warm(164.81, t0, 2.0, 0.06);      // E3
+    warm(220.00, t0, 1.9, 0.05);      // A3
+    warm(277.18, t0, 1.8, 0.04);      // C#4
+    warm(246.94, t0, 1.7, 0.03);      // B4 (add9)
+
+    // Campanita de cristal: parciales brillantes y ricas
+    const bell = (freq, t, dur, vol) => {
+      const partials = [1, 2.01, 2.92, 4.03, 5.4];
+      const gains = [1, 0.42, 0.26, 0.14, 0.07];
+      partials.forEach((mul, i) => {
+        const o = ctx.createOscillator();
+        const g = ctx.createGain();
+        o.type = 'sine';
+        o.frequency.value = freq * mul;
+        o.connect(g);
+        g.connect(ctx.destination);
+        g.gain.setValueAtTime(0.0001, t);
+        g.gain.exponentialRampToValueAtTime(vol * gains[i], t + 0.004);
+        g.gain.exponentialRampToValueAtTime(0.0001, t + dur * (0.5 + i * 0.18));
+        o.start(t);
+        o.stop(t + dur + 0.1);
+      });
+    };
+
+    // Arpegio de cristal ascendente y elegante
+    const notas = [659.26, 880.00, 1108.73, 1318.51, 1760.00];
+    notas.forEach((f, i) => bell(f, t0 + 0.28 + i * 0.07, 1.3, 0.09));
+
+    // Destello de brillo que sube suavemente
+    const sh = ctx.createOscillator();
+    const sg = ctx.createGain();
+    sh.type = 'sine';
+    sh.frequency.setValueAtTime(1100, t0 + 0.28);
+    sh.frequency.exponentialRampToValueAtTime(3800, t0 + 0.85);
+    sg.gain.setValueAtTime(0.0001, t0 + 0.28);
+    sg.gain.linearRampToValueAtTime(0.04, t0 + 0.36);
+    sg.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.95);
+    sh.connect(sg);
+    sg.connect(ctx.destination);
+    sh.start(t0 + 0.28);
+    sh.stop(t0 + 1.0);
+
+    // Acorde dorado final: la tríada de cristal sonando junta y desvaneciéndose
+    [659.26, 880.00, 1108.73].forEach(f => bell(f, t0 + 0.85, 1.6, 0.10));
+    // Centelleo alto de plata al final
+    bell(1760.00, t0 + 0.98, 1.2, 0.05);
+    bell(2637.02, t0 + 1.05, 1.0, 0.03);
+  });
+}
+
+// Sonido del menú lateral en modo pro: TIMBRE DORADO PREMIUM. Una campanita
+// de cristal (Mi5) rica y cálida, con un toque grave dorado (La3) muy suave
+// y un centelleo de plata alto al final. Corto, elegante y lujoso, como tocar
+// una copa de oro al navegar.
+function playGoldClink(){
+  scheduleOnAudio(ctx => {
+    const now = ctx.currentTime;
+    const t0 = now + 0.01;
+
+    // Campanita de cristal: parciales brillantes de metal fino
+    const bell = (freq, t, dur, vol) => {
+      const partials = [1, 2.01, 2.92, 4.03, 5.4];
+      const gains = [1, 0.42, 0.26, 0.14, 0.07];
+      partials.forEach((mul, i) => {
+        const o = ctx.createOscillator();
+        const g = ctx.createGain();
+        o.type = 'sine';
+        o.frequency.value = freq * mul;
+        o.connect(g);
+        g.connect(ctx.destination);
+        g.gain.setValueAtTime(0.0001, t);
+        g.gain.exponentialRampToValueAtTime(vol * gains[i], t + 0.004);
+        g.gain.exponentialRampToValueAtTime(0.0001, t + dur * (0.5 + i * 0.18));
+        o.start(t);
+        o.stop(t + dur + 0.1);
+      });
+    };
+
+    // Nota principal de cristal (Mi5) + quinta arriba (Si5) muy suave
+    bell(659.26, t0, 0.8, 0.15);
+    bell(987.77, t0 + 0.05, 0.7, 0.06);
+
+    // Toque dorado grave (La3): cálido y breve, da cuerpo sin ensuciar
+    const low = ctx.createOscillator();
+    const lg = ctx.createGain();
+    low.type = 'sine';
+    low.frequency.value = 220;
+    low.connect(lg);
+    lg.connect(ctx.destination);
+    lg.gain.setValueAtTime(0.0001, t0);
+    lg.gain.linearRampToValueAtTime(0.05, t0 + 0.02);
+    lg.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.5);
+    low.start(t0);
+    low.stop(t0 + 0.55);
+
+    // Centelleo de plata: destello agudo y breve al final
+    bell(2637.02, t0 + 0.12, 0.4, 0.04);
+  });
+}
+
+// Aplica a cada pestaña exclusiva del modo pro su demora de aparición para
+// que salgan UNA POR UNA (la animación y el barrido de brillo viven en CSS,
+// usando la variable --reveal-delay). Además, hace que el menú BAJE (se
+// desplace) para dejar visible cada pestaña cuando aparece, y si withSound es
+// true, programa el campanilleo especial en su momento exacto.
+function revealProOnlyItems(withSound){
+  const items = document.querySelectorAll('.nav-pro-only');
+  const delays = [0.15, 0.35, 0.55];
+  items.forEach((el, i) => {
+    const d = delays[i] || (0.15 + i * 0.2);
+    el.style.setProperty('--reveal-delay', d + 's');
+    if(withSound){
+      setTimeout(()=> playProRevealSound(i), d * 1000 + 40);
+    }
+    setTimeout(()=> scrollProMenuToItem(el), (d + 0.35) * 1000);
+  });
+}
+
+// Desplaza el menú lateral (suavemente) hasta dejar visible la pestaña dada.
+function scrollProMenuToItem(el){
+  const nav = document.querySelector('.sidebar-nav');
+  if(!nav || !el) return;
+  const containerTop = nav.getBoundingClientRect().top;
+  const elTop = el.getBoundingClientRect().top;
+  nav.scrollTo({ top: nav.scrollTop + (elTop - containerTop) - 16, behavior: 'smooth' });
+}
+
+// Sonido especial de cada pestaña al revelarse: un "pop" de cristal que sube
+// de tono con cada pestaña (La → Do# → Mi → Sol → La'), como pequeñas joyas
+// apareciendo una a una.
+function playProRevealSound(i){
+  scheduleOnAudio(ctx => {
+    const t0 = ctx.currentTime + 0.01;
+    const freqs = [880.00, 1108.73, 1318.51, 1567.98, 1760.00];
+    const f = freqs[i] || 880.00;
+    const bell = (freq, t, dur, vol) => {
+      const partials = [1, 2.01, 2.92, 4.03];
+      const gains = [1, 0.4, 0.22, 0.1];
+      partials.forEach((mul, j) => {
+        const o = ctx.createOscillator();
+        const g = ctx.createGain();
+        o.type = 'sine';
+        o.frequency.value = freq * mul;
+        o.connect(g);
+        g.connect(ctx.destination);
+        g.gain.setValueAtTime(0.0001, t);
+        g.gain.exponentialRampToValueAtTime(vol * gains[j], t + 0.004);
+        g.gain.exponentialRampToValueAtTime(0.0001, t + dur * (0.5 + j * 0.18));
+        o.start(t);
+        o.stop(t + dur + 0.1);
+      });
+    };
+    // La nota principal + su octava arriba (centelleo) que aparecen juntas
+    bell(f, t0, 0.6, 0.14);
+    bell(f * 2, t0 + 0.02, 0.45, 0.06);
+    // Pequeño destello agudo que sube rápido (chispita)
+    const sp = ctx.createOscillator();
+    const sg = ctx.createGain();
+    sp.type = 'sine';
+    sp.frequency.setValueAtTime(f * 2, t0 + 0.02);
+    sp.frequency.exponentialRampToValueAtTime(f * 4, t0 + 0.22);
+    sg.gain.setValueAtTime(0.0001, t0 + 0.02);
+    sg.gain.linearRampToValueAtTime(0.04, t0 + 0.06);
+    sg.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.28);
+    sp.connect(sg);
+    sg.connect(ctx.destination);
+    sp.start(t0 + 0.02);
+    sp.stop(t0 + 0.3);
+  });
 }
 
 function handleScannedCode(codigo, fromCamera){
@@ -1168,7 +1395,286 @@ function purgeVentasAntiguas(){
 }
 
 /* -------------------------------------------------------------------------
-   4e. COMPRAS (registro de compras de productos, solo dueño)
+   4d. PRODUCTOS MÁS VENDIDOS (solo dueño)
+   Cuenta cuántas unidades vendió cada producto (suma de cantidades en
+   Ventas) y muestra TODOS los productos ordenados del más al menos vendido
+   (los sin ventas quedan al final con 0). Muestra su stock actual y el
+   stock mínimo (editable en la misma tabla). Los 20 primeros llevan
+   estrella dorada. Se puede filtrar por mes o ver todo el año.
+   ------------------------------------------------------------------------- */
+
+let topVentasMesFilter = '';
+
+// Ventas consideradas para el top: todas, o solo las de un mes ('YYYY-MM').
+function ventasTopFiltradas(){
+  if(!topVentasMesFilter) return db.ventas || [];
+  return (db.ventas || []).filter(v => (v.fecha || '').slice(0,7) === topVentasMesFilter);
+}
+
+// Llena el selector con los meses que tienen ventas + la opción "Todo el año".
+function syncTopVentasMesFilter(){
+  const el = document.getElementById('topVentasMes');
+  if(!el) return;
+  const meses = [...new Set((db.ventas || []).map(v => (v.fecha || '').slice(0,7)).filter(Boolean))].sort().reverse();
+  let html = '<option value="">Todo el año</option>';
+  meses.forEach(m => {
+    const [y, mo] = m.split('-').map(Number);
+    const nombre = new Date(y, mo-1, 1).toLocaleString('es', { month:'long' });
+    const label = nombre.charAt(0).toUpperCase() + nombre.slice(1) + ' ' + y;
+    html += `<option value="${m}" ${m === topVentasMesFilter ? 'selected' : ''}>${label}</option>`;
+  });
+  el.innerHTML = html;
+}
+
+function topVentasPeriodoLabel(){
+  if(!topVentasMesFilter) return 'de todo el año';
+  const [y, mo] = topVentasMesFilter.split('-').map(Number);
+  const nombre = new Date(y, mo-1, 1).toLocaleString('es', { month:'long' });
+  return `de ${nombre.charAt(0).toUpperCase() + nombre.slice(1)} ${y}`;
+}
+
+// [{p, vendidos}] ordenado de más a menos vendido. Incluye todos los
+// productos del inventario (los sin ventas van al final con vendidos = 0).
+function productosMasVendidos(){
+  const cantidades = {};
+  ventasTopFiltradas().forEach(v => {
+    const c = normalize(v.codigo);
+    if(!c) return;
+    cantidades[c] = (cantidades[c] || 0) + (parseFloat(v.cantidad) || 0);
+  });
+  return db.productos
+    .map(p => ({ p, vendidos: cantidades[normalize(p.codigo)] || 0 }))
+    .sort((a,b)=> b.vendidos - a.vendidos || normalize(a.p.codigo).localeCompare(normalize(b.p.codigo)));
+}
+
+function renderTopVentas(){
+  const tbody = document.querySelector('#topVentasTable tbody');
+  const summary = document.getElementById('topVentasSummary');
+  if(!tbody || !summary) return;
+  syncTopVentasMesFilter();
+  const rows = productosMasVendidos();
+  if(rows.length === 0){
+    tbody.innerHTML = `<tr class="empty-row"><td colspan="5">Todavía no hay productos en el inventario.</td></tr>`;
+    summary.textContent = '0 productos';
+    return;
+  }
+  tbody.innerHTML = rows.map((r, i) => {
+    const pos = i + 1;
+    const top20 = pos <= 20;
+    const bajo = (r.p.stockMin || 0) > 0 && r.p.stock <= r.p.stockMin;
+    return `
+    <tr class="${top20 ? 'top-row' : ''}">
+      <td>${top20 ? `<span class="top-star" title="Top ${pos} más vendido">⭐ ${pos}</span>` : pos}</td>
+      <td><strong>${escapeHtml(r.p.nombre)}</strong><br><small class="hint">${escapeHtml(r.p.codigo)}</small></td>
+      <td><strong>${r.vendidos}</strong></td>
+      <td>${r.p.stock}${bajo ? ' <span class="badge badge-danger-soft">Bajo</span>' : ''}</td>
+      <td><input type="number" class="input stock-min-input" data-codigo="${escapeHtml(r.p.codigo)}" value="${r.p.stockMin || 0}" min="0" step="1" title="Editar stock mínimo"></td>
+    </tr>`;
+  }).join('');
+  const conVentas = rows.filter(r => r.vendidos > 0).length;
+  summary.textContent = `Todos los productos (${rows.length}) ${topVentasPeriodoLabel()} · ${conVentas} con ventas · ⭐ los 20 primeros son los más vendidos`;
+}
+
+function exportTopVentasCSV(){
+  const rows = productosMasVendidos();
+  if(rows.length === 0){ toast('No hay productos para exportar', 'error'); return; }
+  const header = ['POSICION','CODIGO','PRODUCTO','VENDIDOS','STOCK','STOCK_MINIMO'];
+  const data = rows.map((r, i) => [i + 1, r.p.codigo, r.p.nombre, csvNumber(r.vendidos, 0), csvNumber(r.p.stock, 0), csvNumber(r.p.stockMin || 0, 0)]);
+  const sufijo = topVentasMesFilter ? topVentasMesFilter : 'todo_el_ano';
+  downloadCSV(`stockferre_mas_vendidos_${sufijo}.csv`, header, data);
+  toast('Top de más vendidos exportado', 'success');
+}
+
+// Importa solo la columna STOCK_MINIMO (por CODIGO) de un CSV exportado,
+// y actualiza el stock mínimo de cada producto.
+function importTopVentasCSV(file){
+  const reader = new FileReader();
+  reader.onload = (e)=>{
+    try{
+      const rows = parseCSV(e.target.result);
+      if(rows.length < 2){
+        toast('El archivo CSV no tiene datos', 'error');
+        return;
+      }
+      const headers = rows[0].map(normalizeHeader);
+      const idxCodigo = headers.indexOf('CODIGO');
+      const idxMin = headers.findIndex(h => h.includes('STOCK_MINIMO') || h.includes('STOCK MINIMO') || h.includes('STOCK MIN'));
+      if(idxCodigo === -1 || idxMin === -1){
+        toast('El CSV debe tener columnas CODIGO y STOCK_MINIMO', 'error');
+        return;
+      }
+      let aplicados = 0;
+      for(let i = 1; i < rows.length; i++){
+        const r = rows[i];
+        const codigo = String(r[idxCodigo] || '').trim();
+        const v = parseFloat(String(r[idxMin]).replace(',','.'));
+        if(!codigo || isNaN(v)) continue;
+        const p = getProductoByCodigo(codigo);
+        if(!p) continue;
+        p.stockMin = v < 0 ? 0 : Math.round(v);
+        aplicados++;
+      }
+      saveDB();
+      renderTopVentas();
+      renderProductos();
+      toast(`Stock mínimo actualizado para ${aplicados} producto(s)`, 'success');
+    }catch(err){
+      console.error(err);
+      toast('No se pudo leer el archivo CSV. Verifica el formato.', 'error');
+    }
+  };
+  reader.onerror = ()=> toast('Error al leer el archivo', 'error');
+  reader.readAsText(file, 'UTF-8');
+}
+
+/* -------------------------------------------------------------------------
+   4e. PEDIDOS / REPOSICIÓN (solo dueño)
+   Lista TODOS los productos ordenados de menor a mayor stock (primero los
+   agotados, luego stock 1, 2, ...). Permite filtrar por marca y armar el
+   pedido: stock mínimo editable y cantidad a pedir editable, con el botón
+   "🪄 Llenar" que pone la cantidad exacta que falta para alcanzar el stock
+   mínimo. Las cantidades del pedido se guardan solo en memoria mientras
+   estás en la pestaña (no se guardan en la base de datos).
+   ------------------------------------------------------------------------- */
+
+const pedidoCantidades = {};
+let pedidoRows = [];
+
+// Cantidad exacta para llenar el stock mínimo (0 si el stock ya está bien).
+function pedidoCantidadLlenar(p){
+  return Math.max(0, (p.stockMin || 0) - (p.stock || 0));
+}
+
+// Cantidad a pedir: la que venga prellenada (llenar hasta el stock mínimo),
+// o la que el usuario haya editado manualmente en esta sesión.
+function pedidoCant(p){
+  const key = normalize(p.codigo);
+  return (key in pedidoCantidades) ? pedidoCantidades[key] : pedidoCantidadLlenar(p);
+}
+
+function updatePedidoSummary(){
+  const summary = document.getElementById('pedidoSummary');
+  if(!summary) return;
+  let unidades = 0, costo = 0;
+  pedidoRows.forEach(({ p }) => {
+    const cant = pedidoCant(p);
+    unidades += cant;
+    costo += cant * (parseFloat(p.precioCompra) || 0);
+  });
+  const n = pedidoRows.length;
+  summary.textContent = `${n} producto${n === 1 ? '' : 's'} · ${unidades} unidades a pedir · Costo estimado ${fmtMoney(costo)}`;
+}
+
+function renderPedidos(){
+  const tbody = document.querySelector('#pedidosTable tbody');
+  const summary = document.getElementById('pedidoSummary');
+  const marcaSel = document.getElementById('pedidoMarcaFilter');
+  if(!tbody || !summary || !marcaSel) return;
+
+  // Selector de marcas: todas las marcas que existan en la base de datos
+  const marcas = [...new Set(db.productos.map(p => (p.marca || '').trim()).filter(Boolean))].sort((a,b)=> a.localeCompare(b, 'es'));
+  const selActual = marcaSel.value;
+  marcaSel.innerHTML = '<option value="">Todas las marcas</option>' + marcas.map(m => `<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`).join('');
+  marcaSel.value = marcas.includes(selActual) ? selActual : '';
+
+  let list = db.productos.slice();
+  if(marcaSel.value) list = list.filter(p => (p.marca || '').trim() === marcaSel.value);
+  // Orden: stock ascendente (0 primero, luego 1, 2...) y por nombre si empatan
+  list.sort((a,b)=> (a.stock || 0) - (b.stock || 0) || a.nombre.localeCompare(b.nombre, 'es'));
+  pedidoRows = list;
+
+  if(list.length === 0){
+    tbody.innerHTML = `<tr class="empty-row"><td colspan="6">No hay productos${marcaSel.value ? ' de esa marca' : ''}.</td></tr>`;
+    summary.textContent = '0 productos · 0 unidades · Bs 0.00';
+    return;
+  }
+
+  tbody.innerHTML = list.map((p, i) => {
+    const bajo = (p.stockMin || 0) > 0 && p.stock <= p.stockMin;
+    const cant = pedidoCant(p);
+    return `
+    <tr class="${bajo ? 'pedido-bajo' : ''}">
+      <td>${i + 1}</td>
+      <td>${p.marca ? escapeHtml(p.marca) : '-'}</td>
+      <td><strong>${escapeHtml(p.nombre)}</strong><br><small class="hint">${escapeHtml(p.codigo)}</small></td>
+      <td>${p.stock}${bajo ? ' <span class="badge badge-danger-soft">Bajo</span>' : ''}</td>
+      <td><input type="number" class="input pedido-stockmin-input" data-codigo="${escapeHtml(p.codigo)}" value="${p.stockMin || 0}" min="0" step="1" title="Editar stock mínimo"></td>
+      <td><input type="number" class="input pedido-cant-input" data-codigo="${escapeHtml(p.codigo)}" value="${cant}" min="0" step="1" title="Cantidad a pedir (editable)"></td>
+    </tr>`;
+  }).join('');
+
+  updatePedidoSummary();
+}
+
+// Exporta el pedido visible (según el filtro de marca) con las cantidades.
+function exportPedidosCSV(){
+  if(pedidoRows.length === 0){ toast('No hay productos para exportar', 'error'); return; }
+  const header = ['POSICION','MARCA','CODIGO','PRODUCTO','STOCK','STOCK_MINIMO','CANTIDAD_PEDIR'];
+  const data = pedidoRows.map(({ p }, i) => [
+    i + 1, p.marca || '', p.codigo, p.nombre,
+    csvNumber(p.stock, 0), csvNumber(p.stockMin || 0, 0), csvNumber(pedidoCant(p), 0)
+  ]);
+  downloadCSV(`stockferre_pedidos_${todayISO().slice(0,10)}.csv`, header, data);
+  toast('Pedido exportado', 'success');
+}
+
+// Importa un CSV del pedido: actualiza el stock mínimo (en la base) por CODIGO
+// y las cantidades a pedir (en memoria, para esta sesión).
+function importPedidosCSV(file){
+  const reader = new FileReader();
+  reader.onload = (e)=>{
+    try{
+      const rows = parseCSV(e.target.result);
+      if(rows.length < 2){
+        toast('El archivo CSV no tiene datos', 'error');
+        return;
+      }
+      const headers = rows[0].map(normalizeHeader);
+      const idxCodigo = headers.indexOf('CODIGO');
+      if(idxCodigo === -1){
+        toast('El CSV debe tener la columna CODIGO', 'error');
+        return;
+      }
+      const idxMin = headers.findIndex(h => h.includes('STOCK_MINIMO') || h.includes('STOCK MINIMO') || h.includes('STOCK MIN'));
+      const idxCant = headers.findIndex(h => h.includes('CANTIDAD') || h.includes('CANT'));
+      let mins = 0, cantidades = 0;
+      for(let i = 1; i < rows.length; i++){
+        const r = rows[i];
+        const codigo = String(r[idxCodigo] || '').trim();
+        if(!codigo) continue;
+        const p = getProductoByCodigo(codigo);
+        if(!p) continue;
+        if(idxMin > -1 && String(r[idxMin]).trim() !== ''){
+          const v = parseFloat(String(r[idxMin]).replace(',','.'));
+          if(!isNaN(v)){
+            p.stockMin = v < 0 ? 0 : Math.round(v);
+            mins++;
+          }
+        }
+        if(idxCant > -1 && String(r[idxCant]).trim() !== ''){
+          const v = parseFloat(String(r[idxCant]).replace(',','.'));
+          if(!isNaN(v)){
+            pedidoCantidades[normalize(codigo)] = v < 0 ? 0 : Math.round(v);
+            cantidades++;
+          }
+        }
+      }
+      saveDB();
+      renderPedidos();
+      renderProductos();
+      renderTopVentas();
+      toast(`Importado: stock mínimo ${mins} · cantidades a pedir ${cantidades}`, 'success');
+    }catch(err){
+      console.error(err);
+      toast('No se pudo leer el archivo CSV. Verifica el formato.', 'error');
+    }
+  };
+  reader.onerror = ()=> toast('Error al leer el archivo', 'error');
+  reader.readAsText(file, 'UTF-8');
+}
+
+/* -------------------------------------------------------------------------
+   4f. COMPRAS (registro de compras de productos, solo dueño)
    Es una pestaña paralela a Ventas: filtro por fechas (Hoy/Ayer/Anteayer/
    fecha/Todas), exportar/importar CSV, borrar antiguas y vaciar. Al registrar
    una compra se aumenta el stock y, OPCIONALMENTE, se actualizan la marca y
@@ -1404,12 +1910,14 @@ function renderFinanzas(){
   const capEl = document.getElementById('finCapital');
   const cajaEl = document.getElementById('finCaja');
   const totEl = document.getElementById('finTotal');
+  const deudaEl = document.getElementById('finDeuda');
   if(!capEl || !cajaEl || !totEl) return;
   const capital = capitalEnProductos();
   const caja = Number(db.finanzas.caja) || 0;
   capEl.textContent = fmtMoney(capital);
   cajaEl.textContent = fmtMoney(caja);
   totEl.textContent = fmtMoney(capital + caja);
+  if(deudaEl) deudaEl.textContent = fmtMoney(deudaPendienteTotal());
 }
 
 function openEditarCajaModal(){
@@ -1436,6 +1944,7 @@ function exportFinanzasCSV(){
   const rows = [
     [todayISO(), 'Capital en productos (stock x precio de compra)', csvNumber(capital, 2)],
     [todayISO(), 'Efectivo actual', csvNumber(caja, 2)],
+    [todayISO(), 'Deuda pendiente (deudas - pagos)', csvNumber(deudaPendienteTotal(), 2)],
     [todayISO(), 'Patrimonio total (productos + efectivo)', csvNumber(capital + caja, 2)]
   ];
   downloadCSV(`stockferre_finanzas_${todayISO().slice(0,10)}.csv`, header, rows);
@@ -1484,13 +1993,14 @@ function renderRetiros(){
   const list = retirosFiltrados();
   syncRetiroMesFilter();
   if(list.length === 0){
-    tbody.innerHTML = `<tr class="empty-row"><td colspan="4">${retiroMesFilter ? 'No hay retiros en este mes.' : 'Todavía no registraste ningún retiro.'}</td></tr>`;
-    summary.textContent = '0 retiros';
+    tbody.innerHTML = `<tr class="empty-row"><td colspan="5">${retiroMesFilter ? 'No hay pagos en este mes.' : 'Todavía no registraste ningún pago.'}</td></tr>`;
+    summary.textContent = '0 pagos';
     return;
   }
   tbody.innerHTML = list.map(r => `
     <tr>
       <td>${fmtDateShort(r.fecha)}</td>
+      <td>${retiroMarca(r) ? `<strong>${escapeHtml(retiroMarca(r))}</strong>` : '-'}</td>
       <td><strong class="stock-negative">-${fmtMoney(r.monto)}</strong></td>
       <td>${escapeHtml(r.obs || '-')}</td>
       <td>
@@ -1500,23 +2010,46 @@ function renderRetiros(){
     </tr>
   `).join('');
   const total = list.reduce((s, r) => s + r.monto, 0);
-  summary.textContent = `${list.length} retiro${list.length === 1 ? '' : 's'} · total retirado ${fmtMoney(total)}`;
+  summary.textContent = `${list.length} pago${list.length === 1 ? '' : 's'} · total pagado ${fmtMoney(total)}`;
+}
+
+// Cuánto se ha pagado (en retiros) de la deuda de una marca.
+function retirosPagadosMarca(marca){
+  const key = normalize(marca);
+  if(!key) return 0;
+  return (db.finanzas.retiros || []).reduce((s, r) => normalize(retiroMarca(r)) === key ? s + r.monto : s, 0);
+}
+
+// Deuda total, pagado y saldo pendiente de cada marca: { marca: {deuda, pagado, saldo} }.
+function deudaSaldos(){
+  const res = {};
+  (db.finanzas.deudas || []).forEach(d => {
+    const m = String(d.marca || 'Otra').trim() || 'Otra';
+    res[m] = res[m] || { deuda: 0, pagado: 0, saldo: 0 };
+    res[m].deuda += d.monto;
+  });
+  Object.keys(res).forEach(m => {
+    res[m].pagado = retirosPagadosMarca(m);
+    res[m].saldo = res[m].deuda - res[m].pagado;
+  });
+  return res;
+}
+
+// Deuda total que queda por pagar (solo saldos positivos).
+function deudaPendienteTotal(){
+  const res = deudaSaldos();
+  return Object.values(res).reduce((s, v) => s + (v.saldo > 0 ? v.saldo : 0), 0);
 }
 
 function openRetiroModal(retiro){
-  document.getElementById('retiroModalTitle').textContent = retiro ? '✏️ Editar retiro' : '➖ Nuevo retiro';
+  document.getElementById('retiroModalTitle').textContent = retiro ? '✏️ Editar pago' : '➖ Nuevo pago';
   document.getElementById('rId').value = retiro ? retiro.id : '';
   document.getElementById('rMonto').value = retiro ? retiro.monto : '';
   document.getElementById('rFecha').value = retiro ? (retiro.fecha ? localDateKey(new Date(retiro.fecha)) : getLastRetiroFecha()) : getLastRetiroFecha();
-  const obs = retiro ? (retiro.obs || '') : '';
-  document.getElementById('rObs').value = obs;
-  const presetEl = document.getElementById('rObsPreset');
-  if(presetEl){
-    const presets = ['Pago Truper','Pago Ingco','Pago Dyllu','Salarios'];
-    const match = presets.find(p => normalize(p) === normalize(obs));
-    presetEl.value = match || '';
-    document.getElementById('rObs').disabled = !!match;
-  }
+  document.getElementById('rObs').value = retiro ? (retiro.obs || '') : '';
+  const marca = retiro ? retiroMarca(retiro) : '';
+  rebuildMarcaSelect('rMarca', marca, ['Salarios']);
+  syncNuevaMarcaRow(document.getElementById('rMarca'), document.getElementById('rNuevaMarca'), document.getElementById('rNuevaMarcaRow'));
   openModal('modalRetiro');
 }
 
@@ -1525,6 +2058,10 @@ function handleRetiroSubmit(e){
   const id = document.getElementById('rId').value;
   const monto = parseFloat(document.getElementById('rMonto').value);
   const obs = document.getElementById('rObs').value.trim();
+  const marcaSel = document.getElementById('rMarca').value;
+  const nuevaMarca = document.getElementById('rNuevaMarca').value.trim();
+  const marca = marcaSel === '__nueva__' ? nuevaMarca : marcaSel;
+  if(marcaSel === '__nueva__' && !marca){ toast('Escribe el nombre de la nueva marca', 'error'); return; }
   if(isNaN(monto) || monto <= 0){ toast('Ingresa un monto válido', 'error'); return; }
   const fechaElegida = document.getElementById('rFecha').value;
   setLastRetiroFecha(fechaElegida);
@@ -1539,6 +2076,7 @@ function handleRetiroSubmit(e){
     const dif = monto - r.monto;
     r.monto = monto;
     r.obs = obs;
+    r.marca = marca;
     r.fecha = compraFechaFromInput(fechaElegida);
     db.finanzas.caja -= dif;
   }else{
@@ -1546,37 +2084,40 @@ function handleRetiroSubmit(e){
       id: uid('retiro'),
       monto,
       obs,
+      marca,
       fecha: compraFechaFromInput(fechaElegida)
     });
     db.finanzas.caja -= monto;
   }
   saveDB();
   renderRetiros();
+  renderDeudas();
   renderFinanzas();
   closeAllModals();
-  toast('Retiro guardado', 'success');
+  toast('Pago guardado', 'success');
 }
 
 function deleteRetiro(id){
-  confirmDialog('Eliminar retiro', '¿Eliminar este retiro? El monto volverá al efectivo actual.', ()=>{
+  confirmDialog('Eliminar pago', '¿Eliminar este pago? El monto volverá al efectivo actual y a la deuda de su marca.', ()=>{
     const r = db.finanzas.retiros.find(x => x.id === id);
     if(!r) return;
     db.finanzas.caja = (Number(db.finanzas.caja) || 0) + r.monto;
     db.finanzas.retiros = db.finanzas.retiros.filter(x => x.id !== id);
     saveDB();
     renderRetiros();
+    renderDeudas();
     renderFinanzas();
-    toast('Retiro eliminado', 'success');
+    toast('Pago eliminado', 'success');
   });
 }
 
 function exportRetirosCSV(){
   const list = db.finanzas.retiros || [];
-  if(list.length === 0){ toast('No hay retiros para exportar', 'error'); return; }
-  const header = ['FECHA','MONTO','OBSERVACION'];
-  const rows = list.map(r => [r.fecha, csvNumber(r.monto, 2), r.obs || '']);
-  downloadCSV(`stockferre_retiros_${todayISO().slice(0,10)}.csv`, header, rows);
-  toast('Retiros exportados', 'success');
+  if(list.length === 0){ toast('No hay pagos para exportar', 'error'); return; }
+  const header = ['FECHA','MONTO','MARCA','OBSERVACION'];
+  const rows = list.map(r => [r.fecha, csvNumber(r.monto, 2), retiroMarca(r), r.obs || '']);
+  downloadCSV(`stockferre_pagos_${todayISO().slice(0,10)}.csv`, header, rows);
+  toast('Pagos exportados', 'success');
 }
 
 /* ---------- DEUDAS ---------- */
@@ -1591,11 +2132,56 @@ function setLastDeudaFecha(dateStr){
   try{ localStorage.setItem(DEUDA_FECHA_KEY + currentModo, dateStr || ''); }catch(e){}
 }
 
-function populateMarcasDeudasList(){
-  const dl = document.getElementById('marcasDeudasList');
-  if(!dl) return;
-  const set = new Set((db.finanzas.deudas || []).map(d => String(d.marca || '').trim()).filter(Boolean));
-  dl.innerHTML = Array.from(set).sort((a,b)=> a.localeCompare(b, 'es')).map(m => `<option value="${escapeHtml(m)}">`).join('');
+// Marcas que siempre aparecen preseleccionadas en deudas y pagos.
+const MARCAS_PREDEFINIDAS = ['Ingco','Truper','Dyllu'];
+
+// Marca de un retiro para vincularlo a su deuda.
+function retiroMarca(r){
+  if(r && r.marca && String(r.marca).trim()) return String(r.marca).trim();
+  const obs = String(r && r.obs || '').trim();
+  const m = obs.match(/^pago\s+(.+)$/i);
+  return m ? m[1].trim() : '';
+}
+
+// Todas las marcas en uso (deudas + pagos), con las preseleccionadas primero.
+function marcasExistentes(){
+  const set = new Set();
+  MARCAS_PREDEFINIDAS.forEach(m => set.add(m));
+  (db.finanzas.deudas || []).forEach(d => { if(d.marca) set.add(String(d.marca).trim()); });
+  (db.finanzas.retiros || []).forEach(r => { const m = retiroMarca(r); if(m && m !== 'Salarios') set.add(m); });
+  return [...set];
+}
+
+// Llena el select de marca de un modal. 'valorActual' deja preseleccionada la
+// marca al editar, y la opción "__nueva__" permite añadir una marca nueva.
+function rebuildMarcaSelect(selectId, valorActual, extraOptions){
+  const el = document.getElementById(selectId);
+  if(!el) return;
+  const set = new Set();
+  marcasExistentes().forEach(m => set.add(m));
+  (extraOptions || []).forEach(m => { if(m) set.add(m); });
+  const marcas = [...set].sort((a,b)=> {
+    const ia = MARCAS_PREDEFINIDAS.indexOf(a), ib = MARCAS_PREDEFINIDAS.indexOf(b);
+    if(ia !== -1 && ib !== -1) return ia - ib;
+    if(ia !== -1) return -1;
+    if(ib !== -1) return 1;
+    return a.localeCompare(b, 'es');
+  });
+  let html = marcas.map(m => `<option value="${escapeHtml(m)}" ${m === valorActual ? 'selected' : ''}>${escapeHtml(m)}</option>`).join('');
+  html += '<option value="__nueva__">➕ Añadir nueva marca...</option>';
+  el.innerHTML = html;
+}
+
+// Revela el campo de "Nueva marca" cuando se elige esa opción en un select.
+function syncNuevaMarcaRow(selectEl, inputEl, rowEl){
+  if(!selectEl || !inputEl || !rowEl) return;
+  if(selectEl.value === '__nueva__'){
+    rowEl.style.display = 'block';
+    inputEl.focus();
+  }else{
+    rowEl.style.display = 'none';
+    inputEl.value = '';
+  }
 }
 
 // Filtro por mes en la vista de deudas: '' = todas, 'YYYY-MM' = ese mes.
@@ -1627,9 +2213,19 @@ function renderDeudas(){
   const deudas = deudasFiltradas();
   syncDeudaMesFilter();
 
+  const saldos = deudaSaldos();
+  const sumDeuda = Object.values(saldos).reduce((s,v)=> s + v.deuda, 0);
+  const sumPagado = Object.values(saldos).reduce((s,v)=> s + v.pagado, 0);
+  const sumSaldo = Object.values(saldos).reduce((s,v)=> s + v.saldo, 0);
+
+  if((db.finanzas.deudas || []).length === 0){
+    groups.innerHTML = `<p class="hint">Todavía no registraste ninguna deuda. Al registrar una deuda, aparece su opción de "Pago" en los retiros.</p>`;
+    totalEl.textContent = `Deudas: ${fmtMoney(0)} · Pagado: ${fmtMoney(0)} · Saldo: ${fmtMoney(0)}`;
+    return;
+  }
   if(deudas.length === 0){
-    groups.innerHTML = `<p class="hint">${deudaMesFilter ? 'No hay deudas en este mes.' : 'Todavía no registraste ninguna deuda.'}</p>`;
-    totalEl.textContent = 'Total de deudas: Bs 0.00';
+    groups.innerHTML = `<p class="hint">No hay deudas en este mes.</p>`;
+    totalEl.textContent = `Deudas: ${fmtMoney(sumDeuda)} · Pagado: ${fmtMoney(sumPagado)} · Saldo: ${fmtMoney(sumSaldo)}`;
     return;
   }
 
@@ -1639,16 +2235,18 @@ function renderDeudas(){
     (grupos[m] = grupos[m] || []).push(d);
   });
   const marcas = Object.keys(grupos).sort((a,b)=> a.localeCompare(b, 'es'));
-  const totalGeneral = deudas.reduce((s,d)=> s + d.monto, 0);
 
   groups.innerHTML = marcas.map(marca => {
     const items = grupos[marca];
-    const sub = items.reduce((s,d)=> s + d.monto, 0);
+    const sd = saldos[marca] || { deuda: 0, pagado: 0, saldo: 0 };
     return `
     <div class="deuda-group">
       <div class="deuda-group-header">
-        <h3>🏷️ ${escapeHtml(marca)}</h3>
-        <strong>${fmtMoney(sub)}</strong>
+        <div>
+          <h3>🏷️ ${escapeHtml(marca)}</h3>
+          <small class="hint">Deuda ${fmtMoney(sd.deuda)} · Pagado ${fmtMoney(sd.pagado)} · Saldo pendiente <strong>${fmtMoney(sd.saldo)}</strong>${sd.saldo <= 0 ? ' ✓' : ''}</small>
+        </div>
+        <strong>${fmtMoney(sd.saldo)}</strong>
       </div>
       <div class="table-wrap" style="box-shadow:none; border-radius:0;">
         <table class="table" style="min-width:0;">
@@ -1671,25 +2269,28 @@ function renderDeudas(){
     </div>`;
   }).join('');
 
-  totalEl.textContent = `Total de deudas: ${fmtMoney(totalGeneral)} (${marcas.length} marca${marcas.length === 1 ? '' : 's'})`;
+  totalEl.textContent = `Deudas: ${fmtMoney(sumDeuda)} · Pagado: ${fmtMoney(sumPagado)} · Saldo: ${fmtMoney(sumSaldo)}`;
 }
 
 function openDeudaModal(deuda){
   document.getElementById('deudaModalTitle').textContent = deuda ? '✏️ Editar deuda' : '➕ Nueva deuda';
   document.getElementById('dId').value = deuda ? deuda.id : '';
-  document.getElementById('dMarca').value = deuda ? (deuda.marca || '') : '';
   document.getElementById('dMonto').value = deuda ? deuda.monto : '';
   document.getElementById('dFecha').value = deuda ? (deuda.fecha ? localDateKey(new Date(deuda.fecha)) : getLastDeudaFecha()) : getLastDeudaFecha();
   document.getElementById('dVencimiento').value = deuda ? (deuda.vencimiento || '') : '';
   document.getElementById('dObs').value = deuda ? (deuda.obs || '') : '';
-  populateMarcasDeudasList();
+  const marca = deuda ? (deuda.marca || '') : '';
+  rebuildMarcaSelect('dMarca', marca, []);
+  syncNuevaMarcaRow(document.getElementById('dMarca'), document.getElementById('dNuevaMarca'), document.getElementById('dNuevaMarcaRow'));
   openModal('modalDeuda');
 }
 
 function handleDeudaSubmit(e){
   e.preventDefault();
   const id = document.getElementById('dId').value;
-  const marca = document.getElementById('dMarca').value.trim();
+  const marcaSel = document.getElementById('dMarca').value;
+  const nuevaMarca = document.getElementById('dNuevaMarca').value.trim();
+  const marca = marcaSel === '__nueva__' ? nuevaMarca : marcaSel;
   const monto = parseFloat(document.getElementById('dMonto').value);
   const obs = document.getElementById('dObs').value.trim();
   const vencimiento = document.getElementById('dVencimiento').value;
@@ -2464,9 +3065,11 @@ function renderProductos(){
 
   const tbody = document.querySelector('#productsTable tbody');
   if(list.length === 0){
-    tbody.innerHTML = `<tr class="empty-row"><td colspan="${currentRole === 'guest' ? 8 : 9}">No hay productos que coincidan.</td></tr>`;
+    tbody.innerHTML = `<tr class="empty-row"><td colspan="${currentRole === 'guest' ? 10 : 11}">No hay productos que coincidan.</td></tr>`;
   }else{
-    tbody.innerHTML = list.map(p => `
+    tbody.innerHTML = list.map(p => {
+      const bajo = (p.stockMin || 0) > 0 && p.stock <= p.stockMin;
+      return `
       <tr>
         <td><strong>${escapeHtml(p.codigo)}</strong></td>
         <td>${escapeHtml(p.codigoBarras || '-')}</td>
@@ -2476,13 +3079,15 @@ function renderProductos(){
         <td class="price-guest-hide">${fmtMoney(p.precioCompra)}</td>
         <td class="price-guest-hide">${fmtMoney(p.precioMarca)}</td>
         <td>${fmtMoney(p.precioVenta)}</td>
+        <td>${p.stock}${bajo ? ' <span class="badge badge-danger-soft">Bajo</span>' : ''}</td>
+        <td>${p.stockMin || 0}</td>
         ${currentRole === 'guest' ? '' : `
         <td>
           <button class="btn-icon" title="Editar" data-edit-product="${p.id}">✏️</button>
           <button class="btn-icon" title="Eliminar" data-delete-product="${p.id}">🗑️</button>
         </td>`}
-      </tr>
-    `).join('');
+      </tr>`;
+    }).join('');
   }
 
   updateSidebarProductCount();
@@ -2801,9 +3406,11 @@ const VIEW_TITLES = {
   productos: 'Productos',
   categorias: 'Categorías',
   ventas: 'Ventas',
+  topventas: 'Productos más vendidos',
+  pedidos: 'Pedidos',
   compras: 'Compras',
   finanzas: 'Estado Financiero',
-  retiros: 'Retiros',
+  retiros: 'Pagos',
   deudas: 'Deudas',
   gastos: 'Gastos del día',
   inventario: 'Inventario',
@@ -2821,7 +3428,8 @@ function updateInicioClock(){
 }
 
 function showView(name){
-  if(currentRole === 'guest' && (name === 'inventario' || name === 'config' || name === 'compras' || name === 'finanzas' || name === 'retiros' || name === 'deudas' || name === 'gastos')){
+  currentView = name;
+  if(currentRole === 'guest' && (name === 'inventario' || name === 'config' || name === 'compras' || name === 'finanzas' || name === 'retiros' || name === 'deudas' || name === 'gastos' || name === 'topventas' || name === 'pedidos')){
     toast('Los invitados no tienen acceso a esa sección', 'error');
     name = 'productos';
   }
@@ -2842,6 +3450,8 @@ function showView(name){
   if(name === 'productos') renderProductos();
   if(name === 'categorias') renderCategorias();
   if(name === 'ventas') renderVentas();
+  if(name === 'topventas') renderTopVentas();
+  if(name === 'pedidos') renderPedidos();
   if(name === 'compras') renderCompras();
   if(name === 'finanzas') renderFinanzas();
   if(name === 'retiros') renderRetiros();
@@ -2919,6 +3529,59 @@ function syncNotifSwitchUI(){
   const sw = document.getElementById('notifySwitch');
   if(!sw) return;
   sw.checked = currentModo === 'invitado' ? false : notifEnabled(currentModo);
+}
+
+// Modo pro: recuerda en este dispositivo si el usuario lo dejó activado.
+// El tema dorado (body.gold-theme) es independiente: solo cambia los colores
+// y sus sonidos, no las pestañas del modo pro.
+function syncProModeUI(){
+  let pro = false;
+  let gold = false;
+  try{ pro = localStorage.getItem('stockferre_proMode') === '1'; }catch(e){}
+  try{ gold = localStorage.getItem('stockferre_goldTheme') === '1'; }catch(e){}
+  const sw = document.getElementById('proModeSwitch');
+  if(sw) sw.checked = pro;
+  const ts = document.getElementById('themeSwitch');
+  if(ts) ts.checked = gold;
+  document.body.classList.toggle('pro-mode', pro);
+  document.body.classList.toggle('gold-theme', gold);
+  if(pro) revealProOnlyItems(false); // al cargar: demora en cascada, sin sonido
+}
+
+// Activa/desactiva el MODO PRO (desbloquea las pestañas exclusivas y enciende
+// de paso el tema dorado). Al activarse, las pestañas salen una por una con su
+// sonido y el panel de Opciones se cierra.
+function applyProMode(on){
+  document.body.classList.toggle('pro-mode', on);
+  document.body.classList.toggle('gold-theme', on);
+  const proSw = document.getElementById('proModeSwitch');
+  const themeSw = document.getElementById('themeSwitch');
+  if(proSw) proSw.checked = on;
+  if(themeSw) themeSw.checked = on;
+  try{ localStorage.setItem('stockferre_proMode', on ? '1' : '0'); }catch(err){}
+  try{ localStorage.setItem('stockferre_goldTheme', on ? '1' : '0'); }catch(err){}
+  // Si se desactiva estando en una pestaña exclusiva del modo pro, salir de ella
+  if(!on && ['finanzas','retiros','deudas','gastos','topventas'].indexOf(currentView) !== -1){
+    showView('productos');
+  }
+  if(on){
+    playProModeSound();       // sonido de revelación del modo pro
+    revealProOnlyItems(true); // pestañas pro salen una por una, con sonido
+    const opts = document.getElementById('sidebarOptions');
+    if(opts) opts.classList.remove('open'); // cerrar Opciones al activar pro
+    showView('topventas');    // ir a Más vendidos al activar el modo pro
+  }
+  toast(on ? '👑 Modo pro activado: todo brilla' : 'Modo pro desactivado', 'success');
+}
+
+// Suich de tema: SOLO enciende/apaga el color dorado (y sus sonidos), sin
+// tocar las pestañas del modo pro. Dorado off = tema blanco/claro.
+function applyGoldTheme(on){
+  document.body.classList.toggle('gold-theme', on);
+  const themeSw = document.getElementById('themeSwitch');
+  if(themeSw) themeSw.checked = on;
+  try{ localStorage.setItem('stockferre_goldTheme', on ? '1' : '0'); }catch(err){}
+  toast(on ? '🎨 Tema dorado activado' : '🎨 Tema blanco activado', 'success');
 }
 function notificationsSupported(){ return 'Notification' in window; }
 function requestNotifPermission(){
@@ -3890,9 +4553,19 @@ function setupEventListeners(){
     });
   });
 
-  // Sonido de clic al apretar cualquier botón del menú lateral
+  // Sonido de clic al apretar cualquier botón del menú lateral. Con el tema
+  // dorado activo el clic suena a campana dorada; si no, chime suave.
   document.getElementById('sidebar').addEventListener('click', (e)=>{
-    if(e.target.closest('button')) playClickSound();
+    if(e.target.closest('button')){
+      if(document.body.classList.contains('gold-theme')) playGoldClink();
+      else playClickSound();
+    }
+  });
+
+  // Botón "Opciones": abre/cierra el panel inferior del menú (productos,
+  // estado de sincronización, contraseña, volver al inicio, sesión y avisos).
+  document.getElementById('btnToggleOptions').addEventListener('click', ()=>{
+    document.getElementById('sidebarOptions').classList.toggle('open');
   });
 
   // Sidebar móvil
@@ -3968,6 +4641,11 @@ function setupEventListeners(){
       toast('Notificaciones desactivadas', 'success');
     }
   });
+
+  // Modo pro: desbloquea pestañas y enciende el tema dorado. El suich de tema
+  // blanco/dorado solo cambia el color (y sus sonidos), sin tocar las pestañas.
+  document.getElementById('proModeSwitch').addEventListener('change', (e)=> applyProMode(e.target.checked));
+  document.getElementById('themeSwitch').addEventListener('change', (e)=> applyGoldTheme(e.target.checked));
 
   // Agregar/cambiar/quitar contraseña (dentro de Manuales y Eléctricas)
   document.getElementById('btnAddPassword').addEventListener('click', openSetPasswordModal);
@@ -4212,10 +4890,11 @@ function setupEventListeners(){
     deudaMesFilter = e.target.value;
     renderDeudas();
   });
-  document.getElementById('rObsPreset').addEventListener('change', (e)=>{
-    const obsInput = document.getElementById('rObs');
-    if(e.target.value){ obsInput.value = e.target.value; obsInput.disabled = true; }
-    else{ obsInput.disabled = false; obsInput.focus(); }
+  document.getElementById('rMarca').addEventListener('change', (e)=>{
+    syncNuevaMarcaRow(e.target, document.getElementById('rNuevaMarca'), document.getElementById('rNuevaMarcaRow'));
+  });
+  document.getElementById('dMarca').addEventListener('change', (e)=>{
+    syncNuevaMarcaRow(e.target, document.getElementById('dNuevaMarca'), document.getElementById('dNuevaMarcaRow'));
   });
 
   // Gastos del día
@@ -4231,6 +4910,53 @@ function setupEventListeners(){
       if(g) openGastoModal(g);
     }
     if(delId) deleteGasto(delId);
+  });
+
+  // Productos más vendidos (filtro por mes + stock mínimo editable + import/export)
+  document.getElementById('topVentasMes').addEventListener('change', (e)=>{
+    topVentasMesFilter = e.target.value;
+    renderTopVentas();
+  });
+  document.getElementById('btnExportTopVentas').addEventListener('click', exportTopVentasCSV);
+  document.getElementById('btnImportTopVentas').addEventListener('click', ()=> document.getElementById('fileImportTopVentas').click());
+  document.getElementById('fileImportTopVentas').addEventListener('change', (e)=>{
+    if(e.target.files[0]) importTopVentasCSV(e.target.files[0]);
+    e.target.value = '';
+  });
+  document.querySelector('#topVentasTable tbody').addEventListener('change', (e)=>{
+    if(!e.target.classList.contains('stock-min-input')) return;
+    const val = parseInt(e.target.value, 10);
+    const p = getProductoByCodigo(e.target.dataset.codigo);
+    if(!p) return;
+    p.stockMin = isNaN(val) || val < 0 ? 0 : val;
+    saveDB();
+    renderTopVentas();
+    renderProductos();
+    toast('Stock mínimo actualizado', 'success');
+  });
+
+  // Pedidos (reposición por stock / marca)
+  document.getElementById('pedidoMarcaFilter').addEventListener('change', renderPedidos);
+  document.getElementById('btnExportPedidos').addEventListener('click', exportPedidosCSV);
+  document.getElementById('btnImportPedidos').addEventListener('click', ()=> document.getElementById('fileImportPedidos').click());
+  document.getElementById('fileImportPedidos').addEventListener('change', (e)=>{
+    if(e.target.files[0]) importPedidosCSV(e.target.files[0]);
+    e.target.value = '';
+  });
+  document.querySelector('#pedidosTable tbody').addEventListener('change', (e)=>{
+    if(e.target.classList.contains('pedido-stockmin-input')){
+      const val = parseInt(e.target.value, 10);
+      const p = getProductoByCodigo(e.target.dataset.codigo);
+      if(!p) return;
+      p.stockMin = isNaN(val) || val < 0 ? 0 : val;
+      saveDB();
+      renderPedidos();
+      toast('Stock mínimo actualizado', 'success');
+    }else if(e.target.classList.contains('pedido-cant-input')){
+      const val = parseInt(e.target.value, 10);
+      pedidoCantidades[normalize(e.target.dataset.codigo)] = isNaN(val) || val < 0 ? 0 : val;
+      updatePedidoSummary();
+    }
   });
 
   // Inventario
@@ -4306,6 +5032,7 @@ function init(){
   setupEventListeners();
   syncRememberSwitchUI();
   syncNotifSwitchUI();
+  syncProModeUI();
   updateSidebarProductCount();
   updateSidebarBrand();
   updatePasswordButtonLabel();

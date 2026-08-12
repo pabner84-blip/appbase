@@ -96,8 +96,20 @@ function normalizeDB(obj){
     p.codigoBarras = p.codigoBarras || '';
     p.stock = typeof p.stock === 'number' ? p.stock : 0;
     p.stockMin = typeof p.stockMin === 'number' ? p.stockMin : 0;
+    // Marca de tiempo del último cambio de ESTE producto (stock, precio, etc.).
+    // Se usa para resolver conflictos cuando dos dispositivos editan al mismo
+    // tiempo: gana el cambio con la marca más reciente, en vez de que "el que
+    // termine de guardar último" borre silenciosamente al otro.
+    p._updatedAt = typeof p._updatedAt === 'number' ? p._updatedAt : 0;
   });
   return obj;
+}
+
+// Se llama SIEMPRE que se modifica un producto (stock, precio, datos) para
+// poder resolver conflictos de sincronización a nivel de producto.
+function touchProducto(p){
+  if(p) p._updatedAt = Date.now();
+  return p;
 }
 
 // Carga inicial: siempre desde LocalStorage (instantáneo, funciona sin internet).
@@ -129,17 +141,61 @@ function persistLocalCache(){
 // también sube los datos a Firestore para que se vean en todos los dispositivos.
 // El historial de escaneos/búsquedas se queda solo en este dispositivo (no se
 // sube) para no gastar la cuota gratuita de Firebase con cada escaneo.
+/* -------------------------------------------------------------------------
+   COLA DE ESCRITURAS A FIREBASE
+   -------------------------------------------------------------------------
+   PROBLEMA que esto arregla: antes, cada saveDB()/persistModoDB() disparaba
+   un fbDocRef.set(...) inmediato. Si el usuario registraba productos muy
+   rápido (ej. escaneando un inventario de 1000+ artículos), se disparaban
+   varias escrituras a la vez sin esperar a que terminara la anterior. Por la
+   red, esas escrituras podían llegar al servidor en un orden distinto al que
+   se enviaron: una escritura más "vieja" (con menos productos actualizados)
+   podía llegar DESPUÉS que una más nueva y sobrescribirla, borrando así el
+   último cambio aunque ya se hubiera aplicado localmente (por eso aparecía
+   en el Historial pero el producto no quedaba actualizado).
+
+   La solución: por cada documento de Firestore solo dejamos UNA escritura en
+   curso a la vez. Si llegan más cambios mientras esa escritura está en
+   camino, no se disparan escrituras nuevas de inmediato: se espera a que
+   termine la actual y entonces se manda UNA sola escritura más, con el
+   estado más reciente de la base de datos en ese momento. Así nunca se puede
+   sobrescribir un cambio nuevo con uno viejo, sin importar la velocidad a la
+   que se registren productos ni la latencia de la red.
+   ------------------------------------------------------------------------- */
+const fbWriteQueues = {}; // docId -> { inFlight: bool, latestData: object }
+
+function scheduleFirestoreWrite(docId, ref, data){
+  let q = fbWriteQueues[docId];
+  if(!q){ q = fbWriteQueues[docId] = { inFlight: false, latestData: null }; }
+  q.latestData = data; // siempre nos quedamos con la versión más reciente conocida
+  if(q.inFlight) return; // ya hay una escritura en camino; cuando termine, tomará latestData
+  runQueuedWrite(docId, ref);
+}
+
+function runQueuedWrite(docId, ref){
+  const q = fbWriteQueues[docId];
+  if(!q) return;
+  q.inFlight = true;
+  const toSend = q.latestData;
+  setSyncStatus('connecting');
+  ref.set(toSend).then(()=>{
+    setSyncStatus('synced');
+  }).catch(err=>{
+    console.error('Error guardando en Firebase', err);
+    setSyncStatus('error');
+  }).finally(()=>{
+    q.inFlight = false;
+    // Si mientras escribíamos llegó un cambio más nuevo, lo mandamos ahora.
+    if(q.latestData !== toSend){ runQueuedWrite(docId, ref); }
+  });
+}
+
 function saveDB(){
   if(currentModo === 'invitado') return; // el invitado no escribe sobre las bases de cada modo
   persistLocalCache();
   if(fbReady && fbDocRef){
     const { historialEscaneos, historialBusquedas, historialInventario, ...syncData } = db;
-    fbDocRef.set(syncData).then(()=>{
-      setSyncStatus('synced');
-    }).catch(err=>{
-      console.error('Error guardando en Firebase', err);
-      setSyncStatus('error');
-    });
+    scheduleFirestoreWrite(firebaseDocId(), fbDocRef, syncData);
   }
 }
 
@@ -201,16 +257,82 @@ function persistModoDB(modo, dbObj){
       if(!firebase.apps || !firebase.apps.length){ firebase.initializeApp(firebaseConfig); }
       const ref = firebase.firestore().collection('stockferre').doc('inventario_' + modo);
       const { historialEscaneos, historialBusquedas, historialInventario, ...syncData } = dbObj;
-      ref.set(syncData).then(()=>{
-        setSyncStatus('synced');
-      }).catch(err=>{
-        console.error('Error guardando en Firebase', err);
-        setSyncStatus('error');
-      });
+      scheduleFirestoreWrite('inventario_' + modo, ref, syncData);
     }catch(err){
       console.error('Error guardando en Firebase', err);
     }
   }
+}
+
+/* -------------------------------------------------------------------------
+   FUSIÓN DE DATOS REMOTOS (evita perder cambios cuando DOS dispositivos
+   distintos escriben casi al mismo tiempo)
+   -------------------------------------------------------------------------
+   Antes, cuando llegaba una copia nueva desde Firebase (otro dispositivo
+   guardó algo), la app hacía "db = remote" y reemplazaba TODO lo que había
+   en memoria, incluso si ese remoto todavía no incluía un cambio que este
+   mismo dispositivo acababa de hacer un instante antes. Eso también podía
+   borrar en pantalla (y en el siguiente guardado) un producto recién
+   registrado.
+
+   Ahora, en vez de reemplazar, se FUSIONA: se compara registro por registro
+   usando su "id" único.
+   ------------------------------------------------------------------------- */
+
+// Combina un arreglo LOCAL con uno REMOTO por id, sin perder ningún registro:
+// - Si un id solo existe en un lado, se conserva.
+// - Si existe en ambos y se pasa un campo de marca de tiempo, gana el más
+//   reciente (ej. productos, que se editan en el mismo registro varias veces).
+// - Si existe en ambos y no hay marca de tiempo (ventas, compras, etc., que
+//   normalmente solo se agregan una vez), se conserva la versión local para
+//   no perder una edición reciente que el remoto aún no vio.
+function mergeById(localArr, remoteArr, timestampField){
+  localArr = Array.isArray(localArr) ? localArr : [];
+  remoteArr = Array.isArray(remoteArr) ? remoteArr : [];
+  const map = new Map();
+  remoteArr.forEach(item => { if(item && item.id != null) map.set(item.id, item); });
+  localArr.forEach(item => {
+    if(!item || item.id == null) return;
+    const remoteItem = map.get(item.id);
+    if(!remoteItem){ map.set(item.id, item); return; }
+    if(timestampField){
+      const lt = item[timestampField] || 0;
+      const rt = remoteItem[timestampField] || 0;
+      map.set(item.id, lt >= rt ? item : remoteItem);
+    }else{
+      map.set(item.id, item);
+    }
+  });
+  return Array.from(map.values());
+}
+
+// Fusiona la base LOCAL (lo que tenemos en memoria/LocalStorage, que puede
+// incluir cambios recién hechos aquí) con una copia REMOTA que acaba de
+// llegar de Firebase. Devuelve una base combinada que no pierde datos de
+// ningún lado.
+function mergeRemoteIntoLocal(local, remote){
+  local = normalizeDB(Object.assign({}, local || defaultDB()));
+  remote = normalizeDB(Object.assign({}, remote || defaultDB()));
+  const merged = Object.assign({}, remote);
+  merged.productos = mergeById(local.productos, remote.productos, '_updatedAt');
+  merged.categorias = Array.from(new Set(
+    (local.categorias||[]).concat(remote.categorias||[])
+      .map(c => String(c||'').trim()).filter(Boolean)
+  ));
+  merged.ventas = mergeById(local.ventas, remote.ventas);
+  merged.compras = mergeById(local.compras, remote.compras);
+  merged.gastos = mergeById(local.gastos, remote.gastos);
+  merged.finanzas = Object.assign({}, remote.finanzas);
+  merged.finanzas.retiros = mergeById((local.finanzas||{}).retiros, (remote.finanzas||{}).retiros);
+  merged.finanzas.deudas = mergeById((local.finanzas||{}).deudas, (remote.finanzas||{}).deudas);
+  // Los contadores usados para generar ids nuevos: se toma el mayor de los
+  // dos para que dos dispositivos creando productos/ventas nuevas al mismo
+  // tiempo nunca terminen usando el mismo id.
+  merged.contador = {
+    producto: Math.max((local.contador||{}).producto || 1, (remote.contador||{}).producto || 1),
+    venta: Math.max((local.contador||{}).venta || 1, (remote.contador||{}).venta || 1)
+  };
+  return normalizeDB(merged);
 }
 
 let guestUnsubs = [];
@@ -234,10 +356,11 @@ function connectGuestFirebase(){
         if(snap.exists){
           const prev = loadModoDB(modo);
           const remote = normalizeDB(snap.data());
-          remote.historialEscaneos = prev.historialEscaneos;
-          remote.historialBusquedas = prev.historialBusquedas;
-          remote.historialInventario = prev.historialInventario;
-          try{ localStorage.setItem('stockferre_catalogo_v1_' + modo, JSON.stringify(remote)); }catch(e){}
+          const merged = mergeRemoteIntoLocal(prev, remote);
+          merged.historialEscaneos = prev.historialEscaneos;
+          merged.historialBusquedas = prev.historialBusquedas;
+          merged.historialInventario = prev.historialInventario;
+          try{ localStorage.setItem('stockferre_catalogo_v1_' + modo, JSON.stringify(merged)); }catch(e){}
           if(currentModo === 'invitado'){ db = buildGuestDB(); rerenderCurrentView(); }
         }
       }).catch(()=>{ /* local sigue funcionando */ });
@@ -246,10 +369,11 @@ function connectGuestFirebase(){
         if(!snap.exists) return;
         const prev = loadModoDB(modo);
         const remote = normalizeDB(snap.data());
-        remote.historialEscaneos = prev.historialEscaneos;
-        remote.historialBusquedas = prev.historialBusquedas;
-        remote.historialInventario = prev.historialInventario;
-        try{ localStorage.setItem('stockferre_catalogo_v1_' + modo, JSON.stringify(remote)); }catch(e){}
+        const merged = mergeRemoteIntoLocal(prev, remote);
+        merged.historialEscaneos = prev.historialEscaneos;
+        merged.historialBusquedas = prev.historialBusquedas;
+        merged.historialInventario = prev.historialInventario;
+        try{ localStorage.setItem('stockferre_catalogo_v1_' + modo, JSON.stringify(merged)); }catch(e){}
         if(currentModo === 'invitado'){ db = buildGuestDB(); rerenderCurrentView(); }
       }, ()=>{ /* ignorar */ });
       guestUnsubs.push(unsub);
@@ -330,12 +454,15 @@ async function connectFirebase(){
 
     const snap = await fbDocRef.get();
     if(snap.exists){
-      // Ya hay datos en la nube: son la fuente de verdad, mantenemos el historial local
+      // Ya hay datos en la nube: se fusionan con lo que tengamos localmente
+      // (por si este dispositivo tenía cambios que la nube todavía no vio),
+      // manteniendo siempre el historial local.
       const remote = normalizeDB(snap.data());
-      remote.historialEscaneos = db.historialEscaneos;
-      remote.historialBusquedas = db.historialBusquedas;
-      remote.historialInventario = db.historialInventario;
-      db = remote;
+      const merged = mergeRemoteIntoLocal(db, remote);
+      merged.historialEscaneos = db.historialEscaneos;
+      merged.historialBusquedas = db.historialBusquedas;
+      merged.historialInventario = db.historialInventario;
+      db = merged;
       persistLocalCache();
       rerenderCurrentView();
     }else{
@@ -349,13 +476,14 @@ async function connectFirebase(){
       if(!snap.exists) return;
       const prevVentas = (db.ventas || []).map(v => v.id);
       const remote = normalizeDB(snap.data());
-      remote.historialEscaneos = db.historialEscaneos;
-      remote.historialBusquedas = db.historialBusquedas;
-      remote.historialInventario = db.historialInventario;
-      db = remote;
+      const merged = mergeRemoteIntoLocal(db, remote);
+      merged.historialEscaneos = db.historialEscaneos;
+      merged.historialBusquedas = db.historialBusquedas;
+      merged.historialInventario = db.historialInventario;
+      db = merged;
       persistLocalCache();
       rerenderCurrentView();
-      notifyNewRemoteSales(prevVentas, remote.ventas); // avisa ventas hechas en otro dispositivo
+      notifyNewRemoteSales(prevVentas, merged.ventas); // avisa ventas hechas en otro dispositivo
       setSyncStatus('synced');
     }, err=>{
       console.error('Error de sincronización Firebase', err);
@@ -390,10 +518,11 @@ function cacheRemoteModo(data, modo){
   try{
     const prev = loadModoDB(modo);
     const remote = normalizeDB(data);
-    remote.historialEscaneos = prev.historialEscaneos;
-    remote.historialBusquedas = prev.historialBusquedas;
-    remote.historialInventario = prev.historialInventario;
-    localStorage.setItem('stockferre_catalogo_v1_' + modo, JSON.stringify(remote));
+    const merged = mergeRemoteIntoLocal(prev, remote);
+    merged.historialEscaneos = prev.historialEscaneos;
+    merged.historialBusquedas = prev.historialBusquedas;
+    merged.historialInventario = prev.historialInventario;
+    localStorage.setItem('stockferre_catalogo_v1_' + modo, JSON.stringify(merged));
   }catch(e){ /* ignorar */ }
 }
 
@@ -467,6 +596,7 @@ function saveProducto(data){
     p.precioCompra = parseFloat(data.precioCompra) || 0;
     p.precioMarca = parseFloat(data.precioMarca) || 0;
     p.precioVenta = parseFloat(data.precioVenta) || 0;
+    touchProducto(p);
     saveDB();
     return p;
   }else{
@@ -480,6 +610,7 @@ function saveProducto(data){
       existing.precioCompra = parseFloat(data.precioCompra) || 0;
       existing.precioMarca = parseFloat(data.precioMarca) || 0;
       existing.precioVenta = parseFloat(data.precioVenta) || 0;
+      touchProducto(existing);
       saveDB();
       return existing;
     }
@@ -494,7 +625,8 @@ function saveProducto(data){
       precioMarca: parseFloat(data.precioMarca) || 0,
       precioVenta: parseFloat(data.precioVenta) || 0,
       stock: 0,
-      fechaCreacion: todayISO()
+      fechaCreacion: todayISO(),
+      _updatedAt: Date.now()
     };
     db.productos.push(p);
     saveDB();
@@ -549,6 +681,7 @@ function saveVenta(data){
   const p = getProductoByCodigo(data.codigo);
   if(p){
     p.stock = (p.stock || 0) - cantidad;
+    touchProducto(p);
   }
 
   saveDB();
@@ -564,6 +697,7 @@ function guestCommitVenta(venta, data, cantidad){
   const p = findProductoInDB(dbObj, data.codigo);
   if(p){
     p.stock = (p.stock || 0) - cantidad;
+    touchProducto(p);
   }
   dbObj.contador = dbObj.contador || { producto: 1, venta: 1 };
   dbObj.contador.venta = dbObj.contador.venta || 1;
@@ -587,7 +721,7 @@ function deleteVenta(id, mantenerInventario){
   if(!venta) return;
   if(!mantenerInventario){
     const p = getProductoByCodigo(venta.codigo);
-    if(p) p.stock = (p.stock || 0) + venta.cantidad;
+    if(p){ p.stock = (p.stock || 0) + venta.cantidad; touchProducto(p); }
   }
   db.ventas = db.ventas.filter(v => v.id !== id);
   // Al eliminar una venta, el dinero que se recibió sale del efectivo actual
@@ -612,7 +746,7 @@ function vaciarVentasConStock(restaurarStock){
   if(restaurarStock){
     db.ventas.forEach(v => {
       const p = getProductoByCodigo(v.codigo);
-      if(p) p.stock = (p.stock || 0) + v.cantidad;
+      if(p){ p.stock = (p.stock || 0) + v.cantidad; touchProducto(p); }
     });
   }
   db.ventas = [];
@@ -1757,7 +1891,7 @@ function deleteCompra(id, mantenerInventario){
   if(!compra) return;
   if(!mantenerInventario){
     const p = getProductoByCodigo(compra.codigo);
-    if(p) p.stock = (p.stock || 0) - compra.cantidad;
+    if(p){ p.stock = (p.stock || 0) - compra.cantidad; touchProducto(p); }
   }
   db.compras = db.compras.filter(c => c.id !== id);
   saveDB();
@@ -1776,7 +1910,7 @@ function vaciarComprasConStock(quitarStock){
   if(quitarStock){
     db.compras.forEach(c => {
       const p = getProductoByCodigo(c.codigo);
-      if(p) p.stock = (p.stock || 0) - c.cantidad;
+      if(p){ p.stock = (p.stock || 0) - c.cantidad; touchProducto(p); }
     });
   }
   db.compras = [];
@@ -2556,6 +2690,7 @@ function handleEditarInventarioSubmit(e){
   const stockAnterior = p.stock || 0;
   p.stock = stockVal; // se permite negativo, no se bloquea
   p.codigoBarras = document.getElementById('eInvCodigoBarras').value.trim();
+  touchProducto(p);
   markInventarioActualizado(p.id);
   logInventarioHistorial(p, stockVal - stockAnterior, 'ajuste manual');
   saveDB();
@@ -2627,6 +2762,7 @@ function handleInventarioSubmit(e){
 
   p.stock = (p.stock || 0) + cantidad;
   if(codigoBarras) p.codigoBarras = codigoBarras;
+  touchProducto(p);
   markInventarioActualizado(p.id);
   logInventarioHistorial(p, cantidad, 'registro (escáner)');
   saveDB();
@@ -2768,6 +2904,7 @@ function handleCompraSubmit(e){
     p.precioCompra = precioCompra;
     if(!isNaN(precioVenta) && precioVenta >= 0) p.precioVenta = precioVenta;
   }
+  touchProducto(p);
 
   const fechaElegida = document.getElementById('cFecha').value;
   setLastCompraFecha(fechaElegida);
@@ -2915,6 +3052,7 @@ function importInventarioCSV(file){
           const cb = String(r[idx.codigoBarras] || '').trim();
           if(cb) p.codigoBarras = cb;
         }
+        touchProducto(p);
         markInventarioActualizado(p.id);
         logInventarioHistorial(p, p.stock - stockAnterior, 'importación CSV');
         actualizados++;
@@ -3311,6 +3449,7 @@ function importProductsCSV(file){
           existing.precioCompra = precioCompra || existing.precioCompra;
           existing.precioMarca = precioMarca || existing.precioMarca;
           existing.precioVenta = precioVenta || existing.precioVenta;
+          touchProducto(existing);
           actualizados++;
         }else{
           db.productos.push({
@@ -3318,7 +3457,8 @@ function importProductsCSV(file){
             codigo, codigoBarras, nombre, marca, categoria,
             precioCompra, precioMarca, precioVenta,
             stock: 0,
-            fechaCreacion: todayISO()
+            fechaCreacion: todayISO(),
+            _updatedAt: Date.now()
           });
           creados++;
         }

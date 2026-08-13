@@ -583,7 +583,12 @@ function fbFirestoreOrNull(){
   if(!fbConfigOk()) return null;
   try{
     if(!firebase.apps || !firebase.apps.length){ firebase.initializeApp(firebaseConfig); }
-    return firebase.firestore();
+    const fs = firebase.firestore();
+    // Red de seguridad: activa la persistencia offline también por esta vía
+    // (por si se escribe stock antes de que termine connectFirebase). La
+    // función es idempotente, así que no duplica nada.
+    enableOfflinePersistence(fs);
+    return fs;
   }catch(e){ console.error('Error preparando Firestore', e); return null; }
 }
 
@@ -4533,9 +4538,10 @@ function getGuideBoxCropRect(videoEl, box){
   return { x: boxX, y: boxY, w: boxW, h: boxH };
 }
 
-const OCR_INTERVAL_MS = 600;
+const OCR_INTERVAL_MS = 250;
 
 let ocrWorker = null;
+let ocrWarmPromise = null; // promesa del precálculo del lector OCR (en segundo plano)
 let ocrStream = null;
 let ocrTimer = null;
 let ocrBusy = false;
@@ -4611,6 +4617,28 @@ function setOcrStatus(msg){
 
 let ocrStarting = false;
 
+// Precalienta Tesseract en segundo plano (poco después de cargar la app):
+// la primera vez que se usa el escáner, Tesseract tiene que descargar el
+// idioma (~10MB) y levantar el worker, y eso es lo que hace que "se quede
+// en buscando código" la primera vez. Al precargarlo, el primer escaneo
+// detecta al instante porque el motor ya está listo.
+function warmupOcrWorker(){
+  if(ocrWarmPromise || ocrWorker || ocrActive || typeof Tesseract === 'undefined') return;
+  ocrWarmPromise = (async()=>{
+    const w = await Tesseract.createWorker('eng');
+    await w.setParameters({
+      tessedit_char_whitelist: OCR_MODES[scanCodeMode].whitelist,
+      tessedit_pageseg_mode: '6',
+      preserve_interword_spaces: '1'
+    });
+    ocrWorker = w;
+  })().catch(err=>{
+    console.warn('Precálculo del OCR falló (se reintenta al abrir el escáner)', err);
+    ocrWorker = null;
+    ocrWarmPromise = null;
+  });
+}
+
 async function startOcrScanner(){
   if(ocrActive || ocrStarting) return;
   ensureAudioCtx(); // desbloquea el audio dentro del gesto que abrió la cámara
@@ -4645,7 +4673,12 @@ async function startOcrScanner(){
 
   try{
     setOcrStatus('Preparando el lector de texto...');
-    ocrWorker = await Tesseract.createWorker('eng');
+    if(!ocrWorker){
+      // Si el precálculo ya estaba en marcha, espera a que termine en vez
+      // de descargar el idioma dos veces a la vez.
+      if(ocrWarmPromise){ try{ await ocrWarmPromise; }catch(e){ /* se reintenta abajo */ } }
+      if(!ocrWorker){ ocrWorker = await Tesseract.createWorker('eng'); }
+    }
     await ocrWorker.setParameters({
       tessedit_char_whitelist: OCR_MODES[scanCodeMode].whitelist,
       tessedit_pageseg_mode: '6',
@@ -4709,9 +4742,11 @@ async function runOcrCapture(){
     // Recorta exactamente lo que se ve dentro del recuadro punteado (~5cm de distancia)
     const crop = getGuideBoxCropRect(videoEl);
 
-    // Escala x2 el recorte: los códigos son pequeños en la imagen original
-    // y una imagen más grande mejora mucho la precisión del OCR.
-    const scale = 2;
+    // Escala el recorte para el OCR: los códigos son pequeños en la imagen
+    // original y una imagen más grande mejora la precisión, pero una imagen
+    // gigante también hace que Tesseract tarde más por fotograma. 1.7x es un
+    // punto medio bueno: rápido de analizar y legible en la mayoría de etiquetas.
+    const scale = 1.7;
     canvasEl.width = crop.w * scale;
     canvasEl.height = crop.h * scale;
     const ctx = canvasEl.getContext('2d');
@@ -5528,6 +5563,9 @@ function init(){
   }
   updateInicioClock();
   setInterval(updateInicioClock, 1000);
+  // Precalienta Tesseract unos segundos después de cargar: así el primer
+  // escaneo no espera la descarga del idioma ni el arranque del motor.
+  setTimeout(()=>{ warmupOcrWorker(); }, 3500);
 }
 
 document.addEventListener('DOMContentLoaded', init);

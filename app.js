@@ -350,6 +350,7 @@ function connectGuestFirebase(){
   try{
     if(!firebase.apps || !firebase.apps.length){ firebase.initializeApp(firebaseConfig); }
     const fbFirestore = firebase.firestore();
+    enableOfflinePersistence(fbFirestore); // no bloquea la conexión
     ['manual','electrico'].forEach(modo => {
       const ref = fbFirestore.collection('stockferre').doc('inventario_' + modo);
       ref.get().then(snap=>{
@@ -377,6 +378,10 @@ function connectGuestFirebase(){
         if(currentModo === 'invitado'){ db = buildGuestDB(); rerenderCurrentView(); }
       }, ()=>{ /* ignorar */ });
       guestUnsubs.push(unsub);
+      // Documentos de productos (stock atómico): crea los que falten y
+      // mantiene el stock local al día con el valor exacto de la nube.
+      backfillProductos(modo);
+      startStockListener(modo);
     });
   }catch(err){
     console.error('No se pudo conectar a Firebase en modo invitado', err);
@@ -399,6 +404,7 @@ function firebaseDocId(){ return 'inventario_' + currentModo; }
 function disconnectFirebase(){
   if(fbUnsub){ try{ fbUnsub(); }catch(e){ /* ignorar */ } fbUnsub = null; }
   if(fbOtherUnsub){ try{ fbOtherUnsub(); }catch(e){ /* ignorar */ } fbOtherUnsub = null; }
+  stopStockListeners();
   fbReady = false;
   fbDocRef = null;
 }
@@ -449,6 +455,7 @@ async function connectFirebase(){
     setSyncStatus('connecting');
     if(!firebase.apps || !firebase.apps.length){ firebase.initializeApp(firebaseConfig); }
     const fbFirestore = firebase.firestore();
+    await enableOfflinePersistence(fbFirestore);
     fbDocRef = fbFirestore.collection('stockferre').doc(firebaseDocId());
     fbReady = true;
 
@@ -506,6 +513,14 @@ async function connectFirebase(){
         if(snap.exists) cacheRemoteModo(snap.data(), otherModo);
       }, ()=>{ /* ignorar */ });
     }catch(err){ /* la caché del otro modo es opcional */ }
+
+    // Stock atómico: crea los documentos de producto que falten (los que ya
+    // existían antes de este arreglo) y escucha la colección para mantener el
+    // stock local al día con el valor EXACTO de la nube.
+    try{ await backfillProductos(currentModo); }catch(e){ /* no bloquea */ }
+    try{ await backfillProductos(otherModo); }catch(e){ /* no bloquea */ }
+    startStockListener(currentModo);
+    startStockListener(otherModo);
   }catch(err){
     console.error('No se pudo conectar a Firebase', err);
     setSyncStatus('error');
@@ -524,6 +539,287 @@ function cacheRemoteModo(data, modo){
     merged.historialInventario = prev.historialInventario;
     localStorage.setItem('stockferre_catalogo_v1_' + modo, JSON.stringify(merged));
   }catch(e){ /* ignorar */ }
+}
+
+
+
+/* -------------------------------------------------------------------------
+   1c. STOCK EN LA NUBE: UN DOCUMENTO POR PRODUCTO + INCREMENTOS ATÓMICOS
+   -------------------------------------------------------------------------
+   EL PROBLEMA que arregla esto:
+   Antes, TODO (incluido el stock de cada producto) se guardaba en UN solo
+   documento de Firestore (stockferre/inventario_<modo>). Eso producía los
+   fallos que viste al registrar el inventario:
+     • Si DOS celulares registraban cantidades casi al mismo tiempo, el que
+       escribía al final PISABA al otro (se perdía un registro). Por eso a
+       veces "aparecía en el historial" pero el stock no quedaba.
+     • Si la red fallaba un instante, la escritura completa se perdía en la
+       nube (pero quedaba en el historial local de ese celular).
+     • Al recargar, cada celular mezclaba su copia vieja con la nube con
+       marcas de tiempo, y quedaban valores distintos (3 vs 4).
+
+   LA SOLUCIÓN:
+   • Cada producto tiene SU PROPIO documento en la colección
+     "stockferre_productos_<modo>". Esos documentos son pequeños y nunca
+     chocan entre sí.
+   • Los cambios de stock se aplican con FieldValue.increment() DENTRO de
+     Firestore: si dos celulares suman +1 a la vez, Firestore suma +1 y +1
+     (nunca se pierde un registro).
+   • La persistencia offline guarda las escrituras pendientes y las reenvía
+     cuando vuelve la conexión (ya no se pierde un registro por un cortón).
+   • Este celular ESCUCHA la colección (onSnapshot) y corrige su stock local
+     con el valor exacto que tiene la nube, así todos los dispositivos
+     terminan mostrando lo mismo.
+   ------------------------------------------------------------------------- */
+
+// ¿Firebase está configurado y listo para escribir?
+function fbConfigOk(){
+  return typeof firebaseConfig !== 'undefined' && firebaseConfig &&
+    firebaseConfig.apiKey && firebaseConfig.projectId &&
+    typeof firebase !== 'undefined' && firebase.firestore;
+}
+
+function fbFirestoreOrNull(){
+  if(!fbConfigOk()) return null;
+  try{
+    if(!firebase.apps || !firebase.apps.length){ firebase.initializeApp(firebaseConfig); }
+    return firebase.firestore();
+  }catch(e){ console.error('Error preparando Firestore', e); return null; }
+}
+
+// Colección de documentos por producto del modo dado (o del modo actual).
+function fbProductsCol(modo){
+  const fs = fbFirestoreOrNull();
+  return fs ? fs.collection('stockferre_productos_' + (modo || currentModo)) : null;
+}
+
+// Datos que se guardan en el documento del producto.
+function productoDocData(p){
+  return {
+    id: p.id,
+    codigo: p.codigo || '',
+    nombre: p.nombre || '',
+    marca: p.marca || '',
+    categoria: p.categoria || '',
+    codigoBarras: p.codigoBarras || '',
+    precioCompra: Number(p.precioCompra) || 0,
+    precioMarca: Number(p.precioMarca) || 0,
+    precioVenta: Number(p.precioVenta) || 0,
+    stock: Number(p.stock) || 0,
+    stockMin: Number(p.stockMin) || 0,
+    _updatedAt: typeof p._updatedAt === 'number' ? p._updatedAt : Date.now()
+  };
+}
+
+// Crea (si no existe) el documento del producto SIN tocar su stock: el stock
+// solo se modifica con incrementos atómicos para no pisar a otro dispositivo.
+async function ensureProductoDoc(p, modo){
+  const col = fbProductsCol(modo);
+  if(!col || !p || !p.id) return false;
+  try{
+    const data = productoDocData(p);
+    delete data.stock; // el stock se maneja con incrementos, no con reemplazo
+    await col.doc(p.id).set(data, { merge: true });
+    return true;
+  }catch(e){ console.error('Error creando documento del producto en la nube', e); return false; }
+}
+
+// Aplica un cambio ATÓMICO de stock en la nube (suma o resta). Esto es lo que
+// evita que dos celulares se pisen: Firestore suma la cantidad sobre el valor
+// actual que tenga en ese momento, así que ningún registro se pierde.
+async function applyStockDelta(p, delta, modo){
+  const col = fbProductsCol(modo);
+  if(!col || !p || !p.id) return;
+  delta = Number(delta) || 0;
+  if(delta === 0) return;
+  try{
+    await col.doc(p.id).update({
+      stock: firebase.firestore.FieldValue.increment(delta),
+      _updatedAt: Date.now()
+    });
+  }catch(err){
+    if(err && err.code === 'not-found'){
+      // Producto creado antes de esta actualización: se crea su documento
+      // primero y luego se aplica el incremento sobre el stock de la nube.
+      await ensureProductoDoc(p, modo);
+      try{
+        await col.doc(p.id).update({
+          stock: firebase.firestore.FieldValue.increment(delta),
+          _updatedAt: Date.now()
+        });
+      }catch(e2){ console.error('Error incrementando stock tras crear documento', e2); }
+    }else{
+      // Con la persistencia offline, un fallo transitorio de red se reenvía
+      // solo; si falla por otra razón, este celular conserva su valor local.
+      console.error('Error aplicando cambio de stock en la nube', err);
+    }
+  }
+}
+
+// Guarda el stock EXACTO de un producto (para correcciones manuales o CSV).
+// Se usa solo cuando el usuario dice explícitamente "este es el stock real".
+async function applyStockAbsolute(p, value, modo){
+  const col = fbProductsCol(modo);
+  if(!col || !p || !p.id) return;
+  const data = productoDocData(p);
+  data.stock = Number(value) || 0;
+  data._updatedAt = Date.now();
+  try{
+    await col.doc(p.id).set(data, { merge: true });
+  }catch(e){ console.error('Error guardando stock exacto en la nube', e); }
+}
+
+// Guarda (crea o actualiza) el documento completo de un producto.
+async function syncProductoDoc(p, modo){
+  const col = fbProductsCol(modo);
+  if(!col || !p || !p.id) return;
+  try{
+    await col.doc(p.id).set(productoDocData(p), { merge: true });
+  }catch(e){ console.error('Error sincronizando producto en la nube', e); }
+}
+
+async function deleteProductoDoc(p, modo){
+  const col = fbProductsCol(modo);
+  if(!col || !p || !p.id) return;
+  try{
+    await col.doc(p.id).delete();
+  }catch(e){ console.error('Error borrando producto de la nube', e); }
+}
+
+// Crea los documentos de los productos locales que todavía no tienen uno en
+// la nube (por ejemplo, los 1000+ productos que ya existían antes de este
+// arreglo). Es idempotente: solo crea los que faltan, sin tocar los stocks.
+async function backfillProductos(modo){
+  const col = fbProductsCol(modo);
+  if(!col) return;
+  const local = modo === currentModo ? db : loadModoDB(modo);
+  const arr = (local && local.productos) || [];
+  if(arr.length === 0) return;
+  try{
+    const snap = await col.get();
+    const existing = new Set(snap.docs.map(d => d.id));
+    const missing = arr.filter(p => p && p.id && !existing.has(p.id));
+    if(missing.length === 0) return;
+    const fs = firebase.firestore();
+    for(let i = 0; i < missing.length; i += 450){
+      const batch = fs.batch();
+      missing.slice(i, i + 450).forEach(p => {
+        const data = productoDocData(p);
+        delete data.stock; // el stock se sincroniza después con incrementos
+        batch.set(col.doc(p.id), data, { merge: true });
+      });
+      await batch.commit();
+    }
+  }catch(e){ console.error('Error respaldando productos en la nube', e); }
+}
+
+// Escribe los documentos de una lista de productos (para importaciones CSV).
+async function syncProductoDocs(list, modo){
+  const col = fbProductsCol(modo);
+  if(!col || !list || !list.length) return;
+  try{
+    const fs = firebase.firestore();
+    for(let i = 0; i < list.length; i += 450){
+      const batch = fs.batch();
+      list.slice(i, i + 450).forEach(p => {
+        if(!p || !p.id) return;
+        batch.set(col.doc(p.id), productoDocData(p), { merge: true });
+      });
+      await batch.commit();
+    }
+  }catch(e){ console.error('Error sincronizando lista de productos en la nube', e); }
+}
+
+// Escucha los documentos de productos de un modo y corrige el stock local con
+// el valor EXACTO que tiene la nube. Así dos celulares que registraron a la
+// vez terminan mostrando la misma cantidad (la que Firestore sumó de verdad).
+const fbProductosUnsubs = {};   // modo -> función para dejar de escuchar
+const stockStoreCache = {};     // modo -> copia de la base mientras se actualiza
+
+function startStockListener(modo){
+  const col = fbProductsCol(modo);
+  if(!col) return;
+  if(fbProductosUnsubs[modo]){ try{ fbProductosUnsubs[modo](); }catch(e){ /* ignorar */ } }
+  stockStoreCache[modo] = null;
+  let timer = null, changed = false;
+
+  const flush = () => {
+    if(!changed) return;
+    changed = false;
+    const store = stockStoreCache[modo];
+    if(store){
+      try{
+        if(modo === currentModo){
+          persistLocalCache();
+        }else{
+          localStorage.setItem('stockferre_catalogo_v1_' + modo, JSON.stringify(store));
+        }
+      }catch(e){ console.error('Error guardando stock local', e); }
+    }
+    stockStoreCache[modo] = null;
+    if(modo === currentModo){
+      rerenderCurrentView();
+    }else if(currentModo === 'invitado'){
+      db = buildGuestDB();
+      rerenderCurrentView();
+    }
+  };
+
+  fbProductosUnsubs[modo] = col.onSnapshot(snap => {
+    snap.docChanges().forEach(ch => {
+      if(ch.type === 'removed' || ch.doc.metadata.hasPendingWrites) return;
+      const data = ch.doc.data();
+      if(!data || !data.id) return;
+      if(!stockStoreCache[modo]){
+        try{
+          stockStoreCache[modo] = modo === currentModo ? db : loadModoDB(modo);
+        }catch(e){ return; }
+      }
+      const store = stockStoreCache[modo];
+      if(!store) return;
+      const p = store.productos.find(x => x && x.id === data.id);
+      if(!p) return;
+      let touched = false;
+      if(typeof data.stock === 'number' && data.stock !== p.stock){
+        p.stock = data.stock;
+        touched = true;
+      }
+      if(typeof data.codigoBarras === 'string' && data.codigoBarras && data.codigoBarras !== p.codigoBarras){
+        p.codigoBarras = data.codigoBarras;
+        touched = true;
+      }
+      if(touched) changed = true;
+    });
+    if(changed){
+      if(timer) clearTimeout(timer);
+      timer = setTimeout(()=>{ timer = null; flush(); }, 60);
+    }
+  }, err => {
+    console.error('Error escuchando stock de productos (' + modo + ')', err);
+  });
+}
+
+function stopStockListeners(){
+  Object.keys(fbProductosUnsubs).forEach(modo => {
+    try{ fbProductosUnsubs[modo](); }catch(e){ /* ignorar */ }
+  });
+  Object.keys(stockStoreCache).forEach(k => { stockStoreCache[k] = null; });
+}
+
+// Activa la persistencia offline UNA sola vez por sesión: las escrituras que
+// no puedan llegar a Firestore se guardan localmente y se reenvían solas
+// cuando vuelva la conexión (evita perder un registro por un cortón de red).
+let persistenceEnabled = false;
+async function enableOfflinePersistence(fs){
+  if(persistenceEnabled || !fs) return;
+  persistenceEnabled = true;
+  try{
+    await fs.enablePersistence({ synchronizeTabs: true });
+  }catch(err){
+    if(err && err.code !== 'failed-precondition' && err.code !== 'unimplemented'){
+      console.warn('Persistencia offline no disponible', err);
+    }
+  }
 }
 
 
@@ -598,6 +894,7 @@ function saveProducto(data){
     p.precioVenta = parseFloat(data.precioVenta) || 0;
     touchProducto(p);
     saveDB();
+    syncProductoDoc(p); // mantiene el documento del producto en la nube al día
     return p;
   }else{
     // Si ya existe un producto con ese código, actualízalo en vez de duplicar
@@ -612,6 +909,7 @@ function saveProducto(data){
       existing.precioVenta = parseFloat(data.precioVenta) || 0;
       touchProducto(existing);
       saveDB();
+      syncProductoDoc(existing);
       return existing;
     }
     const p = {
@@ -630,14 +928,17 @@ function saveProducto(data){
     };
     db.productos.push(p);
     saveDB();
+    syncProductoDoc(p);
     return p;
   }
 }
 
 function deleteProducto(id){
   confirmDialog('Eliminar producto', '¿Seguro que quieres eliminar este producto? Esta acción no se puede deshacer.', ()=>{
-    db.productos = db.productos.filter(p => p.id !== id);
+    const p = getProductoById(id);
+    db.productos = db.productos.filter(x => x.id !== id);
     saveDB();
+    if(p) deleteProductoDoc(p); // también lo quita de la nube
     renderProductos();
     renderCategorias();
     toast('Producto eliminado', 'success');
@@ -682,6 +983,7 @@ function saveVenta(data){
   if(p){
     p.stock = (p.stock || 0) - cantidad;
     touchProducto(p);
+    applyStockDelta(p, -cantidad); // descuenta también en la nube, de forma atómica
   }
 
   saveDB();
@@ -698,6 +1000,7 @@ function guestCommitVenta(venta, data, cantidad){
   if(p){
     p.stock = (p.stock || 0) - cantidad;
     touchProducto(p);
+    applyStockDelta(p, -cantidad, modo); // descuenta también en la nube del modo
   }
   dbObj.contador = dbObj.contador || { producto: 1, venta: 1 };
   dbObj.contador.venta = dbObj.contador.venta || 1;
@@ -721,7 +1024,11 @@ function deleteVenta(id, mantenerInventario){
   if(!venta) return;
   if(!mantenerInventario){
     const p = getProductoByCodigo(venta.codigo);
-    if(p){ p.stock = (p.stock || 0) + venta.cantidad; touchProducto(p); }
+    if(p){
+      p.stock = (p.stock || 0) + venta.cantidad;
+      touchProducto(p);
+      applyStockDelta(p, venta.cantidad); // devuelve la cantidad a la nube
+    }
   }
   db.ventas = db.ventas.filter(v => v.id !== id);
   // Al eliminar una venta, el dinero que se recibió sale del efectivo actual
@@ -746,7 +1053,11 @@ function vaciarVentasConStock(restaurarStock){
   if(restaurarStock){
     db.ventas.forEach(v => {
       const p = getProductoByCodigo(v.codigo);
-      if(p){ p.stock = (p.stock || 0) + v.cantidad; touchProducto(p); }
+      if(p){
+        p.stock = (p.stock || 0) + v.cantidad;
+        touchProducto(p);
+        applyStockDelta(p, v.cantidad); // devuelve la cantidad a la nube
+      }
     });
   }
   db.ventas = [];
@@ -1772,6 +2083,7 @@ function importPedidosCSV(file){
       const idxMin = headers.findIndex(h => h.includes('STOCK_MINIMO') || h.includes('STOCK MINIMO') || h.includes('STOCK MIN'));
       const idxCant = headers.findIndex(h => h.includes('CANTIDAD') || h.includes('CANT'));
       let mins = 0, cantidades = 0;
+      const minUpdated = [];
       for(let i = 1; i < rows.length; i++){
         const r = rows[i];
         const codigo = String(r[idxCodigo] || '').trim();
@@ -1782,6 +2094,7 @@ function importPedidosCSV(file){
           const v = parseFloat(String(r[idxMin]).replace(',','.'));
           if(!isNaN(v)){
             p.stockMin = v < 0 ? 0 : Math.round(v);
+            minUpdated.push(p);
             mins++;
           }
         }
@@ -1794,6 +2107,7 @@ function importPedidosCSV(file){
         }
       }
       saveDB();
+      syncProductoDocs(minUpdated, currentModo); // el stock mínimo importado también va a la nube
       renderPedidos();
       renderProductos();
       renderTopVentas();
@@ -1891,7 +2205,11 @@ function deleteCompra(id, mantenerInventario){
   if(!compra) return;
   if(!mantenerInventario){
     const p = getProductoByCodigo(compra.codigo);
-    if(p){ p.stock = (p.stock || 0) - compra.cantidad; touchProducto(p); }
+    if(p){
+      p.stock = (p.stock || 0) - compra.cantidad;
+      touchProducto(p);
+      applyStockDelta(p, -compra.cantidad); // quita la cantidad también en la nube
+    }
   }
   db.compras = db.compras.filter(c => c.id !== id);
   saveDB();
@@ -1910,7 +2228,11 @@ function vaciarComprasConStock(quitarStock){
   if(quitarStock){
     db.compras.forEach(c => {
       const p = getProductoByCodigo(c.codigo);
-      if(p){ p.stock = (p.stock || 0) - c.cantidad; touchProducto(p); }
+      if(p){
+        p.stock = (p.stock || 0) - c.cantidad;
+        touchProducto(p);
+        applyStockDelta(p, -c.cantidad); // quita la cantidad también en la nube
+      }
     });
   }
   db.compras = [];
@@ -2694,6 +3016,7 @@ function handleEditarInventarioSubmit(e){
   markInventarioActualizado(p.id);
   logInventarioHistorial(p, stockVal - stockAnterior, 'ajuste manual');
   saveDB();
+  applyStockAbsolute(p, stockVal); // el stock exacto se guarda también en la nube
   renderInventario();
   renderProductos();
   closeAllModals();
@@ -2766,6 +3089,7 @@ function handleInventarioSubmit(e){
   markInventarioActualizado(p.id);
   logInventarioHistorial(p, cantidad, 'registro (escáner)');
   saveDB();
+  applyStockDelta(p, cantidad); // la suma se aplica TAMBIÉN en la nube, atómica
   renderInventario();
   renderProductos();
   closeAllModals();
@@ -2890,9 +3214,11 @@ function handleCompraSubmit(e){
       precioMarca: 0,
       precioVenta: !isNaN(precioVenta) && precioVenta >= 0 ? precioVenta : 0,
       stock: 0,
-      fechaCreacion: todayISO()
+      fechaCreacion: todayISO(),
+      _updatedAt: Date.now()
     };
     db.productos.push(p);
+    syncProductoDoc(p); // el producto nuevo también tiene documento en la nube
   }
 
   p.stock = (p.stock || 0) + cantidad;
@@ -2903,6 +3229,7 @@ function handleCompraSubmit(e){
     if(marca) p.marca = marca;
     p.precioCompra = precioCompra;
     if(!isNaN(precioVenta) && precioVenta >= 0) p.precioVenta = precioVenta;
+    if(!esNuevo) syncProductoDoc(p); // datos actualizados también en la nube
   }
   touchProducto(p);
 
@@ -2922,6 +3249,7 @@ function handleCompraSubmit(e){
 
   logInventarioHistorial(p, cantidad, 'compra');
   saveDB();
+  applyStockDelta(p, cantidad); // la compra suma stock TAMBIÉN en la nube, atómica
   renderCompras();
   renderInventario();
   renderProductos();
@@ -3039,6 +3367,7 @@ function importInventarioCSV(file){
         return;
       }
       let actualizados = 0, noEncontrados = 0;
+      const actualizadosList = [];
       for(let i = 1; i < rows.length; i++){
         const r = rows[i];
         const codigo = String(r[idx.codigo] || '').trim();
@@ -3055,9 +3384,11 @@ function importInventarioCSV(file){
         touchProducto(p);
         markInventarioActualizado(p.id);
         logInventarioHistorial(p, p.stock - stockAnterior, 'importación CSV');
+        actualizadosList.push(p);
         actualizados++;
       }
       saveDB();
+      syncProductoDocs(actualizadosList, currentModo); // el stock exacto también va a la nube
       renderInventario();
       renderProductos();
       renderHistorial();
@@ -3426,6 +3757,7 @@ function importProductsCSV(file){
       }
 
       let creados = 0, actualizados = 0;
+      const importadosList = [];
       for(let i = 1; i < rows.length; i++){
         const r = rows[i];
         const codigo = String(r[idx.codigo] || '').trim();
@@ -3450,20 +3782,24 @@ function importProductsCSV(file){
           existing.precioMarca = precioMarca || existing.precioMarca;
           existing.precioVenta = precioVenta || existing.precioVenta;
           touchProducto(existing);
+          importadosList.push(existing);
           actualizados++;
         }else{
-          db.productos.push({
+          const p = {
             id: uid(),
             codigo, codigoBarras, nombre, marca, categoria,
             precioCompra, precioMarca, precioVenta,
             stock: 0,
             fechaCreacion: todayISO(),
             _updatedAt: Date.now()
-          });
+          };
+          db.productos.push(p);
+          importadosList.push(p);
           creados++;
         }
       }
       saveDB();
+      syncProductoDocs(importadosList, currentModo); // los productos importados también van a la nube
       renderProductos();
       renderCategorias();
       toast(`Importación completa: ${creados} nuevos, ${actualizados} actualizados`, 'success');
@@ -3510,6 +3846,7 @@ function importBackup(file){
           ventas: parsed.ventas || []
         });
         saveDB();
+        syncProductoDocs(db.productos, currentModo); // los productos restaurados también van a la nube
         renderProductos();
         renderCategorias();
         toast('Backup restaurado correctamente', 'success');
@@ -5090,6 +5427,7 @@ function setupEventListeners(){
       if(!p) return;
       p.stockMin = isNaN(val) || val < 0 ? 0 : val;
       saveDB();
+      syncProductoDoc(p); // el stock mínimo también se comparte en la nube
       renderPedidos();
       toast('Stock mínimo actualizado', 'success');
     }else if(e.target.classList.contains('pedido-cant-input')){

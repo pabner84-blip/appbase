@@ -861,6 +861,148 @@ function todayISO(){
 }
 
 /* -------------------------------------------------------------------------
+   2b. IMÁGENES DE PRODUCTOS (LOCALES — IndexedDB, NO van a Firebase)
+   -------------------------------------------------------------------------
+   Cada imagen se guarda SOLO en este dispositivo (IndexedDB), separada de la
+   base de datos que se sincroniza a Firebase. Así los ~1300 productos pueden
+   tener foto sin ocupar espacio en la nube. La imagen queda ligada al id del
+   producto y solo la ve este dispositivo.
+   ------------------------------------------------------------------------- */
+const IMG_DB_NAME = 'stockferre_imagenes_v1';
+let imgDB = null;
+let imgCache = {}; // productId -> dataURL, del modo actual
+
+function imgStoreName(modo){
+  return 'imgs_' + (modo || currentModo);
+}
+
+function openImgDB(){
+  return new Promise((resolve, reject)=>{
+    if(imgDB){ resolve(imgDB); return; }
+    if(typeof indexedDB === 'undefined'){ reject(new Error('IndexedDB no disponible')); return; }
+    const req = indexedDB.open(IMG_DB_NAME, 1);
+    req.onupgradeneeded = (e)=>{
+      const db = e.target.result;
+      if(!db.objectStoreNames.contains('imgs_manual')) db.createObjectStore('imgs_manual');
+      if(!db.objectStoreNames.contains('imgs_electrico')) db.createObjectStore('imgs_electrico');
+    };
+    req.onsuccess = ()=>{ imgDB = req.result; resolve(imgDB); };
+    req.onerror = ()=> reject(req.error || new Error('IndexedDB error'));
+  });
+}
+
+function getImage(productId){
+  return productId ? (imgCache[productId] || '') : '';
+}
+
+function loadImagesFromStore(modo){
+  imgCache = {};
+  return openImgDB().then(db => new Promise(resolve=>{
+    const storeName = imgStoreName(modo);
+    if(!db.objectStoreNames.contains(storeName)){ resolve(imgCache); return; }
+    const tx = db.transaction(storeName, 'readonly');
+    const req = tx.objectStore(storeName).getAll();
+    req.onsuccess = ()=>{
+      (req.result || []).forEach(item => { if(item && item.id) imgCache[item.id] = item.data; });
+      resolve(imgCache);
+    };
+    req.onerror = ()=> resolve(imgCache);
+  })).catch(err=>{ console.error('Error leyendo imágenes', err); imgCache = {}; return imgCache; });
+}
+
+// Carga las imágenes del modo indicado. En modo invitado mezcla ambos modos
+// (Manuales + Eléctricas) porque el invitado ve productos de los dos.
+function loadImagesForModo(modo){
+  const m = modo || currentModo;
+  if(m === 'invitado'){
+    return Promise.all([loadImagesFromStore('manual'), loadImagesFromStore('electrico')])
+      .then(()=> imgCache);
+  }
+  return loadImagesFromStore(m);
+}
+
+function saveImageLocal(productId, data){
+  if(!productId || !data) return Promise.resolve(false);
+  return openImgDB().then(db => new Promise(resolve=>{
+    const store = imgStoreName();
+    const tx = db.transaction(store, 'readwrite');
+    tx.objectStore(store).put({ id: productId, data: data }, productId);
+    tx.oncomplete = ()=>{ imgCache[productId] = data; resolve(true); };
+    tx.onerror = ()=>{ console.error('Error guardando imagen', tx.error); resolve(false); };
+  })).catch(err=>{ console.error('Error guardando imagen', err); return false; });
+}
+
+function removeImageLocal(productId){
+  if(!productId) return Promise.resolve(false);
+  return openImgDB().then(db => new Promise(resolve=>{
+    const store = imgStoreName();
+    const tx = db.transaction(store, 'readwrite');
+    tx.objectStore(store).delete(productId);
+    tx.oncomplete = ()=>{ delete imgCache[productId]; resolve(true); };
+    tx.onerror = ()=>{ console.error('Error borrando imagen', tx.error); resolve(false); };
+  })).catch(err=>{ console.error('Error borrando imagen', err); return false; });
+}
+
+// Borra TODAS las imágenes de ambos modos (se usa en "Borrar todos los datos").
+function clearAllImages(){
+  return openImgDB().then(db => new Promise(resolve=>{
+    const tx = db.transaction(['imgs_manual','imgs_electrico'], 'readwrite');
+    tx.objectStore('imgs_manual').clear();
+    tx.objectStore('imgs_electrico').clear();
+    tx.oncomplete = ()=>{ imgCache = {}; resolve(true); };
+    tx.onerror = ()=> resolve(false);
+  })).catch(err=>{ console.error('Error limpiando imágenes', err); return false; });
+}
+
+// Reduce la imagen a un tamaño razonable (máx. 400px) y la convierte a JPEG
+// de buena calidad: ocupa poco en el dispositivo y es lo que sale en el CSV.
+function compressImage(file){
+  return new Promise((resolve, reject)=>{
+    const reader = new FileReader();
+    reader.onload = ()=>{
+      const img = new Image();
+      img.onload = ()=>{
+        const MAX = 400;
+        let w = img.width || 400;
+        let h = img.height || 400;
+        if(w > MAX || h > MAX){
+          const ratio = Math.min(MAX / w, MAX / h);
+          w = Math.round(w * ratio);
+          h = Math.round(h * ratio);
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = w;
+        canvas.height = h;
+        try{
+          const ctx = canvas.getContext('2d');
+          ctx.drawImage(img, 0, 0, w, h);
+          resolve(canvas.toDataURL('image/jpeg', 0.82));
+        }catch(err){
+          console.warn('No se pudo comprimir, se usará la imagen original', err);
+          resolve(reader.result); // fallback: la imagen original
+        }
+      };
+      img.onerror = ()=> reject(new Error('No se pudo leer la imagen'));
+      img.src = reader.result;
+    };
+    reader.onerror = ()=> reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+}
+
+// Descarga una imagen desde una URL y la convierte a dataURL local.
+function fetchImageAsDataURL(url){
+  return fetch(url)
+    .then(r => { if(!r.ok) throw new Error('HTTP ' + r.status); return r.blob(); })
+    .then(blob => new Promise((resolve, reject)=>{
+      const reader = new FileReader();
+      reader.onload = ()=> resolve(reader.result);
+      reader.onerror = ()=> reject(reader.error);
+      reader.readAsDataURL(blob);
+    }));
+}
+
+/* -------------------------------------------------------------------------
    3. PRODUCTOS — CRUD
    ------------------------------------------------------------------------- */
 
@@ -927,6 +1069,7 @@ function saveProducto(data){
       precioCompra: parseFloat(data.precioCompra) || 0,
       precioMarca: parseFloat(data.precioMarca) || 0,
       precioVenta: parseFloat(data.precioVenta) || 0,
+      caracteristicas: '',
       stock: 0,
       fechaCreacion: todayISO(),
       _updatedAt: Date.now()
@@ -943,6 +1086,7 @@ function deleteProducto(id){
     const p = getProductoById(id);
     db.productos = db.productos.filter(x => x.id !== id);
     saveDB();
+    removeImageLocal(id); // también quita su imagen local
     if(p) deleteProductoDoc(p); // también lo quita de la nube
     renderProductos();
     renderCategorias();
@@ -1213,7 +1357,7 @@ function renderScanResultInto(elementId, codigo, context){
           ⚠️ No se encontró ningún producto con el código <strong>${escapeHtml(codigo)}</strong>.<br>
           <span style="font-size:12px;">No hay problema: se creará un producto nuevo al registrar la compra.</span>
           <div style="margin-top:10px;">
-            <button class="btn btn-primary btn-sm" id="btnCompraCreate_${elementId}">🛒 Registrar compra</button>
+            <button class="btn btn-primary btn-sm" id="btnCompraCreate_${elementId}">🛒 Registrar ingreso</button>
           </div>
         </div>`;
       const btnCreate = document.getElementById(`btnCompraCreate_${elementId}`);
@@ -1242,7 +1386,7 @@ function renderScanResultInto(elementId, codigo, context){
   const secondBtnHtml = context === 'inventario'
     ? `<button class="btn btn-primary btn-sm" id="btnActionFromScan_${elementId}">📋 Registrar</button>`
     : context === 'compra'
-      ? `<button class="btn btn-primary btn-sm" id="btnActionFromScan_${elementId}">🛒 Registrar compra</button>`
+      ? `<button class="btn btn-primary btn-sm" id="btnActionFromScan_${elementId}">🛒 Registrar ingreso</button>`
       : `<button class="btn btn-success btn-sm" id="btnActionFromScan_${elementId}">💰 Venderlo</button>`;
 
   // En el contexto de Inventario NO se muestra información de precios: solo
@@ -1572,10 +1716,9 @@ function handleScannedCode(codigo, fromCamera){
     return;
   }
   if(scanContext === 'compra'){
+    // Al detectar el código se cierra el escáner y se abre directo el
+    // formulario "Registrar ingreso" (no hay tarjeta de resultado que mostrar).
     handleCompraScan(codigo);
-    if(fromCamera){
-      scrollToScanResult('compraScanResultBox');
-    }
     return;
   }
   renderScanResult(codigo);
@@ -2136,6 +2279,7 @@ function importPedidosCSV(file){
    ------------------------------------------------------------------------- */
 
 let compraDateFilter = 'hoy';
+let compraSearch = ''; // texto del buscador de la pestaña Ingresos
 
 function comprasFiltradas(){
   return db.compras.filter(c => {
@@ -2160,46 +2304,126 @@ function syncComprasChips(){
   if(input) input.value = /^\d{4}-\d{2}-\d{2}$/.test(compraDateFilter) ? compraDateFilter : '';
 }
 
+// Agrupa los ingresos por código de producto. Si se pasa una lista (por
+// ejemplo ya filtrada por fecha), agrupa solo esos.
+function comprasPorProducto(lista){
+  const map = new Map();
+  (lista || db.compras).forEach(c => {
+    if(!map.has(c.codigo)) map.set(c.codigo, []);
+    map.get(c.codigo).push(c);
+  });
+  return map;
+}
+
+// La pestaña Ingresos muestra el filtro de fechas (Hoy/Ayer/otra fecha/Todas)
+// como antes, y debajo la lista de PRODUCTOS con su historial de ingresos
+// (compras) filtrada por fecha y con el buscador por código o descripción.
+// Al hacer clic en un producto se abre su historial (fechas, proveedor,
+// precio y cantidad).
 function renderCompras(){
   const tbody = document.querySelector('#comprasTable tbody');
   const summary = document.getElementById('comprasSummary');
   if(!tbody || !summary) return;
+  syncComprasChips();
   const colspan = 8;
 
   if(db.compras.length === 0){
-    tbody.innerHTML = `<tr class="empty-row"><td colspan="${colspan}">Todavía no registraste ninguna compra.</td></tr>`;
-    summary.textContent = '0 compras';
-    syncComprasChips();
+    tbody.innerHTML = `<tr class="empty-row"><td colspan="${colspan}">Todavía no registraste ningún ingreso. Usa "➕ Nuevo ingreso" para registrar tu primera compra.</td></tr>`;
+    summary.textContent = '0 ingresos';
     maybeShowCompraReminder();
     return;
   }
 
-  const list = comprasFiltradas();
-  if(list.length === 0){
-    tbody.innerHTML = `<tr class="empty-row"><td colspan="${colspan}">No hay compras ${comprasFilterLabel()}.</td></tr>`;
-    summary.textContent = `0 compras ${comprasFilterLabel()}`;
-    syncComprasChips();
+  const filtradas = comprasFiltradas();
+  if(filtradas.length === 0){
+    tbody.innerHTML = `<tr class="empty-row"><td colspan="${colspan}">No hay ingresos ${comprasFilterLabel()}.</td></tr>`;
+    summary.textContent = `0 ingresos ${comprasFilterLabel()}`;
     maybeShowCompraReminder();
     return;
   }
 
-  tbody.innerHTML = list.map(c => `
-    <tr>
-      <td>${fmtHistoryDate(c.fecha)}</td>
-      <td><strong>${escapeHtml(c.codigo)}</strong></td>
-      <td>${escapeHtml(c.nombre)}</td>
-      <td>${c.cantidad}</td>
-      <td>${fmtMoney(c.precioUnitario)}</td>
-      <td><strong>${fmtMoney(c.total)}</strong></td>
-      <td>${PAYMENT_LABELS[c.metodoPago] || c.metodoPago}</td>
-      <td><button class="btn-icon" title="Eliminar" data-delete-compra="${c.id}">🗑️</button></td>
+  const grupos = comprasPorProducto(filtradas);
+  let entries = [...grupos.entries()].map(([codigo, compras]) => {
+    const ultima = compras.reduce((a,b)=> new Date(b.fecha) > new Date(a.fecha) ? b : a);
+    return {
+      codigo,
+      nombre: compras[0].nombre || codigo,
+      veces: compras.length,
+      unidades: compras.reduce((s,x)=> s + (x.cantidad||0), 0),
+      total: compras.reduce((s,x)=> s + (x.total||0), 0),
+      ultimaFecha: ultima.fecha,
+      ultimoPrecio: ultima.precioUnitario || 0
+    };
+  });
+
+  const s = normalize(compraSearch);
+  if(s){
+    entries = entries.filter(e => normalize(e.codigo).includes(s) || normalize(e.nombre).includes(s));
+  }
+  entries.sort((a,b)=> a.nombre.localeCompare(b.nombre, 'es'));
+
+  if(entries.length === 0){
+    tbody.innerHTML = `<tr class="empty-row"><td colspan="${colspan}">No hay ingresos que coincidan con la búsqueda.</td></tr>`;
+    summary.textContent = `${filtradas.length} ingreso(s) ${comprasFilterLabel()}`;
+    maybeShowCompraReminder();
+    return;
+  }
+
+  tbody.innerHTML = entries.map(e => `
+    <tr data-compra-prod="${escapeHtml(e.codigo)}" style="cursor:pointer;" title="Ver historial de ingresos">
+      <td><strong>${escapeHtml(e.codigo)}</strong></td>
+      <td>${escapeHtml(e.nombre)}</td>
+      <td>${e.veces}</td>
+      <td>${e.unidades}</td>
+      <td>${fmtMoney(e.ultimoPrecio)}</td>
+      <td>${fmtHistoryDate(e.ultimaFecha)}</td>
+      <td><strong>${fmtMoney(e.total)}</strong></td>
+      <td><button class="btn btn-secondary btn-sm" data-view-compra-history="${escapeHtml(e.codigo)}">📋 Ver historial</button></td>
     </tr>
   `).join('');
 
-  const totalMonto = list.reduce((sum, c) => sum + c.total, 0);
-  summary.textContent = `${list.length} compra${list.length === 1 ? '' : 's'} ${comprasFilterLabel()} · ${fmtMoney(totalMonto)}`;
-  syncComprasChips();
+  const totalGral = entries.reduce((s,e)=> s + e.total, 0);
+  summary.textContent = `${entries.length} producto(s) · ${filtradas.length} ingreso(s) ${comprasFilterLabel()} · ${fmtMoney(totalGral)} invertido`;
   maybeShowCompraReminder();
+}
+
+// Abre la ventana con el historial de ingresos (compras) del producto: cada
+// compra con su fecha, proveedor, precio de compra, cantidad y observaciones.
+function openCompraHistorial(codigo){
+  const compras = db.compras.filter(c => c.codigo === codigo);
+  const p = getProductoByCodigo(codigo);
+  const nombre = compras[0]?.nombre || (p ? p.nombre : codigo);
+  document.getElementById('histProdInfo').innerHTML = `📦 <strong>${escapeHtml(nombre)}</strong> · <span style="font-size:12px;">Código: ${escapeHtml(codigo)}</span>`;
+  const tbody = document.querySelector('#histComprasTable tbody');
+  if(compras.length === 0){
+    tbody.innerHTML = `<tr class="empty-row"><td colspan="6">Todavía no hay ingresos registrados para este producto.</td></tr>`;
+  }else{
+    // Últimos 5 ingresos: fecha anterior arriba y la más reciente abajo, y
+    // solo se muestra la fecha (sin la hora).
+    const ultimas = compras.slice()
+      .sort((a,b)=> new Date(a.fecha) - new Date(b.fecha))
+      .slice(-5);
+    tbody.innerHTML = ultimas.map(c => `
+      <tr>
+        <td>${fmtDateShort(c.fecha)}</td>
+        <td>${escapeHtml(c.proveedor || '-')}</td>
+        <td>${fmtMoney(c.precioUnitario)}</td>
+        <td>${c.cantidad}</td>
+        <td>${c.observaciones ? escapeHtml(c.observaciones) : '-'}</td>
+        <td><button class="btn-icon" title="Eliminar ingreso" data-delete-compra="${c.id}">🗑️</button></td>
+      </tr>
+    `).join('');
+  }
+  openModal('modalCompraHistorial');
+}
+
+// Desde la ventana de características (pestaña Productos): abre la ventana de
+// historial de ingresos del producto sin cambiar de pestaña.
+function openProductIngresos(productId){
+  const p = getProductoById(productId);
+  if(!p) return;
+  closeModalById('modalProductoDetalle');
+  openCompraHistorial(p.codigo);
 }
 
 // Borra UNA compra. Al borrarla se pregunta si el inventario se mantiene:
@@ -2221,11 +2445,18 @@ function deleteCompra(id, mantenerInventario){
   renderCompras();
   renderInventario();
   renderProductos();
-  toast('Compra eliminada', 'success');
+  // Si la ventana de historial estaba abierta, la refresca (o la cierra si el
+  // producto se quedó sin ingresos).
+  const histModal = document.getElementById('modalCompraHistorial');
+  if(histModal && histModal.classList.contains('open')){
+    if(db.compras.some(c => c.codigo === compra.codigo)) openCompraHistorial(compra.codigo);
+    else closeAllModals();
+  }
+  toast('Ingreso eliminado', 'success');
 }
 
 function vaciarHistorialCompras(){
-  ventaBorrarDialog('Vaciar historial de compras', '¿Vaciar todo el historial de compras?\n\n¿Mantener el inventario?\n• Sí = el inventario NO se modifica.\n• No = las cantidades se quitan del stock.',
+  ventaBorrarDialog('Vaciar historial de ingresos', '¿Vaciar todo el historial de ingresos?\n\n¿Mantener el inventario?\n• Sí = el inventario NO se modifica.\n• No = las cantidades se quitan del stock.',
     ()=> vaciarComprasConStock(false),
     ()=> vaciarComprasConStock(true));
 }
@@ -2245,10 +2476,10 @@ function vaciarComprasConStock(quitarStock){
   renderCompras();
   renderInventario();
   renderProductos();
-  toast('Historial de compras vaciado', 'success');
+  toast('Historial de ingresos vaciado', 'success');
 }
 
-// Borra compras de hace más de 3 meses (el stock no se modifica).
+// Borra ingresos de hace más de 3 meses (el stock no se modifica).
 function purgeComprasAntiguas(){
   const corte = new Date();
   corte.setDate(corte.getDate() - 90);
@@ -2258,8 +2489,8 @@ function purgeComprasAntiguas(){
   const borradas = antes - db.compras.length;
   saveDB();
   renderCompras();
-  if(borradas > 0) toast(`${borradas} compra(s) antigua(s) eliminadas`, 'success');
-  else toast('No había compras antiguas que borrar', 'warning');
+  if(borradas > 0) toast(`${borradas} ingreso(s) antiguo(s) eliminados`, 'success');
+  else toast('No había ingresos antiguos que borrar', 'warning');
 }
 
 // Recordatorio semanal de respaldo para las compras (independiente del de ventas).
@@ -2280,7 +2511,7 @@ function maybeShowCompraReminder(){
   }
   el.style.display = 'block';
   el.innerHTML = `
-    <span>💾 Hace más de una semana que no haces un respaldo de las compras. Es recomendable exportarlas para que el registro no crezca demasiado.</span>
+    <span>💾 Hace más de una semana que no haces un respaldo de los ingresos. Es recomendable exportarlos para que el registro no crezca demasiado.</span>
     <button class="btn btn-secondary btn-sm" id="btnCompraExportNow">📤 Exportar ahora</button>
     <button class="btn btn-secondary btn-sm" id="btnCompraDismiss">Omitir</button>
   `;
@@ -2288,15 +2519,15 @@ function maybeShowCompraReminder(){
 
 function exportComprasCSV(){
   if(db.compras.length === 0){
-    toast('No hay compras para exportar', 'error');
+    toast('No hay ingresos para exportar', 'error');
     return;
   }
-  const header = ['FECHA','CODIGO','PRODUCTO','CANTIDAD','PRECIO UNITARIO','TOTAL','METODO DE PAGO'];
+  const header = ['FECHA','CODIGO','PRODUCTO','PROVEEDOR','CANTIDAD','PRECIO UNITARIO','TOTAL','METODO DE PAGO','OBSERVACIONES'];
   const rows = db.compras.map(c => [
-    c.fecha, c.codigo, c.nombre, csvNumber(c.cantidad), csvNumber(c.precioUnitario, 2), csvNumber(c.total, 2), c.metodoPago
+    c.fecha, c.codigo, c.nombre, c.proveedor || '', csvNumber(c.cantidad), csvNumber(c.precioUnitario, 2), csvNumber(c.total, 2), c.metodoPago, c.observaciones || ''
   ]);
-  downloadCSV(`stockferre_compras_${todayISO().slice(0,10)}.csv`, header, rows);
-  toast('Compras exportadas', 'success');
+  downloadCSV(`stockferre_ingresos_${todayISO().slice(0,10)}.csv`, header, rows);
+  toast('Ingresos exportados', 'success');
 }
 
 // Importa compras desde un CSV (un respaldo exportado antes). Se agregan como
@@ -2316,10 +2547,12 @@ function importComprasCSV(file){
         fecha: headers.indexOf('FECHA'),
         codigo: headers.indexOf('CODIGO'),
         nombre: headers.findIndex(h => h.includes('PRODUCTO') || h.includes('DESCRIPCION')),
+        proveedor: headers.indexOf('PROVEEDOR'),
         cantidad: headers.indexOf('CANTIDAD'),
         precioUnitario: headers.findIndex(h => h.includes('PRECIO') && h.includes('UNITARIO')),
         total: headers.indexOf('TOTAL'),
-        metodoPago: headers.findIndex(h => h.includes('PAGO'))
+        metodoPago: headers.findIndex(h => h.includes('PAGO')),
+        observaciones: headers.findIndex(h => h.includes('OBSERVACION') || h.includes('NOTA'))
       };
       if(idx.codigo === -1 || idx.nombre === -1 || idx.total === -1){
         toast('El CSV debe tener al menos columnas CODIGO, PRODUCTO y TOTAL', 'error');
@@ -2333,22 +2566,29 @@ function importComprasCSV(file){
         const cantidad = idx.cantidad > -1 ? (parseFloat(String(r[idx.cantidad]).replace(',','.')) || 1) : 1;
         const total = parsePrecio(r[idx.total]);
         const precioUnitario = idx.precioUnitario > -1 ? parsePrecio(r[idx.precioUnitario]) : (cantidad > 0 ? total / cantidad : 0);
+        const codigo = String(r[idx.codigo] || '').trim() || 'OTRO';
+        const proveedor = idx.proveedor > -1 ? String(r[idx.proveedor] || '').trim() : '';
+        const observaciones = idx.observaciones > -1 ? String(r[idx.observaciones] || '').trim() : '';
+        const p = getProductoByCodigo(codigo);
         db.compras.push({
           id: uid('compra'),
-          codigo: String(r[idx.codigo] || '').trim() || 'OTRO',
+          codigo,
           nombre,
           cantidad,
           precioUnitario,
           total,
           metodoPago: idx.metodoPago > -1 ? (String(r[idx.metodoPago]||'').toLowerCase().includes('qr') ? 'qr' : 'efectivo') : 'efectivo',
-          fecha: idx.fecha > -1 ? (r[idx.fecha] || todayISO()) : todayISO()
+          fecha: idx.fecha > -1 ? (r[idx.fecha] || todayISO()) : todayISO(),
+          proveedor,
+          observaciones,
+          productoId: p ? p.id : null
         });
         importadas++;
       }
       db.compras.sort((a,b)=> new Date(b.fecha) - new Date(a.fecha));
       saveDB();
       renderCompras();
-      toast(`Compras importadas: ${importadas} (no se modificó el stock)`, 'success');
+      toast(`Ingresos importados: ${importadas} (no se modificó el stock)`, 'success');
     }catch(err){
       console.error(err);
       toast('No se pudo leer el archivo CSV. Verifica el formato.', 'error');
@@ -3113,6 +3353,8 @@ function openCompraScan(){
   scanContext = 'compra';
   moveScannerBlockTo('compraScannerBlockPlaceholder');
   document.getElementById('compraScanResultBox').innerHTML = '';
+  const manualInput = document.getElementById('manualCodeInput');
+  if(manualInput) manualInput.value = '';
   openModal('modalCompraScan');
   if(!ocrActive && !zxingLiveActive) startActiveScanner();
 }
@@ -3123,8 +3365,14 @@ function closeCompraScan(){
   closeAllModals();
 }
 
+// Al detectar un código (escaneado con la cámara o escrito a mano) en la
+// pestaña de Ingresos, se va DIRECTAMENTE al formulario "Registrar ingreso"
+// sin pasar por la tarjeta de resultado: se cierra el escáner y se abre el
+// formulario ya con la descripción, el último proveedor y la fecha elegida.
 function handleCompraScan(codigo){
-  renderScanResultInto('compraScanResultBox', codigo, 'compra');
+  const p = getProductoByCodigo(codigo);
+  closeCompraScan();
+  openCompraDetalleForm(p, codigo);
 }
 
 // Abre el recuadro "Registrar compra". Si el producto NO existe (producto==null)
@@ -3136,6 +3384,8 @@ function openCompraDetalleForm(producto, codigo){
   document.getElementById('cNombreDisplay').textContent = producto ? producto.nombre : 'Producto nuevo (se creará al guardar)';
   document.getElementById('cCantidad').value = 1;
   document.getElementById('cPrecioCompra').value = producto ? (producto.precioCompra || '') : '';
+  document.getElementById('cProveedor').value = getLastCompraProveedor();
+  document.getElementById('cObservaciones').value = '';
   document.getElementById('cFecha').value = getLastCompraFecha();
   document.getElementById('cMarca').value = producto ? (producto.marca || '') : '';
   document.getElementById('cPrecioVenta').value = producto ? (producto.precioVenta || '') : '';
@@ -3179,6 +3429,16 @@ function getLastCompraFecha(){
 }
 function setLastCompraFecha(dateStr){
   try{ localStorage.setItem(COMPRA_FECHA_KEY + currentModo, dateStr || ''); }catch(e){}
+}
+
+// El último proveedor usado se recuerda por modo (como la fecha) para agilizar
+// el registro de varios recibos seguidos del mismo distribuidor.
+const COMPRA_PROVEEDOR_KEY = 'stockferre_compra_proveedor_v1_';
+function getLastCompraProveedor(){
+  try{ return localStorage.getItem(COMPRA_PROVEEDOR_KEY + currentModo) || ''; }catch(e){ return ''; }
+}
+function setLastCompraProveedor(val){
+  try{ localStorage.setItem(COMPRA_PROVEEDOR_KEY + currentModo, val || ''); }catch(e){}
 }
 
 function handleCompraSubmit(e){
@@ -3240,6 +3500,9 @@ function handleCompraSubmit(e){
 
   const fechaElegida = document.getElementById('cFecha').value;
   setLastCompraFecha(fechaElegida);
+  const proveedor = document.getElementById('cProveedor').value.trim();
+  const observaciones = document.getElementById('cObservaciones').value.trim();
+  setLastCompraProveedor(proveedor);
   db.compras.unshift({
     id: uid('compra'),
     codigo,
@@ -3248,7 +3511,10 @@ function handleCompraSubmit(e){
     precioUnitario: precioCompra,
     total: precioCompra * cantidad,
     metodoPago: document.getElementById('cMetodoPago').value,
-    fecha: compraFechaFromInput(fechaElegida)
+    fecha: compraFechaFromInput(fechaElegida),
+    proveedor,
+    observaciones,
+    productoId: p.id
   });
   db.compras.sort((a,b)=> new Date(b.fecha) - new Date(a.fecha));
 
@@ -3259,7 +3525,7 @@ function handleCompraSubmit(e){
   renderInventario();
   renderProductos();
   closeAllModals();
-  toast(`Compra registrada: ${nombre} → stock ${p.stock}`, 'success');
+  toast(`Ingreso registrado: ${nombre} → stock ${p.stock}`, 'success');
 
   // Sigue escaneando el siguiente producto para registrar más compras seguido
   openCompraScan();
@@ -3339,10 +3605,13 @@ function exportProductosCSV(){
     toast('No hay productos para exportar', 'error');
     return;
   }
-  const header = ['CODIGO','CODIGO DE BARRAS','DESCRIPCION','MARCA','CATEGORIA','PRECIO COMPRA','PRECIO MARCA','PRECIO VENTA','STOCK'];
+  const header = ['CODIGO','CODIGO DE BARRAS','DESCRIPCION','MARCA','CATEGORIA','PRECIO COMPRA','PRECIO MARCA','PRECIO VENTA','STOCK','STOCK MIN','CARACTERISTICAS','IMAGEN'];
   const rows = db.productos.map(p => [
     p.codigo, p.codigoBarras||'', p.nombre, p.marca||'', p.categoria||'',
-    csvNumber(p.precioCompra, 2), csvNumber(p.precioMarca, 2), csvNumber(p.precioVenta, 2), csvNumber(p.stock)
+    csvNumber(p.precioCompra, 2), csvNumber(p.precioMarca, 2), csvNumber(p.precioVenta, 2), csvNumber(p.stock),
+    csvNumber(p.stockMin),
+    p.caracteristicas || '',
+    getImage(p.id)
   ]);
   downloadCSV(`stockferre_productos_${todayISO().slice(0,10)}.csv`, header, rows);
   toast('Productos exportados', 'success');
@@ -3539,12 +3808,19 @@ function renderProductos(){
 
   const tbody = document.querySelector('#productsTable tbody');
   if(list.length === 0){
-    tbody.innerHTML = `<tr class="empty-row"><td colspan="${currentRole === 'guest' ? 10 : 11}">No hay productos que coincidan.</td></tr>`;
+    tbody.innerHTML = `<tr class="empty-row"><td colspan="${currentRole === 'guest' ? 11 : 12}">No hay productos que coincidan.</td></tr>`;
   }else{
     tbody.innerHTML = list.map(p => {
       const bajo = (p.stockMin || 0) > 0 && p.stock <= p.stockMin;
+      const img = getImage(p.id);
       return `
-      <tr>
+      <tr data-product-id="${p.id}">
+        <td class="prod-img-cell">
+          <div class="prod-img-wrap">
+            ${img ? `<img src="${img}" class="prod-thumb" alt="" data-img-product="${p.id}">` : `<div class="prod-thumb prod-thumb-empty">🖼️</div>`}
+            ${currentRole === 'guest' ? '' : `<button class="btn btn-sm btn-secondary prod-img-btn" data-img-product="${p.id}">${img ? 'Cambiar' : 'Añadir imagen'}</button>`}
+          </div>
+        </td>
         <td><strong>${escapeHtml(p.codigo)}</strong></td>
         <td>${escapeHtml(p.codigoBarras || '-')}</td>
         <td>${escapeHtml(p.nombre)}</td>
@@ -3665,6 +3941,135 @@ function handleProductSubmit(e){
 }
 
 /* -------------------------------------------------------------------------
+   7b. IMAGEN DEL PRODUCTO (local, no Firebase)
+   ------------------------------------------------------------------------- */
+let imgTargetId = null;
+let detTargetId = null; // id del producto abierto en la ventana de características
+
+// Muestra la ventana con las características del producto. Los campos que se
+// ven aquí coinciden con las columnas del CSV exportar/importar.
+function openProductDetails(productId){
+  const p = getProductoById(productId);
+  if(!p) return;
+  detTargetId = productId;
+  const img = getImage(p.id);
+  const detImg = document.getElementById('detImg');
+  if(img){
+    detImg.src = img;
+    detImg.style.display = 'block';
+  }else{
+    detImg.removeAttribute('src');
+    detImg.style.display = 'none';
+  }
+  document.getElementById('detCodigo').textContent = p.codigo || '-';
+  document.getElementById('detBarras').textContent = p.codigoBarras || '-';
+  document.getElementById('detNombre').textContent = p.nombre || '-';
+  document.getElementById('detMarca').textContent = p.marca || '-';
+  document.getElementById('detCategoria').textContent = p.categoria || '-';
+  document.getElementById('detPCompra').textContent = fmtMoney(p.precioCompra);
+  document.getElementById('detPMarca').textContent = fmtMoney(p.precioMarca);
+  document.getElementById('detPVenta').textContent = fmtMoney(p.precioVenta);
+  document.getElementById('detStock').textContent = p.stock;
+  document.getElementById('detStockMin').textContent = p.stockMin || 0;
+  document.getElementById('detCaracteristicas').value = p.caracteristicas || '';
+  // Los invitados no tienen acceso a Ingresos, así que se les oculta el botón.
+  const detVerIngresos = document.getElementById('btnDetVerIngresos');
+  if(detVerIngresos) detVerIngresos.style.display = currentRole === 'guest' ? 'none' : '';
+  openModal('modalProductoDetalle');
+}
+
+// Guarda las características escritas en el recuadro blanco de la ventana del producto.
+function saveDetCaracteristicas(){
+  const p = getProductoById(detTargetId);
+  if(!p){ toast('No se pudo guardar', 'error'); return; }
+  p.caracteristicas = document.getElementById('detCaracteristicas').value;
+  touchProducto(p);
+  saveDB();
+  syncProductoDoc(p); // mantiene el documento del producto en la nube al día
+  renderProductos();
+  toast('Características guardadas', 'success');
+}
+
+function openImageModal(productId){
+  const p = getProductoById(productId);
+  if(!p) return;
+  imgTargetId = productId;
+  document.getElementById('imgProductName').textContent = p.nombre;
+  document.getElementById('imgProductCode').textContent = p.codigo + (p.codigoBarras ? ' · ' + p.codigoBarras : '');
+  const img = getImage(productId);
+  const preview = document.getElementById('imgPreview');
+  const removeBtn = document.getElementById('btnImgRemove');
+  if(img){
+    preview.src = img;
+    preview.style.display = 'block';
+    removeBtn.style.display = '';
+  }else{
+    preview.removeAttribute('src');
+    preview.style.display = 'none';
+    removeBtn.style.display = 'none';
+  }
+  document.getElementById('imgUrlRow').style.display = 'none';
+  document.getElementById('imgUrlInput').value = '';
+  document.getElementById('btnImgLoadUrl').disabled = false;
+  openModal('modalImagen');
+}
+
+function handleImgFile(file){
+  if(!file || !imgTargetId) return;
+  compressImage(file).then(data=>{
+    return saveImageLocal(imgTargetId, data);
+  }).then(ok=>{
+    if(ok){
+      closeAllModals();
+      renderProductos();
+      toast('Imagen guardada en este dispositivo', 'success');
+    }else{
+      toast('No se pudo guardar la imagen', 'error');
+    }
+  }).catch(err=>{
+    console.error(err);
+    toast('No se pudo leer la imagen', 'error');
+  });
+}
+
+function handleImgUrl(){
+  const url = document.getElementById('imgUrlInput').value.trim();
+  if(!url || !imgTargetId){ toast('Escribe una URL válida', 'error'); return; }
+  document.getElementById('btnImgLoadUrl').disabled = true;
+  fetchImageAsDataURL(url).then(data=>{
+    return saveImageLocal(imgTargetId, data);
+  }).then(ok=>{
+    document.getElementById('btnImgLoadUrl').disabled = false;
+    if(ok){
+      closeAllModals();
+      renderProductos();
+      toast('Imagen guardada en este dispositivo', 'success');
+    }else{
+      toast('No se pudo guardar la imagen', 'error');
+    }
+  }).catch(err=>{
+    document.getElementById('btnImgLoadUrl').disabled = false;
+    console.error(err);
+    toast('No se pudo cargar la imagen desde esa URL', 'error');
+  });
+}
+
+function removeCurrentImage(){
+  if(!imgTargetId) return;
+  const nombre = document.getElementById('imgProductName').textContent;
+  confirmDialog('Quitar imagen', `¿Quitar la imagen de "${nombre}"?`, ()=>{
+    removeImageLocal(imgTargetId).then(ok=>{
+      if(ok){
+        renderProductos();
+        toast('Imagen quitada', 'success');
+      }else{
+        toast('No se pudo quitar la imagen', 'error');
+      }
+    });
+  });
+}
+
+/* -------------------------------------------------------------------------
    8. IMPORTAR CSV DE PRODUCTOS
    ------------------------------------------------------------------------- */
 
@@ -3751,7 +4156,11 @@ function importProductsCSV(file){
         // Acepta "PRECIO COMPRA", "PRECIO DE COMPRA", "PRECIO_COMPRA", etc.
         precioCompra: headers.findIndex(h => h.includes('PRECIO') && h.includes('COMPRA')),
         precioMarca: headers.findIndex(h => h.includes('PRECIO') && h.includes('MARCA') && !h.includes('BARRA')),
-        precioVenta: headers.findIndex(h => h.includes('PRECIO') && h.includes('VENTA'))
+        precioVenta: headers.findIndex(h => h.includes('PRECIO') && h.includes('VENTA')),
+        stock: headers.findIndex(h => h.includes('STOCK') && !h.includes('MIN')),
+        stockMin: headers.findIndex(h => h.includes('STOCK') && h.includes('MIN')),
+        caracteristicas: headers.findIndex(h => h.includes('CARACTERISTICA') || h.includes('OBSERVACION') || h.includes('NOTA')),
+        imagen: headers.findIndex(h => h.includes('IMAGEN') || h.includes('FOTO'))
       };
       if(idx.codigo === -1 || idx.nombre === -1){
         toast('El CSV debe tener al menos columnas CODIGO y DESCRIPCION', 'error');
@@ -3774,9 +4183,13 @@ function importProductsCSV(file){
         const precioCompra = idx.precioCompra > -1 ? parsePrecio(r[idx.precioCompra]) : 0;
         const precioMarca = idx.precioMarca > -1 ? parsePrecio(r[idx.precioMarca]) : 0;
         const precioVenta = idx.precioVenta > -1 ? parsePrecio(r[idx.precioVenta]) : 0;
+        const stockVal = idx.stock > -1 ? parsePrecio(r[idx.stock]) : null;
+        const stockMinVal = idx.stockMin > -1 ? parsePrecio(r[idx.stockMin]) : null;
+        const caracteristicas = idx.caracteristicas > -1 ? String(r[idx.caracteristicas] || '').trim() : '';
 
         if(categoria) upsertCategoria(categoria);
 
+        let productoId = null;
         const existing = getProductoByCodigo(codigo);
         if(existing){
           existing.nombre = nombre || existing.nombre;
@@ -3786,7 +4199,10 @@ function importProductsCSV(file){
           existing.precioCompra = precioCompra || existing.precioCompra;
           existing.precioMarca = precioMarca || existing.precioMarca;
           existing.precioVenta = precioVenta || existing.precioVenta;
+          if(stockMinVal !== null) existing.stockMin = stockMinVal;
+          if(caracteristicas) existing.caracteristicas = caracteristicas;
           touchProducto(existing);
+          productoId = existing.id;
           importadosList.push(existing);
           actualizados++;
         }else{
@@ -3794,13 +4210,24 @@ function importProductsCSV(file){
             id: uid(),
             codigo, codigoBarras, nombre, marca, categoria,
             precioCompra, precioMarca, precioVenta,
+            caracteristicas,
             stock: 0,
+            stockMin: stockMinVal !== null ? stockMinVal : 0,
             fechaCreacion: todayISO(),
             _updatedAt: Date.now()
           };
           db.productos.push(p);
+          productoId = p.id;
           importadosList.push(p);
           creados++;
+        }
+        // Si el CSV trae una columna IMAGEN, se guarda la foto en este
+        // dispositivo (local, no Firebase).
+        if(idx.imagen > -1 && productoId){
+          const imgVal = String(r[idx.imagen] || '').trim();
+          if(imgVal && (imgVal.startsWith('data:') || /^https?:\/\//i.test(imgVal))){
+            saveImageLocal(productoId, imgVal);
+          }
         }
       }
       saveDB();
@@ -3822,7 +4249,8 @@ function importProductsCSV(file){
    ------------------------------------------------------------------------- */
 
 function exportBackup(){
-  const blob = new Blob([JSON.stringify(db, null, 2)], { type: 'application/json' });
+  const data = Object.assign({}, db, { imagenes: imgCache });
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
@@ -3852,6 +4280,12 @@ function importBackup(file){
         });
         saveDB();
         syncProductoDocs(db.productos, currentModo); // los productos restaurados también van a la nube
+        // Restaura las imágenes locales (solo de este dispositivo)
+        if(parsed.imagenes && typeof parsed.imagenes === 'object'){
+          Promise.all(
+            Object.keys(parsed.imagenes).map(id => saveImageLocal(id, parsed.imagenes[id]))
+          ).then(()=> loadImagesForModo(currentModo));
+        }
         renderProductos();
         renderCategorias();
         toast('Backup restaurado correctamente', 'success');
@@ -3870,6 +4304,7 @@ function factoryReset(){
     invUpdates = {};
     saveInvUpdates();
     saveDB();
+    clearAllImages(); // borra también las imágenes locales de ambos modos
     renderProductos();
     renderCategorias();
     renderInventario();
@@ -3890,7 +4325,7 @@ const VIEW_TITLES = {
   ventas: 'Ventas',
   topventas: 'Productos más vendidos',
   pedidos: 'Pedidos',
-  compras: 'Compras',
+  compras: 'Ingresos',
   finanzas: 'Estado Financiero',
   retiros: 'Pagos',
   deudas: 'Deudas',
@@ -4016,6 +4451,9 @@ function syncNotifSwitchUI(){
 // Modo pro: recuerda en este dispositivo si el usuario lo dejó activado.
 // El tema dorado (body.gold-theme) es independiente: solo cambia los colores
 // y sus sonidos, no las pestañas del modo pro.
+// El destello (barrido de brillo de los botones) solo se muestra en el momento
+// de ACTIVAR el modo pro con el interruptor, nunca al abrir la app con el modo
+// pro ya activado (para eso está body.pro-flash-done).
 function syncProModeUI(){
   let pro = false;
   let gold = false;
@@ -4027,7 +4465,12 @@ function syncProModeUI(){
   if(ts) ts.checked = gold;
   document.body.classList.toggle('pro-mode', pro);
   document.body.classList.toggle('gold-theme', gold);
-  if(pro) revealProOnlyItems(false); // al cargar: demora en cascada, sin sonido
+  if(pro){
+    // Al abrir la app con el modo pro ya activado las pestañas aparecen con un
+    // fade suave, sin el destello (el destello solo ocurre al activarlo).
+    document.body.classList.add('pro-flash-done');
+    revealProOnlyItems(false); // al cargar: demora en cascada, sin sonido
+  }
 }
 
 // Activa/desactiva el MODO PRO (desbloquea las pestañas exclusivas y enciende
@@ -4036,6 +4479,10 @@ function syncProModeUI(){
 function applyProMode(on){
   document.body.classList.toggle('pro-mode', on);
   document.body.classList.toggle('gold-theme', on);
+  if(on){
+    // Al activar el modo pro se permite el destello UNA vez en este momento.
+    document.body.classList.remove('pro-flash-done');
+  }
   const proSw = document.getElementById('proModeSwitch');
   const themeSw = document.getElementById('themeSwitch');
   if(proSw) proSw.checked = on;
@@ -4048,7 +4495,7 @@ function applyProMode(on){
   }
   if(on){
     playProModeSound();       // sonido de revelación del modo pro
-    revealProOnlyItems(true); // pestañas pro salen una por una, con sonido
+    revealProOnlyItems(true); // pestañas pro salen una por una, con destello y sonido
     const opts = document.getElementById('sidebarOptions');
     if(opts) opts.classList.remove('open'); // cerrar Opciones al activar pro
     showView('topventas');    // ir a Más vendidos al activar el modo pro
@@ -4174,6 +4621,8 @@ function switchModoData(modo){
   updatePasswordButtonLabel();
   syncRememberSwitchUI();
   syncNotifSwitchUI();
+  // Carga las imágenes locales de este modo (IndexedDB, no Firebase)
+  loadImagesForModo(modo).then(()=> rerenderCurrentView());
   if(modo === 'invitado') connectGuestFirebase();
   else connectFirebase();
 }
@@ -5214,8 +5663,39 @@ function setupEventListeners(){
   document.querySelector('#productsTable tbody').addEventListener('click', (e)=>{
     const editId = e.target.closest('[data-edit-product]')?.dataset.editProduct;
     const delId = e.target.closest('[data-delete-product]')?.dataset.deleteProduct;
+    const imgId = e.target.closest('[data-img-product]')?.dataset.imgProduct;
     if(editId) openProductModal(getProductoById(editId));
     if(delId) deleteProducto(delId);
+    if(imgId) openImageModal(imgId);
+    // Clic en cualquier parte de la fila (que no sea un botón/imagen) abre la
+    // ventana de características del producto.
+    if(!editId && !delId && !imgId){
+      const row = e.target.closest('tr[data-product-id]');
+      if(row) openProductDetails(row.dataset.productId);
+    }
+  });
+
+  // Imagen del producto (local, no Firebase): tomar foto / subir / web
+  document.getElementById('btnImgTakePhoto').addEventListener('click', ()=> document.getElementById('fileImgCamera').click());
+  document.getElementById('btnImgUploadDevice').addEventListener('click', ()=> document.getElementById('fileImgGallery').click());
+  document.getElementById('btnImgToggleUrl').addEventListener('click', ()=>{
+    const row = document.getElementById('imgUrlRow');
+    row.style.display = row.style.display === 'none' ? '' : 'none';
+  });
+  document.getElementById('btnImgLoadUrl').addEventListener('click', handleImgUrl);
+  document.getElementById('imgUrlInput').addEventListener('keydown', (e)=>{
+    if(e.key === 'Enter'){ e.preventDefault(); handleImgUrl(); }
+  });
+  document.getElementById('btnImgRemove').addEventListener('click', removeCurrentImage);
+  document.getElementById('btnDetSaveCaract').addEventListener('click', saveDetCaracteristicas);
+  document.getElementById('btnDetVerIngresos').addEventListener('click', ()=> openProductIngresos(detTargetId));
+  document.getElementById('fileImgCamera').addEventListener('change', (e)=>{
+    if(e.target.files[0]) handleImgFile(e.target.files[0]);
+    e.target.value = '';
+  });
+  document.getElementById('fileImgGallery').addEventListener('change', (e)=>{
+    if(e.target.files[0]) handleImgFile(e.target.files[0]);
+    e.target.value = '';
   });
 
   // Categorías
@@ -5318,7 +5798,7 @@ function setupEventListeners(){
     e.target.value = '';
   });
   document.getElementById('btnPurgeCompras').addEventListener('click', ()=>{
-    confirmDialog('Borrar compras antiguas', '¿Borrar las compras de hace más de 3 meses? Se recomienda exportarlas antes con "Exportar CSV". El stock de los productos no se modifica.', ()=>{
+    confirmDialog('Borrar ingresos antiguos', '¿Borrar los ingresos de hace más de 3 meses? Se recomienda exportarlos antes con "Exportar CSV". El stock de los productos no se modifica.', ()=>{
       purgeComprasAntiguas();
     });
   });
@@ -5330,7 +5810,11 @@ function setupEventListeners(){
     renderCompras();
   });
   document.getElementById('compraDateInput').addEventListener('change', (e)=>{
-    compraDateFilter = e.target.value || 'hoy';
+    compraDateFilter = e.target.value || 'todas';
+    renderCompras();
+  });
+  document.getElementById('compraSearch').addEventListener('input', (e)=>{
+    compraSearch = e.target.value;
     renderCompras();
   });
   document.getElementById('exportCompraReminder').addEventListener('click', (e)=>{
@@ -5356,12 +5840,20 @@ function setupEventListeners(){
       document.getElementById('cMetodoPago').value = btn.dataset.compraPayment;
     });
   });
+  // Lista de productos en la pestaña Ingresos: al hacer clic se abre el historial.
   document.querySelector('#comprasTable tbody').addEventListener('click', (e)=>{
+    const cod = e.target.closest('[data-view-compra-history]')?.dataset.viewCompraHistory;
+    const row = e.target.closest('tr[data-compra-prod]');
+    if(cod) openCompraHistorial(cod);
+    else if(row) openCompraHistorial(row.dataset.compraProd);
+  });
+  // Historial de ingresos del producto: botón para eliminar un ingreso.
+  document.querySelector('#histComprasTable tbody').addEventListener('click', (e)=>{
     const delId = e.target.closest('[data-delete-compra]')?.dataset.deleteCompra;
     if(!delId) return;
     const c = db.compras.find(x => x.id === delId);
-    const nombre = c ? (c.nombre || c.codigo) : 'esta compra';
-    ventaBorrarDialog('Eliminar compra', `¿Eliminar "${nombre}"?\n\n¿Mantener el inventario?\n• Sí = el inventario NO se modifica.\n• No = la cantidad comprada se quita del stock.`,
+    const nombre = c ? (c.nombre || c.codigo) : 'este ingreso';
+    ventaBorrarDialog('Eliminar ingreso', `¿Eliminar "${nombre}"?\n\n¿Mantener el inventario?\n• Sí = el inventario NO se modifica.\n• No = la cantidad comprada se quita del stock.`,
       ()=> deleteCompra(delId, true),
       ()=> deleteCompra(delId, false));
   });
@@ -5541,6 +6033,7 @@ function init(){
   restoreModo(); // decide qué modo/rol estaba activo ANTES de cargar datos
   loadDB();
   loadInvUpdates();
+  loadImagesForModo(currentModo).then(()=> rerenderCurrentView()); // imágenes locales de este dispositivo
   migrateLegacyPasswords(); // sube contraseñas viejas para sincronizarlas
   setupEventListeners();
   syncRememberSwitchUI();

@@ -28,7 +28,7 @@
     <button class="nav-item" data-view="ventas"><span>💰</span> Ventas</button>
     <button class="nav-item nav-pro-only" data-view="topventas"><span>🏆</span> Más vendidos</button>
     <button class="nav-item" data-view="pedidos"><span>📋</span> Pedidos</button>
-    <button class="nav-item" data-view="compras"><span>🛒</span> Compras</button>
+    <button class="nav-item" data-view="compras"><span>🛒</span> Ingresos</button>
     <button class="nav-item nav-pro-only" data-view="gastos"><span>🧾</span> Gastos del día</button>
     <button class="nav-item" data-view="inventario"><span>📋</span> Inventario</button>
     <button class="nav-item nav-pro-only" data-view="finanzas"><span>📊</span> Estado Financiero</button>
@@ -170,7 +170,7 @@
         <table class="table" id="productsTable">
           <thead>
             <tr>
-              <th>Código</th><th>Cód. Barras</th><th>Descripción</th><th>Marca</th><th>Categoría</th>
+              <th>Imagen</th><th>Código</th><th>Cód. Barras</th><th>Descripción</th><th>Marca</th><th>Categoría</th>
               <th class="price-guest-hide">P. Compra</th><th class="price-guest-hide">P. Marca</th><th>P. Venta</th><th>Stock</th><th>Stock mín.</th><th class="admin-only">Acciones</th>
             </tr>
           </thead>
@@ -219,10 +219,10 @@
       </div>
     </section>
 
-    <!-- ---------- COMPRAS (solo dueño) ---------- -->
+    <!-- ---------- INGRESOS (compras de productos, solo dueño) ---------- -->
     <section class="view" id="view-compras">
       <div class="toolbar">
-        <button class="btn btn-primary" id="btnNuevaCompra">➕ Nueva compra</button>
+        <button class="btn btn-primary" id="btnNuevaCompra">➕ Nuevo ingreso</button>
         <button class="btn btn-secondary" id="btnExportCompras">📤 Exportar CSV</button>
         <button class="btn btn-secondary" id="btnImportCompras">📥 Importar CSV</button>
         <button class="btn btn-secondary" id="btnPurgeCompras">🧹 Borrar antiguas</button>
@@ -231,18 +231,20 @@
       <div class="ventas-dates" id="comprasDates">
         <button class="compra-date-chip active" data-compra-date="hoy">Hoy</button>
         <button class="compra-date-chip" data-compra-date="ayer">Ayer</button>
-        <button class="compra-date-chip" data-compra-date="anteayer">Anteayer</button>
-        <input type="date" id="compraDateInput" class="input venta-date-picker" title="Ver compras de otra fecha">
+        <input type="date" id="compraDateInput" class="input venta-date-picker" title="Ver ingresos de otra fecha">
         <button class="compra-date-chip" data-compra-date="todas">Todas</button>
       </div>
+      <div style="margin:10px 0;">
+        <input type="text" id="compraSearch" class="input" placeholder="🔍 Buscar por código o descripción...">
+      </div>
       <div class="export-reminder" id="exportCompraReminder" style="display:none;"></div>
-      <p class="hint" id="comprasSummary" style="margin-bottom:12px;">0 compras</p>
+      <p class="hint" id="comprasSummary" style="margin-bottom:12px;"></p>
       <div class="table-wrap">
         <table class="table" id="comprasTable">
           <thead>
             <tr>
-              <th>Fecha</th><th>Código</th><th>Producto</th><th>Cant.</th>
-              <th>P. Compra</th><th>Total</th><th>Pago</th><th>Acciones</th>
+              <th>Código</th><th>Producto</th><th>Ingresos</th><th>Unidades</th>
+              <th>Último precio</th><th>Última fecha</th><th>Total invertido</th><th>Historial</th>
             </tr>
           </thead>
           <tbody></tbody>
@@ -524,6 +526,73 @@
   </div>
 </div>
 
+<!-- Modal: Imagen del producto (se guarda solo en este dispositivo) -->
+<div class="modal modal-sm" id="modalImagen">
+  <div class="modal-header">
+    <h3>🖼️ Imagen del producto</h3>
+    <button class="modal-close" data-close-modal>✕</button>
+  </div>
+  <div class="modal-body">
+    <div class="product-info-box visible">
+      📦 <strong id="imgProductName"></strong><br>
+      <span id="imgProductCode" style="font-size:12px;"></span>
+    </div>
+    <div style="text-align:center; margin:10px 0;">
+      <img id="imgPreview" style="max-width:200px; max-height:200px; border-radius:10px; display:none; border:1px solid var(--border);">
+    </div>
+    <div class="scan-mode-tabs">
+      <button type="button" class="scan-tab" id="btnImgTakePhoto">📷 Tomar foto</button>
+      <button type="button" class="scan-tab" id="btnImgUploadDevice">📁 Del dispositivo</button>
+      <button type="button" class="scan-tab" id="btnImgToggleUrl">🌐 Desde la web</button>
+    </div>
+    <div id="imgUrlRow" style="margin-top:10px; display:none;">
+      <input type="text" id="imgUrlInput" class="input" placeholder="Pega la URL de la imagen (https://...)" autocomplete="off">
+      <button type="button" class="btn btn-primary" id="btnImgLoadUrl" style="margin-top:6px;">Cargar imagen</button>
+    </div>
+    <div class="form-actions" style="justify-content:space-between; margin-top:14px;">
+      <button type="button" class="btn btn-danger" id="btnImgRemove" style="display:none;">🗑️ Quitar imagen</button>
+      <button type="button" class="btn btn-secondary" data-close-modal>Cerrar</button>
+    </div>
+    <p class="hint" style="margin-top:12px; margin-bottom:0;">La imagen se guarda solo en este dispositivo, no ocupa espacio en Firebase. La foto se reduce automáticamente para que no pese.</p>
+  </div>
+</div>
+
+<!-- Modal: Características del producto (al hacer clic en un producto) -->
+<div class="modal modal-sm" id="modalProductoDetalle">
+  <div class="modal-header">
+    <h3>📋 Características del producto</h3>
+    <button class="modal-close" data-close-modal>✕</button>
+  </div>
+  <div class="modal-body">
+    <div style="text-align:center; margin-bottom:12px;">
+      <img id="detImg" style="max-width:160px; max-height:160px; border-radius:10px; border:1px solid var(--border); display:none;">
+    </div>
+    <div class="detail-grid">
+      <div class="detail-row"><span class="detail-label">Código</span><span id="detCodigo" class="detail-value"></span></div>
+      <div class="detail-row"><span class="detail-label">Cód. de barras</span><span id="detBarras" class="detail-value"></span></div>
+      <div class="detail-row"><span class="detail-label">Descripción</span><span id="detNombre" class="detail-value"></span></div>
+      <div class="detail-row"><span class="detail-label">Marca</span><span id="detMarca" class="detail-value"></span></div>
+      <div class="detail-row"><span class="detail-label">Categoría</span><span id="detCategoria" class="detail-value"></span></div>
+      <div class="detail-row price-guest-hide"><span class="detail-label">Precio de compra</span><span id="detPCompra" class="detail-value"></span></div>
+      <div class="detail-row price-guest-hide"><span class="detail-label">Precio de marca</span><span id="detPMarca" class="detail-value"></span></div>
+      <div class="detail-row"><span class="detail-label">Precio de venta</span><span id="detPVenta" class="detail-value"></span></div>
+      <div class="detail-row"><span class="detail-label">Stock</span><span id="detStock" class="detail-value"></span></div>
+      <div class="detail-row"><span class="detail-label">Stock mín.</span><span id="detStockMin" class="detail-value"></span></div>
+    </div>
+    <div class="detail-block">
+      <span class="detail-label">Características</span>
+      <textarea id="detCaracteristicas" rows="5" placeholder="Escribe aquí las características del producto..." style="background:var(--bg); color:var(--text);"></textarea>
+    </div>
+    <div class="form-actions" style="margin-top:16px; display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap;">
+      <button type="button" class="btn btn-primary" id="btnDetSaveCaract">💾 Guardar</button>
+      <div style="display:flex; gap:8px; align-items:center;">
+        <button type="button" class="btn btn-secondary" id="btnDetVerIngresos">📊 Ver ingresos</button>
+        <button type="button" class="btn btn-secondary" data-close-modal>Cerrar</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- Sale (Venta) Modal -->
 <div class="modal modal-sm" id="modalVenta">
   <div class="modal-header">
@@ -624,7 +693,7 @@
 <!-- Modal: Escáner de Compras (reutiliza el mismo bloque de escáner) -->
 <div class="modal" id="modalCompraScan">
   <div class="modal-header">
-    <h3>🛒 Registrar compra</h3>
+    <h3>🛒 Registrar ingreso</h3>
     <button class="modal-close" data-close-modal id="btnCloseCompraScan">✕</button>
   </div>
   <div class="modal-body">
@@ -634,10 +703,10 @@
   </div>
 </div>
 
-<!-- Modal: Detalle de la compra (cantidad, precios y actualización opcional) -->
+<!-- Modal: Detalle del ingreso (cantidad, precios, proveedor, observaciones) -->
 <div class="modal modal-sm" id="modalCompraDetalle">
   <div class="modal-header">
-    <h3>🛒 Registrar compra</h3>
+    <h3>🛒 Registrar ingreso</h3>
     <button class="modal-close" data-close-modal>✕</button>
   </div>
   <div class="modal-body">
@@ -648,9 +717,11 @@
         📦 <strong id="cNombreDisplay"></strong>
       </div>
       <label style="grid-column:1/-1;">Descripción *<input type="text" id="cNombreInput" class="input" required></label>
+      <label style="grid-column:1/-1;">Proveedor<input type="text" id="cProveedor" class="input" placeholder="Nombre del proveedor o distribuidor"></label>
       <label>Cantidad *<input type="number" id="cCantidad" class="input" step="1" min="1" value="1" required></label>
       <label>Precio de compra (c/u) *<input type="number" id="cPrecioCompra" class="input" step="0.01" min="0" required></label>
       <label style="grid-column:1/-1;">Fecha de la compra<input type="date" id="cFecha" class="input" title="Fecha del recibo (si la compra fue de otro día, elige esa fecha)"></label>
+      <label style="grid-column:1/-1;">Observaciones<textarea id="cObservaciones" class="input" rows="2" placeholder="Opcional: notas sobre este ingreso..." style="resize:vertical; min-height:44px;"></textarea></label>
       <label style="grid-column:1/-1;">Total (calculado)<input type="text" id="cTotalDisplay" class="input" readonly tabindex="-1" style="background:var(--bg); color:var(--text-muted);"></label>
       <label style="grid-column:1/-1;">Método de pago
         <div class="scan-mode-tabs" style="margin-top:4px;">
@@ -669,10 +740,34 @@
         </div>
       </div>
       <div class="form-actions">
-        <button type="submit" class="btn btn-success">Registrar compra</button>
+        <button type="submit" class="btn btn-success">Registrar ingreso</button>
         <button type="button" class="btn btn-secondary" data-close-modal>Cancelar</button>
       </div>
     </form>
+  </div>
+</div>
+
+<!-- Modal: Historial de ingresos de un producto (fechas, proveedor, precio, cantidad, obs) -->
+<div class="modal" id="modalCompraHistorial">
+  <div class="modal-header">
+    <h3>📦 Historial de ingresos</h3>
+    <button class="modal-close" data-close-modal>✕</button>
+  </div>
+  <div class="modal-body">
+    <div class="product-info-box visible" id="histProdInfo"></div>
+    <div class="table-wrap" style="margin-top:12px;">
+      <table class="table" id="histComprasTable">
+        <thead>
+          <tr>
+            <th>Fecha</th><th>Proveedor</th><th>P. Compra</th><th>Cant.</th><th>Obs.</th><th></th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div class="form-actions" style="margin-top:14px;">
+      <button type="button" class="btn btn-secondary" data-close-modal>Cerrar</button>
+    </div>
   </div>
 </div>
 
@@ -898,6 +993,8 @@
 <input type="file" id="fileImportTopVentas" accept=".csv" hidden>
 <input type="file" id="fileImportPedidos" accept=".csv" hidden>
 <input type="file" id="fileImportBackup" accept=".json" hidden>
+<input type="file" id="fileImgCamera" accept="image/*" capture="environment" hidden>
+<input type="file" id="fileImgGallery" accept="image/*" hidden>
 
 <script src='https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js'></script>
 <!-- ZXing: lector de códigos de barras (solo se usa en el botón 📷 de Código de barras) -->

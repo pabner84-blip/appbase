@@ -1,23 +1,23 @@
 :root{
   --primary:#2563eb;
   --primary-dark:#1d4ed8;
-  --primary-light:#dbeafe;
+  --primary-light:#3b82f6;
   --success:#16a34a;
-  --success-light:#dcfce7;
+  --success-light:#123524;
   --danger:#dc2626;
-  --danger-light:#fee2e2;
+  --danger-light:#3a1418;
   --warning:#d97706;
-  --warning-light:#fef3c7;
-  --bg:#f3f4f6;
-  --surface:#ffffff;
-  --border:#e5e7eb;
-  --text:#111827;
-  --text-muted:#6b7280;
-  --sidebar-bg:#111827;
-  --sidebar-text:#d1d5db;
+  --warning-light:#3d2c08;
+  --bg:#000000;
+  --surface:#14161a;
+  --border:#2a2e35;
+  --text:#e7e9ee;
+  --text-muted:#9aa1ac;
+  --sidebar-bg:#0a0a0c;
+  --sidebar-text:#c9ced6;
   --sidebar-active:#1f2937;
   --radius:10px;
-  --shadow:0 1px 3px rgba(0,0,0,.08), 0 1px 2px rgba(0,0,0,.06);
+  --shadow:0 1px 3px rgba(0,0,0,.45), 0 1px 2px rgba(0,0,0,.4);
   --sidebar-w:250px;
 }
 
@@ -86,6 +86,20 @@ body.pro-mode:not(.role-guest) .nav-pro-only::after{
   20%{opacity:1;}
   60%{opacity:0;}
   100%{opacity:0; left:120%;}
+}
+
+/* El destello (barrido de brillo y el pop de brightness/glow) solo debe
+   mostrarse UNA vez en total. Cuando app.js ya lo mostró, agrega
+   body.pro-flash-done y las pestañas pro aparecen con un fade suave y sin
+   destello (aunque todavía salgan una por una). */
+body.pro-mode.pro-flash-done:not(.role-guest) .nav-pro-only{
+  animation:navProRevealSimple .6s ease forwards;
+  animation-delay:var(--reveal-delay, 0s);
+}
+body.pro-mode.pro-flash-done:not(.role-guest) .nav-pro-only::after{display:none;}
+@keyframes navProRevealSimple{
+  0%{opacity:0; transform:translateX(-16px) scale(.96);}
+  100%{opacity:1; transform:translateX(0) scale(1);}
 }
 
 /* Panel de Opciones (recuadro inferior): todo apilado, uno debajo de otro */
@@ -159,9 +173,9 @@ body.pro-mode:not(.role-guest) .nav-pro-only::after{
   cursor:pointer; transition:filter .15s ease; white-space:nowrap;
 }
 .btn:hover{filter:brightness(0.94);}
-.btn:focus-visible{outline:2px solid #111827; outline-offset:2px;}
+.btn:focus-visible{outline:2px solid #e5e7eb; outline-offset:2px;}
 .btn-primary{background:var(--primary); color:#fff;}
-.btn-secondary{background:#e5e7eb; color:#111827;}
+.btn-secondary{background:#262a31; color:#e7e9ee;}
 .btn-danger{background:var(--danger); color:#fff;}
 .btn-success{background:var(--success); color:#fff;}
 .btn-sm{padding:6px 10px; font-size:12px; border-radius:6px;}
@@ -172,19 +186,41 @@ body.pro-mode:not(.role-guest) .nav-pro-only::after{
 .table-wrap{background:var(--surface); border-radius:var(--radius); box-shadow:var(--shadow); overflow-x:auto;}
 .table{width:100%; border-collapse:collapse; font-size:13.5px; min-width:600px;}
 .table th{
-  text-align:left; padding:12px 14px; background:#f9fafb; color:var(--text-muted);
+  text-align:left; padding:12px 14px; background:#16191f; color:var(--text-muted);
   font-weight:600; font-size:12px; text-transform:uppercase; letter-spacing:.02em;
   border-bottom:1px solid var(--border); white-space:nowrap;
 }
 .table td{padding:11px 14px; border-bottom:1px solid var(--border); vertical-align:middle;}
-.table tbody tr:hover{background:#f9fafb;}
+.table tbody tr:hover{background:#171a21;}
 .table tbody tr:last-child td{border-bottom:none;}
 .table .empty-row td{text-align:center; color:var(--text-muted); padding:26px;}
 
+/* ---- Miniatura de imagen de producto (columna Imagen) ---- */
+.prod-img-cell{min-width:120px;}
+.prod-img-wrap{display:flex; flex-direction:column; align-items:flex-start; gap:6px;}
+.prod-thumb{width:52px; height:52px; object-fit:cover; border-radius:8px; cursor:pointer; border:1px solid var(--border); box-shadow:var(--shadow); display:block;}
+.prod-thumb-empty{display:flex; align-items:center; justify-content:center; background:var(--bg); font-size:20px; color:var(--text-muted); cursor:default;}
+.prod-img-btn{width:100%;}
+
+/* ---- Ventana de características del producto ---- */
+.detail-grid{display:flex; flex-direction:column; gap:8px;}
+.detail-row{display:flex; justify-content:space-between; align-items:baseline; gap:12px; padding:8px 12px; background:var(--bg); border-radius:8px; border:1px solid var(--border);}
+.detail-label{font-size:12px; color:var(--text-muted); text-transform:uppercase; letter-spacing:.02em; white-space:nowrap;}
+.detail-value{font-size:14px; font-weight:600; text-align:right; word-break:break-word;}
+
+/* Recuadro blanco para escribir las características del producto */
+.detail-block{display:flex; flex-direction:column; gap:6px; margin-top:12px;}
+.detail-block .detail-label{margin:0 2px;}
+.detail-block textarea{
+  width:100%; padding:10px 12px; border:1px solid #c9ced6; border-radius:8px;
+  font-size:14px; font-family:inherit; resize:vertical; min-height:90px;
+}
+.detail-block textarea:focus{outline:2px solid var(--primary-light); border-color:var(--primary);}
+
 .badge{display:inline-block; padding:3px 9px; border-radius:20px; font-size:11px; font-weight:700;}
-.badge-muted{background:#e5e7eb; color:#374151;}
-.badge-success-soft{background:var(--success-light); color:#166534;}
-.badge-danger-soft{background:var(--danger-light); color:#991b1b;}
+.badge-muted{background:#262a31; color:#d1d5db;}
+.badge-success-soft{background:var(--success-light); color:#4ade80;}
+.badge-danger-soft{background:var(--danger-light); color:#fca5a5;}
 
 /* ---------- HISTORIAL ---------- */
 .history-search-row{
@@ -213,7 +249,7 @@ body.pro-mode:not(.role-guest) .nav-pro-only::after{
 .modal-body{padding:20px;}
 
 .form-grid{display:grid; grid-template-columns:1fr 1fr; gap:14px;}
-.form-grid label{display:flex; flex-direction:column; gap:5px; font-size:13px; font-weight:600; color:#374151;}
+.form-grid label{display:flex; flex-direction:column; gap:5px; font-size:13px; font-weight:600; color:#d1d5db;}
 .form-grid .form-actions{grid-column:1/-1; display:flex; gap:10px; justify-content:flex-end; margin-top:6px;}
 
 /* ---------- SCANNER ---------- */
@@ -249,7 +285,7 @@ body.pro-mode:not(.role-guest) .nav-pro-only::after{
 .scan-result-card h4{margin:0 0 8px;}
 .scan-result-card .sr-row{display:flex; justify-content:space-between; padding:6px 0; font-size:14px; border-bottom:1px dashed var(--border);}
 .scan-result-card .sr-row:last-child{border-bottom:none;}
-.scan-not-found{background:var(--warning-light); color:#92400e; border-radius:10px; padding:14px; font-size:13.5px;}
+.scan-not-found{background:var(--warning-light); color:#fbbf24; border-radius:10px; padding:14px; font-size:13.5px;}
 
 /* ---------- NUEVA VENTA: lista de búsqueda ---------- */
 .venta-search-list{display:flex; flex-direction:column; gap:6px; max-height:340px; overflow-y:auto;}
@@ -286,7 +322,7 @@ body.role-guest .admin-only{display:none !important;}
 .mes-filtro .input{max-width:240px;}
 
 /* Gastos del día: fila de subtotal de cada día */
-.gasto-day-row td{background:rgba(0,0,0,0.05); font-weight:600; padding:8px 12px !important;}
+.gasto-day-row td{background:rgba(255,255,255,0.05); font-weight:600; padding:8px 12px !important;}
 
 /* Productos más vendidos */
 .top-row td{background:rgba(255,215,0,0.08);}
@@ -322,7 +358,7 @@ body.modo-electrico:not(.role-guest) #notifySwitchRow{display:flex;}
 }
 .remember-switch input{display:none;}
 .switch-track{
-  width:19px; height:11px; border-radius:11px; background:#374151;
+  width:19px; height:11px; border-radius:11px; background:#3f444d;
   position:relative; transition:background .2s ease; flex:none;
 }
 .switch-thumb{
@@ -502,7 +538,7 @@ body.modo-invitado .sidebar-footer small{color:#fdba74;}
 }
 .venta-date-chip,
 .compra-date-chip{
-  border:1px solid var(--border); background:#fff; color:var(--text);
+  border:1px solid var(--border); background:var(--surface); color:var(--text);
   padding:6px 13px; border-radius:20px; font-size:12.5px; font-weight:600;
   cursor:pointer; transition:all .15s ease; font-family:inherit;
 }
@@ -514,7 +550,7 @@ body.modo-invitado .sidebar-footer small{color:#fdba74;}
 .export-reminder{
   display:flex; flex-wrap:wrap; align-items:center; gap:10px;
   background:var(--warning-light); border:1px solid var(--warning);
-  color:#92400e; border-radius:10px; padding:12px 14px; font-size:13px; margin-bottom:12px;
+  color:#fbbf24; border-radius:10px; padding:12px 14px; font-size:13px; margin-bottom:12px;
 }
 .export-reminder span{flex:1; min-width:220px;}
 .btn-sm{padding:6px 12px; font-size:12.5px;}
@@ -600,41 +636,11 @@ body.gold-theme{
   overflow-x:hidden;
 }
 
-/* ---- Relucir de pantalla: barrido de luz diagonal cada rato ---- */
-body.gold-theme::before{
-  content:''; position:fixed; top:-10%; left:-70%; width:45%; height:120%;
-  background:linear-gradient(100deg, transparent 0%, rgba(255,215,0,.10) 35%,
-    rgba(255,255,255,.22) 50%, rgba(255,215,0,.10) 65%, transparent 100%);
-  transform:skewX(-14deg); pointer-events:none; z-index:9998;
-  animation:proSweep 5.5s ease-in-out infinite;
-}
-@keyframes proSweep{
-  0%{left:-70%;}
-  60%{left:130%;}
-  100%{left:130%;}
-}
+/* El barrido de luz blanco que cruzaba la pantalla (proSweep) se eliminó:
+   era el "destello blanco" que pasaba a cada rato en el modo pro. */
 
-/* ---- Destellos (estrellitas) que titilan por toda la pantalla ---- */
-body.gold-theme::after{
-  content:''; position:fixed; inset:0; pointer-events:none; z-index:9997;
-  background-image:
-    radial-gradient(1.6px 1.6px at 12% 22%, rgba(255,255,255,.9), transparent 60%),
-    radial-gradient(1.2px 1.2px at 32% 70%, rgba(255,220,120,.9), transparent 60%),
-    radial-gradient(1.8px 1.8px at 55% 15%, rgba(255,255,255,.85), transparent 60%),
-    radial-gradient(1.2px 1.2px at 70% 45%, rgba(255,235,150,.9), transparent 60%),
-    radial-gradient(1.5px 1.5px at 85% 75%, rgba(255,255,255,.8), transparent 60%),
-    radial-gradient(1.3px 1.3px at 92% 25%, rgba(255,220,120,.9), transparent 60%),
-    radial-gradient(1.7px 1.7px at 8% 55%, rgba(255,255,255,.85), transparent 60%),
-    radial-gradient(1.1px 1.1px at 45% 90%, rgba(255,235,150,.85), transparent 60%),
-    radial-gradient(1.4px 1.4px at 22% 8%, rgba(255,255,255,.8), transparent 60%);
-  background-size:100% 100%;
-  animation:proTwinkle 4s ease-in-out infinite;
-  mix-blend-mode:screen;
-}
-@keyframes proTwinkle{
-  0%,100%{opacity:.25;}
-  50%{opacity:.85;}
-}
+/* Las estrellitas blancas que titilaban por toda la pantalla (proTwinkle)
+   también se eliminaron: formaban parte del destello blanco periódico. */
 
 /* ---- Fondo principal ---- */
 body.gold-theme .main-wrap,

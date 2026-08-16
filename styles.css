@@ -40,10 +40,27 @@ input,select{font-family:inherit;}
   transition:transform .25s ease;
 }
 .sidebar-brand{display:flex; align-items:center; gap:10px; padding:20px 18px; border-bottom:1px solid rgba(255,255,255,.08);}
-.brand-icon{font-size:28px;}
+.brand-icon{font-size:28px; display:flex; align-items:center; gap:5px; line-height:1;}
 .brand-text{display:flex; flex-direction:column; line-height:1.2;}
 .brand-text strong{color:#fff; font-size:16px;}
 .brand-text small{color:#9ca3af; font-size:11px;}
+/* En el modo Invitado: los logos 🛠️ ⚡ debajo de las pestañas, apilados en
+   vertical, grandes y centrados tanto horizontal como verticalmente (llenan
+   el espacio libre entre las pestañas y el pie del menú). */
+.sidebar-logos{
+  display:none; flex-direction:column; align-items:center; justify-content:center;
+  flex:1; gap:20px; padding:14px 0 26px; font-size:58px; line-height:1;
+}
+.sidebar-logos span{display:inline-block;}
+body.modo-invitado .sidebar-nav{flex:0 1 auto; min-height:0;}
+body.modo-invitado .sidebar-logos{display:flex;}
+/* Botón casita arriba, junto al nombre de la tienda (solo el ícono) */
+.btn-home{
+  margin-left:auto; background:none; border:none; cursor:pointer;
+  font-size:20px; line-height:1; padding:6px 8px; border-radius:8px;
+  color:#c9ced6;
+}
+.btn-home:hover{background:rgba(255,255,255,.10); color:#fff;}
 
 .sidebar-nav{flex:1; display:flex; flex-direction:column; padding:10px; gap:2px; overflow-y:auto;}
 .nav-item{
@@ -55,58 +72,30 @@ input,select{font-family:inherit;}
 .nav-item:hover{background:rgba(255,255,255,.06); color:#fff;}
 .nav-item.active{background:var(--primary); color:#fff;}
 
-/* Pestañas exclusivas del modo pro (ESTADO FINANCIERO / PAGOS / DEUDAS y
-   también MÁS VENDIDOS / GASTOS DEL DÍA): ocultas en el menú normal, aparecen
-   cuando se activa el modo pro. Salen UNA POR UNA, cada una con un barrido de
-   brillo dorado (la demora de cada una se define con --reveal-delay en app.js).
-   El modo pro (body.pro-mode) muestra las pestañas; el tema dorado
-   (body.gold-theme) solo cambia los colores. */
-.nav-pro-only{display:none;}
-body.pro-mode:not(.role-guest) .nav-pro-only{
-  display:flex;
-  position:relative;
-  overflow:hidden;
-  animation:navProReveal .6s ease forwards;
-  animation-delay:var(--reveal-delay, 0s);
+/* Submenú "Modo Pro": la pestaña "👑 Modo Pro" abre/cierra un grupo que se
+   desliza hacia abajo con las pestañas exclusivas (ESTADO FINANCIERO / PAGOS /
+   DEUDAS / GASTOS DEL DÍA). El resto de las pestañas del menú se ve siempre,
+   con el modo pro abierto o cerrado. */
+.nav-pro-group{display:flex; flex-direction:column;}
+.nav-pro-toggle{
+  display:flex; align-items:center; gap:10px; text-align:left;
+  background:none; border:none; color:#eab308;
+  padding:11px 12px; border-radius:8px; cursor:pointer; font-size:14px; font-weight:600;
 }
-body.pro-mode:not(.role-guest) .nav-pro-only::after{
-  content:''; position:absolute; top:0; left:-70%; width:45%; height:100%;
-  background:linear-gradient(105deg, transparent, rgba(255,255,255,.65), transparent);
-  transform:skewX(-20deg); pointer-events:none;
-  animation:navProShine .7s ease forwards;
-  animation-delay:var(--reveal-delay, 0s);
+.nav-pro-toggle .pro-arrow{margin-left:auto; font-size:12px; transition:transform .3s ease;}
+.nav-pro-toggle:hover{background:rgba(255,215,0,.10); color:#fbbf24;}
+.nav-pro-group.open .pro-arrow{transform:rotate(180deg);}
+.nav-pro-sub{
+  max-height:0; overflow:hidden; opacity:0;
+  transition:max-height .35s ease, opacity .3s ease;
 }
-@keyframes navProReveal{
-  0%{opacity:0; transform:translateX(-16px) scale(.96); box-shadow:0 0 0 rgba(255,215,0,0);}
-  40%{opacity:1; transform:translateX(0) scale(1.02); filter:brightness(1.55); box-shadow:0 0 18px rgba(255,215,0,.75);}
-  100%{opacity:1; transform:translateX(0) scale(1); filter:none; box-shadow:0 0 0 rgba(255,215,0,0);}
-}
-@keyframes navProShine{
-  0%{opacity:0; left:-70%;}
-  20%{opacity:1;}
-  60%{opacity:0;}
-  100%{opacity:0; left:120%;}
-}
-
-/* El destello (barrido de brillo y el pop de brightness/glow) solo debe
-   mostrarse UNA vez en total. Cuando app.js ya lo mostró, agrega
-   body.pro-flash-done y las pestañas pro aparecen con un fade suave y sin
-   destello (aunque todavía salgan una por una). */
-body.pro-mode.pro-flash-done:not(.role-guest) .nav-pro-only{
-  animation:navProRevealSimple .6s ease forwards;
-  animation-delay:var(--reveal-delay, 0s);
-}
-body.pro-mode.pro-flash-done:not(.role-guest) .nav-pro-only::after{display:none;}
-@keyframes navProRevealSimple{
-  0%{opacity:0; transform:translateX(-16px) scale(.96);}
-  100%{opacity:1; transform:translateX(0) scale(1);}
-}
+.nav-pro-group.open .nav-pro-sub{max-height:280px; opacity:1;}
+.nav-pro-sub .nav-item{padding-left:28px;}
 
 /* Panel de Opciones (recuadro inferior): todo apilado, uno debajo de otro */
-.sidebar-options #proModeRow{width:100%; box-sizing:border-box; border:1px solid rgba(255,215,0,.28);}
-.sidebar-options #btnVolverInicio{margin-top:4px;}
-
 .sidebar-footer{padding:14px 18px; border-top:1px solid rgba(255,255,255,.08); color:#6b7280; display:flex; flex-direction:column; gap:4px;}
+.sidebar-footer #sidebarProductCount{font-size:12px;}
+.sidebar-footer #sidebarSyncStatus{font-size:12px; margin-bottom:2px;}
 
 /* Botón "Opciones": abre/cierra el panel inferior del menú */
 #btnToggleOptions{width:100%; margin:0; font-size:14px;}
@@ -132,6 +121,7 @@ body.pro-mode.pro-flash-done:not(.role-guest) .nav-pro-only::after{display:none;
 
 /* Solo la vista de escáner se limita en ancho (se ve mejor angosta); el resto usa todo el espacio disponible */
 #view-escaner{max-width:480px;}
+#view-codigobarras{max-width:480px;}
 
 .view{display:none;}
 .view.active{display:block; animation:fadeIn .2s ease;}
@@ -194,13 +184,56 @@ body.pro-mode.pro-flash-done:not(.role-guest) .nav-pro-only::after{display:none;
 .table tbody tr:hover{background:#171a21;}
 .table tbody tr:last-child td{border-bottom:none;}
 .table .empty-row td{text-align:center; color:var(--text-muted); padding:26px;}
+.table tfoot td{padding:11px 14px; border-top:2px solid var(--border); background:var(--bg);}
+/* Historial QR: nada se parte en dos líneas salvo la columna Producto. */
+#histQrTable th, #histQrTable td{white-space:nowrap;}
+#histQrTable td:nth-child(4){white-space:normal;}
 
 /* ---- Miniatura de imagen de producto (columna Imagen) ---- */
 .prod-img-cell{min-width:120px;}
-.prod-img-wrap{display:flex; flex-direction:column; align-items:flex-start; gap:6px;}
+.prod-img-wrap{display:flex; flex-direction:column; align-items:flex-start; gap:6px; position:relative;}
 .prod-thumb{width:52px; height:52px; object-fit:cover; border-radius:8px; cursor:pointer; border:1px solid var(--border); box-shadow:var(--shadow); display:block;}
 .prod-thumb-empty{display:flex; align-items:center; justify-content:center; background:var(--bg); font-size:20px; color:var(--text-muted); cursor:default;}
+.prod-thumb-lazy{width:52px; height:52px; border-radius:8px; overflow:hidden;}
+.ajuste-qr-detalle{display:flex; flex-wrap:wrap; gap:8px; margin-top:12px;}
+.ajuste-qr-chip{display:inline-flex; align-items:center; gap:4px; background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:4px 10px; font-size:13px; color:var(--text); font-family:inherit; cursor:pointer; transition:all .15s ease;}
+.ajuste-qr-chip:hover{border-color:var(--primary); color:var(--primary);}
+.ajuste-qr-chip.active{background:var(--primary); border-color:var(--primary); color:#fff;}
+.venta-num{color:var(--text-muted); font-size:12px;}
 .prod-img-btn{width:100%;}
+.prod-img-count{
+  position:absolute; top:-6px; left:-6px; min-width:18px; height:18px; padding:0 5px;
+  display:flex; align-items:center; justify-content:center;
+  background:var(--primary); color:#fff; font-size:11px; font-weight:700;
+  border-radius:9px; cursor:pointer; border:2px solid var(--bg);
+}
+
+/* ---- Carrusel de fotos (modal de imagen y de detalles) ---- */
+.img-carousel{
+  display:flex; overflow-x:auto; -webkit-overflow-scrolling:touch;
+  scroll-snap-type:x mandatory; gap:10px; padding:6px 2px;
+  scrollbar-width:none;
+}
+.img-carousel::-webkit-scrollbar{display:none;}
+.img-carousel img{
+  flex:0 0 auto; max-width:220px; max-height:220px; width:auto; height:auto;
+  border-radius:10px; border:1px solid var(--border); background:#fff;
+  scroll-snap-align:center; object-fit:contain; display:block;
+}
+.img-carousel-det img{max-width:160px; max-height:160px; margin:auto;}
+.img-carousel-info{
+  display:flex; align-items:center; justify-content:center; gap:14px; margin-top:8px;
+}
+.img-carousel-counter{
+  font-size:13px; font-weight:600; color:var(--text-muted);
+  min-width:44px; text-align:center; padding:0 2px;
+}
+.img-carousel-dots{display:inline-flex; gap:6px; align-items:center;}
+.carousel-dot{
+  width:8px; height:8px; border-radius:50%; background:var(--text-muted);
+  opacity:.4; cursor:pointer; display:inline-block;
+}
+.carousel-dot.active{opacity:1; background:var(--primary);}
 
 /* ---- Ventana de características del producto ---- */
 .detail-grid{display:flex; flex-direction:column; gap:8px;}
@@ -238,6 +271,13 @@ body.pro-mode.pro-flash-done:not(.role-guest) .nav-pro-only::after{display:none;
   max-height:88vh; overflow-y:auto; box-shadow:0 20px 60px rgba(0,0,0,.25);
 }
 .modal.modal-sm{width:min(400px,92vw);}
+/* Ingresos: los cuadros "Registrar ingreso" e "Historial de ingresos" más
+   anchos para que entre toda la información. */
+#modalCompraDetalle{width:min(760px,95vw);}
+#modalCompraHistorial{width:min(820px,95vw);}
+.modal.modal-lg{width:min(980px,96vw); max-height:92vh;}
+.modal.modal-lg .modal-body{display:flex; flex-direction:column;}
+.modal.modal-lg .table-wrap{flex:1; min-height:0; overflow-y:auto;}
 .modal.open, .modal-backdrop.open{display:block;}
 .modal-header{
   display:flex; align-items:center; justify-content:space-between; padding:18px 20px;
@@ -251,6 +291,33 @@ body.pro-mode.pro-flash-done:not(.role-guest) .nav-pro-only::after{display:none;
 .form-grid{display:grid; grid-template-columns:1fr 1fr; gap:14px;}
 .form-grid label{display:flex; flex-direction:column; gap:5px; font-size:13px; font-weight:600; color:#d1d5db;}
 .form-grid .form-actions{grid-column:1/-1; display:flex; gap:10px; justify-content:flex-end; margin-top:6px;}
+.gastos-prestamos-panel .gp-form{display:flex; gap:8px; align-items:center;}
+.gastos-prestamos-panel .gp-bs-input{width:110px; flex-shrink:0;}
+.gastos-prestamos-panel .gp-obs-input{flex:1; min-width:0;}
+.gastos-prestamos-panel .gp-row{display:flex; align-items:center; gap:10px; padding:8px 10px; border:1px solid var(--border); border-radius:8px; margin-bottom:6px; background:var(--bg);}
+.gastos-prestamos-panel .gp-obs{flex:1; min-width:0; color:var(--text-muted); font-size:13px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+.gastos-prestamos-panel .gp-tag{display:flex; align-items:center; gap:5px; font-size:12px; font-weight:600; color:var(--text-muted); cursor:pointer;}
+.gastos-prestamos-panel .gp-chk{width:15px; height:15px; accent-color:var(--accent, #22c55e); cursor:pointer;}
+.gastos-prestamos-panel .gp-modo-dot{width:13px; height:13px; border-radius:50%; border:2px solid rgba(255,255,255,.4); cursor:pointer; flex-shrink:0; transition:transform .15s, box-shadow .15s;}
+.gastos-prestamos-panel .gp-modo-dot.man{background:#f26522; box-shadow:0 0 0 2px rgba(242,101,34,.25);}
+.gastos-prestamos-panel .gp-modo-dot.el{background:#f6c000; box-shadow:0 0 0 2px rgba(246,192,0,.25);}
+.gastos-prestamos-panel .gp-modo-dot.none{background:#6b7280; box-shadow:0 0 0 2px rgba(107,114,128,.25);}
+.gastos-prestamos-panel .gp-modo-dot:hover{transform:scale(1.2);}
+.gastos-prestamos-panel .gp-modo-dot.static{cursor:default;}
+.gastos-prestamos-panel .gp-modo-dot.static:hover{transform:none;}
+.gastos-prestamos-panel .gp-legend{display:flex; align-items:center; gap:6px; font-size:12px;}
+.gastos-prestamos-panel .gp-dot-legend{display:inline-block; width:10px; height:10px; border-radius:50%; flex-shrink:0;}
+.gastos-prestamos-panel .gp-dot-legend.man{background:#f26522;}
+.gastos-prestamos-panel .gp-dot-legend.el{background:#f6c000;}
+.gastos-prestamos-panel .gp-dot-legend.none{background:#6b7280;}
+.ventas-modo-totales{display:inline-flex; flex-wrap:wrap; gap:4px 10px; align-items:center; margin-top:4px; font-size:13px;}
+.ventas-modo-totales .modo-total.man{color:#fb923c;}
+.ventas-modo-totales .modo-total.el{color:#fde047;}
+.ventas-modo-totales .modo-total strong{font-weight:800;}
+.ventas-modo-totales .modo-total.man strong{color:#fdba74;}
+.ventas-modo-totales .modo-total.el strong{color:#fde047;}
+.gastos-prestamos-panel .gp-total{display:flex; align-items:baseline; gap:6px; padding:10px 10px 2px; border-top:1px dashed var(--border); margin-top:6px; font-size:14px;}
+.gastos-prestamos-panel .gp-total strong{font-weight:800; color:var(--primary);}
 
 /* ---------- SCANNER ---------- */
 .scan-mode-tabs{display:flex; flex-wrap:wrap; gap:6px; margin-bottom:12px;}
@@ -287,6 +354,17 @@ body.pro-mode.pro-flash-done:not(.role-guest) .nav-pro-only::after{display:none;
 .scan-result-card .sr-row:last-child{border-bottom:none;}
 .scan-not-found{background:var(--warning-light); color:#fbbf24; border-radius:10px; padding:14px; font-size:13.5px;}
 
+/* ---------- REGISTRO DE INVENTARIO: cantidades rápidas ---------- */
+.inv-qty-grid{display:grid; grid-template-columns:repeat(3, 1fr); gap:12px;}
+.inv-qty-btn{
+  padding:26px 0; font-size:34px; font-weight:800; text-align:center;
+  background:var(--bg); border:1px solid var(--border); border-radius:14px;
+  color:var(--primary); cursor:pointer;
+}
+.inv-qty-btn:hover{background:var(--primary); color:#fff; border-color:var(--primary);}
+.inv-qty-btn:active{transform:scale(.96);}
+.inv-mas-label{display:flex; flex-direction:column; gap:5px; font-size:13px; font-weight:600; color:#d1d5db;}
+
 /* ---------- NUEVA VENTA: lista de búsqueda ---------- */
 .venta-search-list{display:flex; flex-direction:column; gap:6px; max-height:340px; overflow-y:auto;}
 .venta-search-item{
@@ -313,6 +391,7 @@ body.role-guest .nav-item[data-view="deudas"],
 body.role-guest .nav-item[data-view="gastos"],
 body.role-guest .nav-item[data-view="topventas"],
 body.role-guest .nav-item[data-view="pedidos"]{display:none;}
+body.role-guest .nav-pro-group{display:none;}
 body.role-guest .price-guest-hide{display:none;}
 body.role-guest .admin-only{display:none !important;}
 
@@ -427,8 +506,8 @@ body.inicio-theme .main-wrap{margin-left:0;}
   transition:filter .15s ease, transform .1s ease;
 }
 .inicio-modo-btn:hover{filter:brightness(1.1); transform:translateY(-1px);}
-.inicio-modo-manual{background:#dc2626; color:#fff; box-shadow:0 0 24px rgba(220,38,38,.35);}
-.inicio-modo-electrico{background:#2563eb; color:#fff; box-shadow:0 0 24px rgba(37,99,235,.35);}
+.inicio-modo-manual{background:#f26522; color:#fff; box-shadow:0 0 24px rgba(242,101,34,.35);}
+.inicio-modo-electrico{background:#f6c000; color:#403000; box-shadow:0 0 24px rgba(246,192,0,.35);}
 .inicio-modo-invitado{background:#16a34a; color:#fff; box-shadow:0 0 24px rgba(22,163,74,.35);}
 
 /* "Creado Por Abner Perez": centro abajo, fuente formal delgada y elegante */
@@ -452,7 +531,7 @@ body.inicio-theme .main-wrap{margin-left:0;}
 
 /* ---------- PANTALLAS DE BIENVENIDA (una por modo) ---------- */
 /* Aparecen al entrar con un botón de Inicio: solo el nombre del modo en su
-   color respectivo (rojo/azul/verde), a todo color sin bordes blancos.
+   color respectivo (naranja/amarillo/verde), a todo color sin bordes blancos.
    Conservan el menú lateral (hamburguesa en el celular) para poder navegar. */
 body.welcome-view .content{padding:0; overflow:hidden;}
 body.welcome-view .view-welcome.active{
@@ -460,13 +539,13 @@ body.welcome-view .view-welcome.active{
   min-height:calc(100vh - 52px); text-align:center; padding:24px;
 }
 body.welcome-view .topbar{border-bottom:none;}
-body.modo-manual.welcome-view .topbar{background:#1a0d0d;}
-body.modo-electrico.welcome-view .topbar{background:#0d1526;}
+body.modo-manual.welcome-view .topbar{background:#241005;}
+body.modo-electrico.welcome-view .topbar{background:#241d02;}
 body.modo-invitado.welcome-view .topbar{background:#052e16;}
 body.modo-manual.welcome-view .topbar h1,
-body.modo-manual.welcome-view .hamburger{color:#f87171;}
+body.modo-manual.welcome-view .hamburger{color:#fb923c;}
 body.modo-electrico.welcome-view .topbar h1,
-body.modo-electrico.welcome-view .hamburger{color:#60a5fa;}
+body.modo-electrico.welcome-view .hamburger{color:#facc15;}
 body.modo-invitado.welcome-view .topbar h1,
 body.modo-invitado.welcome-view .hamburger{color:#4ade80;}
 .welcome-subtitle{
@@ -474,45 +553,53 @@ body.modo-invitado.welcome-view .hamburger{color:#4ade80;}
   font-size:46px; font-weight:800; letter-spacing:.03em; margin:0;
 }
 .welcome-hint{font-size:13px; opacity:.75; margin-top:16px;}
+/* Logo grande debajo del título: 🛠️ en Manuales, ⚡ en Eléctricas y los dos
+   juntos (🛠️ ⚡) alineados horizontalmente en el Invitado. */
+.welcome-logo{
+  display:flex; justify-content:center; align-items:center; gap:16px;
+  font-size:58px; line-height:1; margin-top:18px;
+}
+.welcome-logo span{display:inline-block;}
 
-body.modo-manual .view-welcome{background:#1a0d0d;}
-body.modo-electrico .view-welcome{background:#0d1526;}
+body.modo-manual .view-welcome{background:#241005;}
+body.modo-electrico .view-welcome{background:#241d02;}
 body.modo-invitado .view-welcome{background:#052e16;}
-body.modo-manual .welcome-subtitle{color:#f87171;}
-body.modo-electrico .welcome-subtitle{color:#60a5fa;}
+body.modo-manual .welcome-subtitle{color:#fb923c;}
+body.modo-electrico .welcome-subtitle{color:#facc15;}
 body.modo-invitado .welcome-subtitle{color:#4ade80;}
-body.modo-manual .view-welcome .welcome-hint{color:#fca5a5;}
-body.modo-electrico .view-welcome .welcome-hint{color:#93c5fd;}
+body.modo-manual .view-welcome .welcome-hint{color:#fdba74;}
+body.modo-electrico .view-welcome .welcome-hint{color:#fde047;}
 body.modo-invitado .view-welcome .welcome-hint{color:#86efac;}
 
 @media (max-width: 560px){
   .welcome-subtitle{font-size:28px;}
+  .welcome-logo{font-size:40px; gap:12px; margin-top:12px;}
 }
 
-/* ---------- MODO: HERRAMIENTAS MANUALES (rojo) ---------- */
-body.modo-manual .sidebar{background:#1a0d0d;}
-body.modo-manual .sidebar-brand{border-bottom-color:rgba(220,38,38,.25);}
-body.modo-manual .brand-text strong{color:#fca5a5;}
-body.modo-manual .nav-item.active{background:#dc2626; color:#fff;}
-body.modo-manual .nav-item:hover{background:rgba(220,38,38,.18); color:#fca5a5;}
-body.modo-manual .sidebar-footer{border-top-color:rgba(220,38,38,.25);}
+/* ---------- MODO: HERRAMIENTAS MANUALES (naranja) ---------- */
+body.modo-manual .sidebar{background:#241005;}
+body.modo-manual .sidebar-brand{border-bottom-color:rgba(242,101,34,.25);}
+body.modo-manual .brand-text strong{color:#fdba74;}
+body.modo-manual .nav-item.active{background:#f26522; color:#fff;}
+body.modo-manual .nav-item:hover{background:rgba(242,101,34,.18); color:#fdba74;}
+body.modo-manual .sidebar-footer{border-top-color:rgba(242,101,34,.25);}
 
-/* ---------- MODO: HERRAMIENTAS ELÉCTRICAS (azul) ---------- */
-body.modo-electrico .sidebar{background:#0d1526;}
-body.modo-electrico .sidebar-brand{border-bottom-color:rgba(37,99,235,.25);}
-body.modo-electrico .brand-text strong{color:#93c5fd;}
-body.modo-electrico .nav-item.active{background:#2563eb; color:#fff;}
-body.modo-electrico .nav-item:hover{background:rgba(37,99,235,.18); color:#93c5fd;}
-body.modo-electrico .sidebar-footer{border-top-color:rgba(37,99,235,.25);}
+/* ---------- MODO: HERRAMIENTAS ELÉCTRICAS (amarillo) ---------- */
+body.modo-electrico .sidebar{background:#241d02;}
+body.modo-electrico .sidebar-brand{border-bottom-color:rgba(246,192,0,.25);}
+body.modo-electrico .brand-text strong{color:#fde047;}
+body.modo-electrico .nav-item.active{background:#f6c000; color:#403000;}
+body.modo-electrico .nav-item:hover{background:rgba(246,192,0,.18); color:#fde047;}
+body.modo-electrico .sidebar-footer{border-top-color:rgba(246,192,0,.25);}
 
-/* ---------- MODO: INVITADO (naranja) ---------- */
-body.modo-invitado .sidebar{background:#431407;}
-body.modo-invitado .sidebar-brand{border-bottom-color:rgba(249,115,22,.25);}
-body.modo-invitado .brand-text strong{color:#fdba74;}
-body.modo-invitado .nav-item.active{background:#ea580c; color:#fff;}
-body.modo-invitado .nav-item:hover{background:rgba(249,115,22,.18); color:#fdba74;}
-body.modo-invitado .sidebar-footer{border-top-color:rgba(249,115,22,.25);}
-body.modo-invitado .sidebar-footer small{color:#fdba74;}
+/* ---------- MODO: INVITADO (verde) ---------- */
+body.modo-invitado .sidebar{background:#052e16;}
+body.modo-invitado .sidebar-brand{border-bottom-color:rgba(22,163,74,.25);}
+body.modo-invitado .brand-text strong{color:#86efac;}
+body.modo-invitado .nav-item.active{background:#16a34a; color:#fff;}
+body.modo-invitado .nav-item:hover{background:rgba(22,163,74,.18); color:#86efac;}
+body.modo-invitado .sidebar-footer{border-top-color:rgba(22,163,74,.25);}
+body.modo-invitado .sidebar-footer small{color:#86efac;}
 
 @media (max-width: 560px){
   .inicio-modos{margin-top:18px; gap:10px;}
@@ -567,6 +654,16 @@ body.modo-invitado .sidebar-footer small{color:#fdba74;}
 .fin-card:nth-child(3) .fin-value{color:var(--primary);}
 .fin-sub{font-size:11.5px; color:var(--text-muted);}
 
+/* CAMBIO (Ajuste de cuentas): va alineado horizontalmente con el título, al
+   lado del encabezado. La casilla mide unos 3 cm (113px) de largo. */
+.panel-header-right{display:flex; align-items:center; gap:10px; flex-wrap:wrap; justify-content:flex-end;}
+.ajuste-cambio{
+  display:flex; align-items:center; gap:6px;
+  font-size:11.5px; font-weight:700; letter-spacing:.04em;
+  color:var(--text-muted); text-transform:uppercase;
+}
+.ajuste-cambio .input{width:113px; text-align:right; font-weight:700; text-transform:none; padding:4px 8px;}
+
 /* ---------- DEUDAS: agrupadas por marca ---------- */
 .deuda-group{background:var(--surface); border-radius:var(--radius); box-shadow:var(--shadow); margin-bottom:16px; overflow:hidden;}
 .deuda-group-header{
@@ -610,169 +707,80 @@ code{background:var(--bg); padding:2px 6px; border-radius:4px; font-size:12px;}
   .scan-manual{flex-direction:column;}
 }
 
-/* ============================================================
-   TEMA DORADO: TODO DORADO · PLATEADO BRILLOSO · BRILLOS/RELUCIRES
-   Se activa con el suich de tema (body.gold-theme). Independiente del
-   modo pro: solo cambia los colores (y sus sonidos), no las pestañas.
-   ============================================================ */
-body.gold-theme{
-  --primary:#d4af37;
-  --primary-dark:#a8862a;
-  --primary-light:#f7e9b0;
-  --success:#b8860b;
-  --success-light:#f7e9b0;
-  --danger:#b45309;
-  --danger-light:#fde9b8;
-  --warning:#ca8a04;
-  --warning-light:#fbe8a0;
-  --bg:#171105;
-  --surface:#2a210b;
-  --border:#4a3c12;
-  --text:#f6e7ad;
-  --text-muted:#c9b877;
-  --sidebar-bg:#120d02;
-  --sidebar-text:#e6d9a8;
-  --sidebar-active:#3d2f08;
-  overflow-x:hidden;
+/* ---------- PALETA DE TEMAS (Opciones) ---------- */
+.theme-palette{display:flex; flex-direction:column; gap:6px; margin:4px 0;}
+.palette-row{display:flex; gap:8px; align-items:center;}
+.palette-swatch{
+  width:30px; height:30px; border-radius:50%; cursor:pointer; padding:0;
+  border:2px solid rgba(255,255,255,.30);
+  box-shadow:0 0 0 1px rgba(0,0,0,.35);
+  transition:transform .12s ease, box-shadow .12s ease;
+}
+.palette-swatch:hover{transform:scale(1.12);}
+.palette-swatch.active{
+  border-color:#fff;
+  box-shadow:0 0 0 2px var(--primary), 0 0 10px rgba(255,255,255,.7);
 }
 
-/* El barrido de luz blanco que cruzaba la pantalla (proSweep) se eliminó:
-   era el "destello blanco" que pasaba a cada rato en el modo pro. */
-
-/* Las estrellitas blancas que titilaban por toda la pantalla (proTwinkle)
-   también se eliminaron: formaban parte del destello blanco periódico. */
-
-/* ---- Fondo principal ---- */
-body.gold-theme .main-wrap,
-body.gold-theme .content{background:radial-gradient(1200px 700px at 70% -10%, #3a2d0a 0%, #171105 55%);}
-
-/* ---- Cartas, paneles y tablas: brillo dorado pulsante ---- */
-body.gold-theme .stat-card,
-body.gold-theme .panel,
-body.gold-theme .table-wrap,
-body.gold-theme .modal-content{
-  background:linear-gradient(150deg, #30260c 0%, #241c07 60%, #2b2108 100%);
-  border:1px solid rgba(255,215,0,.22);
-  animation:proGlow 3s ease-in-out infinite;
+/* ---------- TEMAS DE COLOR (variables) ---------- */
+/* Blanco (claro): contenido claro, menú lateral oscuro con letras blancas */
+body.theme-blanco{
+  --bg:#f3f4f6; --surface:#ffffff; --border:#d1d5db;
+  --text:#1f2937; --text-muted:#6b7280;
+  --sidebar-bg:#111318; --sidebar-text:#ffffff; --sidebar-active:#2a2f3a;
 }
-@keyframes proGlow{
-  0%,100%{box-shadow:0 0 6px rgba(255,215,0,.12);}
-  50%{box-shadow:0 0 24px rgba(255,215,0,.42);}
+body.theme-blanco .brand-text strong{color:#fff;}
+body.theme-blanco .sidebar-brand{border-bottom-color:rgba(255,255,255,.08);}
+body.theme-blanco .sidebar-footer{border-top-color:rgba(255,255,255,.08); color:#9ca3af;}
+body.theme-blanco .table th{background:#e5e7eb; color:#4b5563;}
+body.theme-blanco .table tbody tr:hover{background:#e5e7eb;}
+body.theme-blanco .nav-item.active{color:#fff;}
+
+/* Negro (oscuro: el color original) */
+body.theme-negro{
+  --bg:#000000; --surface:#14161a; --border:#2a2e35;
+  --text:#e7e9ee; --text-muted:#9aa1ac;
+  --sidebar-bg:#0a0a0c; --sidebar-text:#c9ced6; --sidebar-active:#1f2937;
 }
 
-/* ---- Barra superior ---- */
-body.gold-theme .topbar{
-  background:linear-gradient(180deg, #241c07, #191203);
-  border-bottom:1px solid rgba(255,215,0,.35);
+/* Naranjado (estilo TRUPER: naranja vivo, fondo naranja claro) */
+body.theme-naranja{
+  --primary:#f26522; --primary-dark:#d9520f; --primary-light:#ff8a3d;
+  --bg:#ffeadd; --surface:#fff7f1; --border:#f7c8ab;
+  --text:#3b2417; --text-muted:#96664a;
+  --sidebar-bg:#f26522; --sidebar-text:#ffffff; --sidebar-active:#d9520f;
 }
-body.gold-theme .topbar h1,
-body.gold-theme .sidebar-brand strong{
-  background:linear-gradient(180deg, #fff6cf 0%, #f7d774 45%, #c99700 80%);
-  -webkit-background-clip:text; background-clip:text;
-  color:transparent; -webkit-text-fill-color:transparent;
-  text-shadow:0 0 18px rgba(255,215,0,.35);
-}
-body.gold-theme .hamburger{color:#f7d774;}
+body.theme-naranja .brand-text strong{color:#fff;}
+body.theme-naranja .sidebar-brand{border-bottom-color:rgba(255,255,255,.28);}
+body.theme-naranja .sidebar-footer{border-top-color:rgba(255,255,255,.28); color:#fff;}
+body.theme-naranja .nav-item:hover{background:rgba(255,255,255,.22); color:#fff;}
+body.theme-naranja .nav-item.active{background:#d9520f; color:#fff;}
+body.theme-naranja .remember-switch{background:rgba(255,255,255,.16);}
+body.theme-naranja .remember-text strong{color:#fff;}
+body.theme-naranja .remember-text small{color:#ffe4d1;}
+body.theme-naranja #btnAddPassword{color:#ffe4d1;}
+body.theme-naranja #btnToggleOptions{background:#b6470d; color:#fff;}
+body.theme-naranja .table th{background:#fcd9c2; color:#8a4a24;}
+body.theme-naranja .table tbody tr:hover{background:#ffd9bd;}
 
-/* ---- Menú lateral dorado ---- */
-body.gold-theme .sidebar{
-  background:linear-gradient(180deg, #1a1303 0%, #120d02 100%);
-  border-right:1px solid rgba(255,215,0,.25);
+/* Amarillo (estilo INGCO: amarillo brillante, fondo amarillo claro) */
+body.theme-amarillo{
+  --primary:#f6c000; --primary-dark:#d9a500; --primary-light:#ffe14d;
+  --bg:#fff4c9; --surface:#fffbea; --border:#f3dd86;
+  --text:#403000; --text-muted:#8f7c26;
+  --sidebar-bg:#f6c000; --sidebar-text:#ffffff; --sidebar-active:#c99700;
 }
-body.gold-theme .sidebar-brand{border-bottom-color:rgba(255,215,0,.25);}
-body.gold-theme .nav-item:hover{background:rgba(255,215,0,.10); color:#fff; box-shadow:0 0 10px rgba(255,215,0,.18) inset;}
-body.gold-theme .nav-item.active{
-  background:linear-gradient(135deg, #f7d774 0%, #d4af37 55%, #b8912a 100%);
-  color:#241a04; font-weight:700;
-  box-shadow:0 0 16px rgba(255,215,0,.55);
-}
-/* Iconos del menú con halo plateado */
-body.gold-theme .nav-item span{filter:drop-shadow(0 0 6px rgba(220,228,255,.9));}
-body.gold-theme .brand-icon{filter:drop-shadow(0 0 10px rgba(255,215,0,.9));}
-
-/* ---- Textos plateados brillosos ---- */
-body.gold-theme .brand-text small,
-body.gold-theme .remember-text strong,
-body.gold-theme .table th,
-body.gold-theme .stat-card .stat-value{
-  background:linear-gradient(180deg, #ffffff 0%, #cfd6e0 45%, #8f97a7 85%);
-  -webkit-background-clip:text; background-clip:text;
-  color:transparent; -webkit-text-fill-color:transparent;
-  animation:proSilver 4s ease-in-out infinite;
-}
-@keyframes proSilver{
-  0%,100%{filter:drop-shadow(0 0 2px rgba(220,228,255,.35));}
-  50%{filter:drop-shadow(0 0 10px rgba(220,228,255,.95));}
-}
-body.gold-theme .remember-text small{color:#c9b877;}
-
-/* ---- Botones ---- */
-body.gold-theme .btn-primary{
-  background:linear-gradient(135deg, #f7d774 0%, #d4af37 55%, #b8912a 100%);
-  color:#fff7d6; border:1px solid rgba(255,255,255,.18);
-  box-shadow:0 2px 14px rgba(212,175,55,.45);
-}
-body.gold-theme .btn-secondary{
-  background:linear-gradient(135deg, #e4e8ee 0%, #b9bec7 100%);
-  color:#1f2937; border:1px solid rgba(255,255,255,.5);
-  box-shadow:0 2px 10px rgba(200,210,230,.35);
-}
-body.gold-theme .btn-danger{
-  background:linear-gradient(135deg, #f7b267 0%, #b45309 100%);
-  color:#fff7d6;
-}
-body.gold-theme .btn-success{
-  background:linear-gradient(135deg, #f0d878 0%, #a8862a 100%);
-  color:#241a04;
-}
-body.gold-theme .btn:hover{filter:brightness(1.08) drop-shadow(0 0 8px rgba(255,215,0,.6));}
-
-/* ---- Tablas ---- */
-body.gold-theme .table th{
-  background:linear-gradient(180deg, #3a2f0e 0%, #2c240a 100%);
-  border-bottom:1px solid #5a4a12; color:transparent;
-}
-body.gold-theme .table td{border-bottom-color:#3d3010;}
-body.gold-theme .table tbody tr:hover{background:rgba(255,215,0,.07);}
-body.gold-theme .top-row td{background:rgba(255,215,0,.16);}
-body.gold-theme .pedido-bajo td{background:rgba(255,120,20,.14);}
-body.gold-theme .gasto-day-row td{background:rgba(255,215,0,.10);}
-
-/* ---- Inputs ---- */
-body.gold-theme .input{
-  background:#1f1807; color:#f6e7ad; border-color:#5a4a12;
-}
-body.gold-theme .input:focus{
-  outline-color:rgba(255,215,0,.4); border-color:#d4af37;
-  box-shadow:0 0 12px rgba(255,215,0,.25);
-}
-
-/* ---- Insignias ---- */
-body.gold-theme .badge-muted{background:#4a3c12; color:#e9d890;}
-body.gold-theme .badge-success-soft{background:#3d3010; color:#f7e9b0;}
-body.gold-theme .badge-danger-soft{background:#3a2108; color:#fda4a4;}
-
-/* ---- Filtros de fecha y detalles ---- */
-body.gold-theme .venta-date-chip,
-body.gold-theme .compra-date-chip{
-  background:#241c07; border-color:#5a4a12; color:#e9d890;
-}
-body.gold-theme .venta-date-chip.active,
-body.gold-theme .compra-date-chip.active{
-  background:linear-gradient(135deg, #f7d774, #d4af37);
-  border-color:#d4af37; color:#241a04;
-}
-body.gold-theme .deuda-group-header{background:linear-gradient(180deg, #2c240a, #221b06);}
-
-/* ---- Suich modo pro: su propio carril dorado ---- */
-body.gold-theme .pro-switch{
-  background:linear-gradient(90deg, rgba(212,175,55,.18), rgba(255,215,0,.06));
-  border:1px solid rgba(255,215,0,.35);
-}
-body.gold-theme .pro-switch input:checked + .switch-track{background:linear-gradient(90deg, #f7d774, #b8912a); box-shadow:0 0 10px rgba(255,215,0,.8);}
-
-/* ---- Pantalla de Inicio (negro+naranja) también dorada ---- */
-body.gold-theme.inicio-theme .main-wrap,
-body.gold-theme.inicio-theme .content{background:radial-gradient(1100px 650px at 60% -10%, #2c2105 0%, #0c0901 60%);}
-body.gold-theme.inicio-theme .topbar{background:#0c0901; border-bottom-color:rgba(255,215,0,.35);}
-body.gold-theme.inicio-theme .topbar h1{color:transparent;}
+body.theme-amarillo .brand-text strong{color:#fff;}
+body.theme-amarillo .sidebar-brand{border-bottom-color:rgba(255,255,255,.32);}
+body.theme-amarillo .sidebar-footer{border-top-color:rgba(255,255,255,.32); color:#fff;}
+body.theme-amarillo .nav-item:hover{background:rgba(64,48,0,.16); color:#fff;}
+body.theme-amarillo .nav-item.active{background:#c99700; color:#fff;}
+body.theme-amarillo .remember-switch{background:rgba(255,255,255,.22);}
+body.theme-amarillo .remember-text strong{color:#fff;}
+body.theme-amarillo .remember-text small{color:#fff;}
+body.theme-amarillo #btnAddPassword{color:#fff;}
+body.theme-amarillo #btnToggleOptions{background:#c99700; color:#fff;}
+body.theme-amarillo .btn-home{color:#fff;}
+body.theme-amarillo .table th{background:#fbeeb5; color:#7a6a10;}
+body.theme-amarillo .table tbody tr:hover{background:#fdeeb0;}
+body.theme-amarillo .btn-primary{color:#403000;}

@@ -23,6 +23,13 @@ let currentRole = 'admin';
 // Vista activa actual (para saber si el usuario está en una pestaña exclusiva
 // del modo pro cuando este se desactiva).
 let currentView = 'inicio';
+// Temporizador de la pantalla de bienvenida: la deja 1 segundo y salta sola a
+// la pestaña Productos. Se cancela si el usuario navega antes de que termine.
+let welcomeTimer = null;
+// Edición de ventas: mientras el modal de venta está en modo "editar" se
+// guardan aquí el id de la venta y a qué modo pertenece (para el invitado).
+let editingVentaId = null;
+let editingVentaModo = null;
 
 function storageKey(){ return 'stockferre_catalogo_v1_' + currentModo; }
 function invUpdatesKey(){ return 'stockferre_inv_actualizaciones_v1_' + currentModo; }
@@ -52,7 +59,9 @@ function saveInvUpdates(){
 }
 
 function markInventarioActualizado(productoId){
-  invUpdates[productoId] = todayISO();
+  // Timestamp completo (fecha + hora) para poder ordenar la pestaña por los
+  // últimos productos registrados en este dispositivo, no solo por fecha.
+  invUpdates[productoId] = new Date().toISOString();
   saveInvUpdates();
 }
 
@@ -71,6 +80,7 @@ function defaultDB(){
     ventas: [],
     compras: [],
     gastos: [],
+    gastosPrestamos: [],
     finanzas: { caja: 0, retiros: [], deudas: [] }
   };
 }
@@ -88,6 +98,7 @@ function normalizeDB(obj){
   obj.ventas = obj.ventas || [];
   obj.compras = obj.compras || [];
   obj.gastos = obj.gastos || [];
+  obj.gastosPrestamos = obj.gastosPrestamos || [];
   obj.finanzas = obj.finanzas || {};
   obj.finanzas.caja = typeof obj.finanzas.caja === 'number' ? obj.finanzas.caja : 0;
   obj.finanzas.retiros = obj.finanzas.retiros || [];
@@ -233,7 +244,15 @@ function buildGuestDB(){
     ...e.productos.map(p => Object.assign({}, p, { modoOrigin: 'electrico' }))
   ];
   merged.categorias = Array.from(new Set(m.categorias.concat(e.categorias).map(c => String(c||'').trim()).filter(Boolean)));
-  merged.ventas = m.ventas.concat(e.ventas).sort((a,b)=> new Date(b.fecha) - new Date(a.fecha));
+  merged.ventas = [
+    ...m.ventas.map(v => Object.assign({}, v, { modo: 'manual' })),
+    ...e.ventas.map(v => Object.assign({}, v, { modo: 'electrico' }))
+  ].sort((a,b)=> new Date(b.fecha) - new Date(a.fecha));
+  merged.gastosPrestamos = dedupeGastosById([
+    ...(m.gastosPrestamos||[]).map(g => Object.assign({}, g, { modo: g.modo || 'manual' })),
+    ...(e.gastosPrestamos||[]).map(g => Object.assign({}, g, { modo: g.modo || 'electrico' })),
+    ...loadGuestNeutralGastos()
+  ]);
   merged.historialEscaneos = guestSessionScans;
   merged.historialBusquedas = guestSessionSearches;
   merged.historialInventario = guestSessionInventory;
@@ -322,6 +341,7 @@ function mergeRemoteIntoLocal(local, remote){
   merged.ventas = mergeById(local.ventas, remote.ventas);
   merged.compras = mergeById(local.compras, remote.compras);
   merged.gastos = mergeById(local.gastos, remote.gastos);
+  merged.gastosPrestamos = mergeById(local.gastosPrestamos, remote.gastosPrestamos);
   merged.finanzas = Object.assign({}, remote.finanzas);
   merged.finanzas.retiros = mergeById((local.finanzas||{}).retiros, (remote.finanzas||{}).retiros);
   merged.finanzas.deudas = mergeById((local.finanzas||{}).deudas, (remote.finanzas||{}).deudas);
@@ -870,7 +890,8 @@ function todayISO(){
    ------------------------------------------------------------------------- */
 const IMG_DB_NAME = 'stockferre_imagenes_v1';
 let imgDB = null;
-let imgCache = {}; // productId -> dataURL, del modo actual
+let imgCache = {}; // productId -> arreglo de dataURLs, del modo actual
+let imgUrlCache = {}; // productId -> arreglo con la URL original de cada foto (si vino de un link)
 
 function imgStoreName(modo){
   return 'imgs_' + (modo || currentModo);
@@ -891,29 +912,113 @@ function openImgDB(){
   });
 }
 
+// Devuelve la PRIMERA foto del producto (la que se ve en la tabla y detalles).
 function getImage(productId){
-  return productId ? (imgCache[productId] || '') : '';
+  const arr = productId ? (imgCache[productId] || []) : [];
+  return Array.isArray(arr) && arr.length ? arr[0] : '';
+}
+
+const MAX_IMGS = 3;
+
+// Devuelve TODAS las fotos del producto (para el carrusel).
+function getImages(productId){
+  const arr = productId ? (imgCache[productId] || []) : [];
+  return Array.isArray(arr) ? arr.slice() : [];
+}
+
+function getImageCount(productId){
+  return productId ? getImages(productId).length : 0;
+}
+
+// Devuelve el LINK original con que se cargó la primera foto (si vino de una URL).
+// Se usa para exportarlo en la columna IMAGEN y tener un respaldo del origen.
+function getImageUrl(productId){
+  const arr = productId ? (imgUrlCache[productId] || []) : [];
+  return Array.isArray(arr) && arr.length ? (arr[0] || '') : '';
+}
+
+/* -------------------------------------------------------------------------
+   MINIATURAS PEREZOSAS: las filas que están fuera de pantalla NO decodifican
+   su foto de golpe; se pintan con un marcador y la foto se muestra recién
+   cuando el usuario se acerca (IntersectionObserver). Así una lista larga de
+   productos con foto carga mucho más rápido.
+   ------------------------------------------------------------------------- */
+const IMG_LAZY_FIRST = 25; // filas iniciales que sí se pintan de inmediato
+let imgLazyObserver = null;
+let imgLazyObserved = new Set();
+
+function getImgLazyObserver(){
+  if(imgLazyObserver) return imgLazyObserver;
+  if(typeof IntersectionObserver === 'undefined') return null;
+  imgLazyObserver = new IntersectionObserver(entries=>{
+    for(const entry of entries){
+      if(entry.isIntersecting) hydrateLazyThumb(entry.target);
+    }
+  }, { rootMargin: '300px' });
+  return imgLazyObserver;
+}
+
+function hydrateLazyThumb(el){
+  if(!el || el.dataset.loaded) return;
+  el.dataset.loaded = '1';
+  const pid = el.dataset.lazyImg;
+  const obs = getImgLazyObserver();
+  if(obs) obs.unobserve(el);
+  imgLazyObserved.delete(el);
+  const img = pid ? getImage(pid) : '';
+  if(img){
+    el.innerHTML = `<img src="${img}" class="prod-thumb" alt="" data-img-product="${pid}" decoding="async">`;
+  }
+}
+
+function armImgLazyLoader(scope){
+  const obs = getImgLazyObserver();
+  if(!obs || !scope) return;
+  scope.querySelectorAll('.prod-thumb-lazy').forEach(el=>{
+    if(imgLazyObserved.has(el)) return;
+    imgLazyObserved.add(el);
+    obs.observe(el);
+  });
+}
+
+function resetImgLazy(){
+  if(imgLazyObserver){
+    imgLazyObserved.forEach(el=> imgLazyObserver.unobserve(el));
+    imgLazyObserved = new Set();
+  }
 }
 
 function loadImagesFromStore(modo){
-  imgCache = {};
   return openImgDB().then(db => new Promise(resolve=>{
     const storeName = imgStoreName(modo);
     if(!db.objectStoreNames.contains(storeName)){ resolve(imgCache); return; }
     const tx = db.transaction(storeName, 'readonly');
     const req = tx.objectStore(storeName).getAll();
     req.onsuccess = ()=>{
-      (req.result || []).forEach(item => { if(item && item.id) imgCache[item.id] = item.data; });
+      (req.result || []).forEach(item => {
+        if(item && item.id){
+          // Normaliza a arreglos. Las imágenes guardadas con la versión vieja
+          // de la app eran UNA sola cadena: se convierten a un arreglo de 1.
+          const dataArr = Array.isArray(item.data) ? item.data : (item.data ? [item.data] : []);
+          let urlArr = Array.isArray(item.url) ? item.url : (item.url ? [item.url] : []);
+          // Imágenes viejas guardadas como URL directa (sin dataURL): recupera el link.
+          if(dataArr.length === 1 && !urlArr[0] && /^https?:\/\//i.test(String(dataArr[0]))) urlArr = [dataArr[0]];
+          imgCache[item.id] = dataArr;
+          imgUrlCache[item.id] = urlArr;
+        }
+      });
       resolve(imgCache);
     };
     req.onerror = ()=> resolve(imgCache);
-  })).catch(err=>{ console.error('Error leyendo imágenes', err); imgCache = {}; return imgCache; });
+  })).catch(err=>{ console.error('Error leyendo imágenes', err); imgCache = {}; imgUrlCache = {}; return imgCache; });
 }
 
 // Carga las imágenes del modo indicado. En modo invitado mezcla ambos modos
 // (Manuales + Eléctricas) porque el invitado ve productos de los dos.
 function loadImagesForModo(modo){
   const m = modo || currentModo;
+  imgCache = {};
+  imgUrlCache = {};
   if(m === 'invitado'){
     return Promise.all([loadImagesFromStore('manual'), loadImagesFromStore('electrico')])
       .then(()=> imgCache);
@@ -921,24 +1026,100 @@ function loadImagesForModo(modo){
   return loadImagesFromStore(m);
 }
 
-function saveImageLocal(productId, data){
+// AÑADE una foto más al producto (un producto puede tener varias). Lee primero
+// las fotos que YA estaban guardadas en IndexedDB (no confía en la caché), así
+// nunca se pierden ni se pisan las fotos existentes al añadir una nueva.
+function saveImageLocal(productId, data, url){
   if(!productId || !data) return Promise.resolve(false);
   return openImgDB().then(db => new Promise(resolve=>{
     const store = imgStoreName();
+    if(!db.objectStoreNames.contains(store)){
+      console.error('Tienda de imágenes no existe: ' + store);
+      resolve(false);
+      return;
+    }
     const tx = db.transaction(store, 'readwrite');
-    tx.objectStore(store).put({ id: productId, data: data }, productId);
-    tx.oncomplete = ()=>{ imgCache[productId] = data; resolve(true); };
-    tx.onerror = ()=>{ console.error('Error guardando imagen', tx.error); resolve(false); };
+    const os = tx.objectStore(store);
+    const getReq = os.get(productId);
+    getReq.onsuccess = ()=>{
+      const prev = getReq.result || null;
+      const dataArr = prev && Array.isArray(prev.data) ? prev.data.slice()
+                     : (prev && prev.data ? [prev.data] : []);
+      const urlArr = prev && Array.isArray(prev.url) ? prev.url.slice()
+                     : (prev && prev.url ? [prev.url] : []);
+      if(dataArr.length >= MAX_IMGS){ resolve(false); return; }
+      dataArr.push(data);
+      urlArr.push(url || '');
+      os.put({ id: productId, data: dataArr, url: urlArr }, productId);
+      tx.oncomplete = ()=>{ imgCache[productId] = dataArr; imgUrlCache[productId] = urlArr; resolve(true); };
+      tx.onerror = ()=>{ console.error('Error guardando imagen', tx.error); resolve(false); };
+    };
+    getReq.onerror = ()=>{ console.error('Error leyendo imagen', getReq.error); resolve(false); };
   })).catch(err=>{ console.error('Error guardando imagen', err); return false; });
 }
 
+// REEMPLAZA todas las fotos del producto por un arreglo (se usa al restaurar
+// un backup, que trae todas las fotos juntas). Si el arreglo está vacío borra.
+function saveImagesLocal(productId, dataArr, urlArr){
+  if(!productId) return Promise.resolve(false);
+  dataArr = (Array.isArray(dataArr) ? dataArr : (dataArr ? [dataArr] : [])).filter(Boolean).slice(0, MAX_IMGS);
+  urlArr = Array.isArray(urlArr) ? urlArr : (urlArr ? [urlArr] : []);
+  urlArr = urlArr.slice(0, dataArr.length);
+  return openImgDB().then(db => new Promise(resolve=>{
+    const store = imgStoreName();
+    const tx = db.transaction(store, 'readwrite');
+    if(dataArr.length === 0) tx.objectStore(store).delete(productId);
+    else tx.objectStore(store).put({ id: productId, data: dataArr, url: urlArr }, productId);
+    tx.oncomplete = ()=>{
+      if(dataArr.length === 0){ delete imgCache[productId]; delete imgUrlCache[productId]; }
+      else{ imgCache[productId] = dataArr.slice(); imgUrlCache[productId] = urlArr.slice(); }
+      resolve(true);
+    };
+    tx.onerror = ()=>{ console.error('Error guardando imágenes', tx.error); resolve(false); };
+  })).catch(err=>{ console.error('Error guardando imágenes', err); return false; });
+}
+
+// Quita UNA foto del producto (por su posición dentro del arreglo).
+function removeImageAtLocal(productId, index){
+  return openImgDB().then(db => new Promise(resolve=>{
+    const store = imgStoreName();
+    if(!db.objectStoreNames.contains(store)){
+      console.error('Tienda de imágenes no existe: ' + store);
+      resolve(false);
+      return;
+    }
+    const tx = db.transaction(store, 'readwrite');
+    const os = tx.objectStore(store);
+    const getReq = os.get(productId);
+    getReq.onsuccess = ()=>{
+      const prev = getReq.result || null;
+      const dataArr = prev && Array.isArray(prev.data) ? prev.data.slice()
+                     : (prev && prev.data ? [prev.data] : []);
+      const urlArr = prev && Array.isArray(prev.url) ? prev.url.slice()
+                     : (prev && prev.url ? [prev.url] : []);
+      dataArr.splice(index, 1);
+      urlArr.splice(index, 1);
+      if(dataArr.length === 0) os.delete(productId);
+      else os.put({ id: productId, data: dataArr, url: urlArr }, productId);
+      tx.oncomplete = ()=>{
+        if(dataArr.length === 0){ delete imgCache[productId]; delete imgUrlCache[productId]; }
+        else{ imgCache[productId] = dataArr; imgUrlCache[productId] = urlArr; }
+        resolve(true);
+      };
+      tx.onerror = ()=>{ console.error('Error borrando imagen', tx.error); resolve(false); };
+    };
+    getReq.onerror = ()=>{ console.error('Error leyendo imagen', getReq.error); resolve(false); };
+  })).catch(err=>{ console.error('Error borrando imagen', err); return false; });
+}
+
+// Quita TODAS las fotos del producto (se usa al borrar el producto).
 function removeImageLocal(productId){
   if(!productId) return Promise.resolve(false);
   return openImgDB().then(db => new Promise(resolve=>{
     const store = imgStoreName();
     const tx = db.transaction(store, 'readwrite');
     tx.objectStore(store).delete(productId);
-    tx.oncomplete = ()=>{ delete imgCache[productId]; resolve(true); };
+    tx.oncomplete = ()=>{ delete imgCache[productId]; delete imgUrlCache[productId]; resolve(true); };
     tx.onerror = ()=>{ console.error('Error borrando imagen', tx.error); resolve(false); };
   })).catch(err=>{ console.error('Error borrando imagen', err); return false; });
 }
@@ -949,41 +1130,49 @@ function clearAllImages(){
     const tx = db.transaction(['imgs_manual','imgs_electrico'], 'readwrite');
     tx.objectStore('imgs_manual').clear();
     tx.objectStore('imgs_electrico').clear();
-    tx.oncomplete = ()=>{ imgCache = {}; resolve(true); };
+    tx.oncomplete = ()=>{ imgCache = {}; imgUrlCache = {}; resolve(true); };
     tx.onerror = ()=> resolve(false);
   })).catch(err=>{ console.error('Error limpiando imágenes', err); return false; });
 }
 
-// Reduce la imagen a un tamaño razonable (máx. 400px) y la convierte a JPEG
-// de buena calidad: ocupa poco en el dispositivo y es lo que sale en el CSV.
+// Reduce UNA imagen ya cargada (dataURL) a un tamaño razonable (máx. 400px)
+// y la convierte a JPEG de buena calidad: ocupa poco en el dispositivo y es
+// lo que sale en el CSV. Las imágenes pegadas por URL también pasan por aquí
+// (si no, se guardarían en tamaño original y podrían pesar varios MB cada una).
+function compressDataURL(dataUrl){
+  return new Promise((resolve, reject)=>{
+    const img = new Image();
+    img.onload = ()=>{
+      const MAX = 400;
+      let w = img.width || MAX;
+      let h = img.height || MAX;
+      if(w > MAX || h > MAX){
+        const ratio = Math.min(MAX / w, MAX / h);
+        w = Math.round(w * ratio);
+        h = Math.round(h * ratio);
+      }
+      const canvas = document.createElement('canvas');
+      canvas.width = w;
+      canvas.height = h;
+      try{
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, w, h);
+        resolve(canvas.toDataURL('image/jpeg', 0.82));
+      }catch(err){
+        console.warn('No se pudo comprimir, se usará la imagen original', err);
+        resolve(dataUrl); // fallback: la imagen original
+      }
+    };
+    img.onerror = ()=> reject(new Error('No se pudo leer la imagen'));
+    img.src = dataUrl;
+  });
+}
+
 function compressImage(file){
   return new Promise((resolve, reject)=>{
     const reader = new FileReader();
     reader.onload = ()=>{
-      const img = new Image();
-      img.onload = ()=>{
-        const MAX = 400;
-        let w = img.width || 400;
-        let h = img.height || 400;
-        if(w > MAX || h > MAX){
-          const ratio = Math.min(MAX / w, MAX / h);
-          w = Math.round(w * ratio);
-          h = Math.round(h * ratio);
-        }
-        const canvas = document.createElement('canvas');
-        canvas.width = w;
-        canvas.height = h;
-        try{
-          const ctx = canvas.getContext('2d');
-          ctx.drawImage(img, 0, 0, w, h);
-          resolve(canvas.toDataURL('image/jpeg', 0.82));
-        }catch(err){
-          console.warn('No se pudo comprimir, se usará la imagen original', err);
-          resolve(reader.result); // fallback: la imagen original
-        }
-      };
-      img.onerror = ()=> reject(new Error('No se pudo leer la imagen'));
-      img.src = reader.result;
+      compressDataURL(reader.result).then(resolve, reject);
     };
     reader.onerror = ()=> reject(reader.error);
     reader.readAsDataURL(file);
@@ -991,15 +1180,84 @@ function compressImage(file){
 }
 
 // Descarga una imagen desde una URL y la convierte a dataURL local.
+// POR QUÉ ALGUNAS URLS FUNCIONAN Y OTRAS NO: fetch() necesita que el sitio de
+// la imagen envíe la cabecera CORS ("Access-Control-Allow-Origin"). Google,
+// Facebook, Pinterest y muchos otros la bloquean, así que el fetch directo
+// falla con error de CORS. Para esos casos se reintenta a través de servidores
+// proxy con CORS abierto (allorigins, weserv y corsproxy). También se valida
+// que la respuesta sea realmente una imagen, no una página HTML de error.
 function fetchImageAsDataURL(url){
-  return fetch(url)
-    .then(r => { if(!r.ok) throw new Error('HTTP ' + r.status); return r.blob(); })
-    .then(blob => new Promise((resolve, reject)=>{
-      const reader = new FileReader();
-      reader.onload = ()=> resolve(reader.result);
-      reader.onerror = ()=> reject(reader.error);
-      reader.readAsDataURL(blob);
-    }));
+  url = String(url||'').trim();
+  if(!url) return Promise.reject(new Error('La URL está vacía'));
+  // Ya es una imagen local (dataURL): se usa tal cual, sin descargarla.
+  if(url.startsWith('data:image/')) return Promise.resolve(url);
+  if(!/^https?:\/\//i.test(url)){
+    return Promise.reject(new Error('La URL debe empezar con http:// o https://'));
+  }
+
+  const blobToDataURL = (blob) => new Promise((resolve, reject)=>{
+    const reader = new FileReader();
+    reader.onload = ()=> resolve(reader.result);
+    reader.onerror = ()=> reject(reader.error);
+    reader.readAsDataURL(blob);
+  });
+
+  // Confirma que el contenido sea una imagen de verdad cargándola en un <img>.
+  // Algunos servidores mandan la foto con tipo "application/octet-stream"
+  // (por eso revisar solo el tipo MIME descartaba imágenes válidas), y una
+  // página HTML de error jamás cargará como imagen.
+  const validarImagen = (dataUrl) => new Promise((resolve, reject)=>{
+    const img = new Image();
+    img.onload = ()=> resolve(dataUrl);
+    img.onerror = ()=> reject(new Error('El link no apunta directamente a una imagen'));
+    img.src = dataUrl;
+  });
+
+  // Límite de 20s por intento: si un servidor se cuelga o tarda mucho, se
+  // descarta ese intento en vez de esperar indefinidamente.
+  const conTimeout = (promise, ms) => Promise.race([
+    promise,
+    new Promise((_, reject)=> setTimeout(()=> reject(new Error('Tiempo de espera agotado')), ms))
+  ]);
+
+  const descargar = (fullUrl) =>
+    conTimeout(
+      fetch(fullUrl, { mode: 'cors', redirect: 'follow' })
+        .then(r => { if(!r.ok) throw new Error('HTTP ' + r.status); return r.blob(); })
+        .then(blobToDataURL)
+        .then(validarImagen),
+      20000
+    );
+
+  // Se prueban TODAS las vías a la vez (la URL original + 3 proxies) y se usa
+  // la primera que funcione. Antes se probaban una detrás de otra, así que
+  // cada intento lento sumaba su espera al siguiente; en paralelo la demora
+  // es la de una sola descarga.
+  const proxied = [
+    'https://api.allorigins.win/raw?url=' + encodeURIComponent(url),
+    'https://images.weserv.nl/?url=' + encodeURIComponent(url.replace(/^https?:\/\//i, '')),
+    'https://corsproxy.io/?url=' + encodeURIComponent(url)
+  ];
+  return primeraExito([url, ...proxied].map(descargar)).catch(()=>{
+    throw new Error('El sitio no permite compartir la imagen. Descárgala y súbela con "📁 Del dispositivo".');
+  });
+}
+
+// Resuelve con el primer resultado exitoso de la lista de promesas y solo
+// falla cuando TODAS fallaron (equivale a Promise.any, sin depender de que el
+// navegador lo soporte).
+function primeraExito(promises){
+  return new Promise((resolve, reject)=>{
+    let pendientes = promises.length;
+    let ultimoError = null;
+    promises.forEach(p=>{
+      Promise.resolve(p).then(resolve, err=>{
+        ultimoError = err;
+        pendientes--;
+        if(pendientes === 0) reject(ultimoError || new Error('fallo'));
+      });
+    });
+  });
 }
 
 /* -------------------------------------------------------------------------
@@ -1110,6 +1368,9 @@ function saveVenta(data){
     precioUnitario,
     total,
     metodoPago: data.metodoPago,
+    qrPersona: data.qrPersona || '',
+    efectivoMonto: parseFloat(data.efectivoMonto) || 0,
+    qrMonto: parseFloat(data.qrMonto) || 0,
     fecha: todayISO()
   };
 
@@ -1169,21 +1430,38 @@ function guestCommitVenta(venta, data, cantidad){
 //   mantenerInventario = true  → el stock NO se toca (solo sale la venta).
 //   mantenerInventario = false → la cantidad se devuelve al stock del producto.
 function deleteVenta(id, mantenerInventario){
-  const venta = db.ventas.find(v => v.id === id);
+  // El invitado elimina desde la base del modo al que pertenece la venta.
+  let dbObj = db;
+  let modo = currentModo;
+  if(currentModo === 'invitado'){
+    const m = loadModoDB('manual');
+    const e = loadModoDB('electrico');
+    const enM = m.ventas.some(v => v.id === id);
+    const enE = e.ventas.some(v => v.id === id);
+    dbObj = enM ? m : (enE ? e : null);
+    modo = enM ? 'manual' : 'electrico';
+  }
+  if(!dbObj) return;
+  const venta = dbObj.ventas.find(v => v.id === id);
   if(!venta) return;
   if(!mantenerInventario){
-    const p = getProductoByCodigo(venta.codigo);
+    const p = findProductoInDB(dbObj, venta.codigo);
     if(p){
       p.stock = (p.stock || 0) + venta.cantidad;
       touchProducto(p);
-      applyStockDelta(p, venta.cantidad); // devuelve la cantidad a la nube
+      applyStockDelta(p, venta.cantidad, modo); // devuelve la cantidad a la nube
     }
   }
-  db.ventas = db.ventas.filter(v => v.id !== id);
+  dbObj.ventas = dbObj.ventas.filter(v => v.id !== id);
   // Al eliminar una venta, el dinero que se recibió sale del efectivo actual
-  db.finanzas = db.finanzas || {};
-  db.finanzas.caja = (Number(db.finanzas.caja) || 0) - (venta.total || 0);
-  saveDB();
+  dbObj.finanzas = dbObj.finanzas || {};
+  dbObj.finanzas.caja = (Number(dbObj.finanzas.caja) || 0) - (venta.total || 0);
+  if(currentModo === 'invitado'){
+    persistModoDB(modo, dbObj);
+    db = buildGuestDB();
+  }else{
+    saveDB();
+  }
   renderVentas();
   renderInventario();
   renderProductos();
@@ -1243,7 +1521,131 @@ function updateVentaDestinoUI(modo, locked){
   sel.disabled = !!locked;
 }
 
+// Vuelve el modal de venta a su modo normal ("Registrar venta") y olvida la
+// venta que se estaba editando.
+function resetVentaEditUI(){
+  editingVentaId = null;
+  editingVentaModo = null;
+  const title = document.querySelector('#modalVenta .modal-header h3');
+  if(title) title.textContent = '💰 Registrar venta';
+  const btn = document.querySelector('#formVenta button[type="submit"]');
+  if(btn) btn.textContent = 'Registrar venta';
+}
+
+// Edición de ventas: el invitado (y el dueño) pueden corregir una venta ya
+// registrada. Se llena el mismo formulario con los datos y al guardar se
+// actualiza la venta, el stock y el efectivo del modo al que pertenece.
+function openVentaEditModal(id){
+  let v = null;
+  let modo = currentModo;
+  if(currentModo === 'invitado'){
+    // El invitado ve las ventas de ambos modos: busca a cuál pertenece.
+    const m = loadModoDB('manual');
+    const e = loadModoDB('electrico');
+    v = m.ventas.find(x => x.id === id) || e.ventas.find(x => x.id === id);
+    modo = m.ventas.some(x => x.id === id) ? 'manual' : 'electrico';
+  }else{
+    v = db.ventas.find(x => x.id === id);
+  }
+  if(!v){
+    toast('No se encontró la venta', 'error');
+    return;
+  }
+  editingVentaId = v.id;
+  editingVentaModo = modo;
+  const title = document.querySelector('#modalVenta .modal-header h3');
+  if(title) title.textContent = '✏️ Editar venta';
+  const btn = document.querySelector('#formVenta button[type="submit"]');
+  if(btn) btn.textContent = 'Guardar cambios';
+
+  const esOtro = v.codigo === 'OTRO';
+  document.getElementById('vEsOtro').value = esOtro ? '1' : '0';
+  document.getElementById('vNombreDisplayBox').style.display = esOtro ? 'none' : '';
+  document.getElementById('vNombreOtroLabel').style.display = esOtro ? '' : 'none';
+  document.getElementById('vCodigo').value = v.codigo || '';
+  document.getElementById('vNombre').value = v.nombre || '';
+  document.getElementById('vNombreDisplay').textContent = v.nombre || v.codigo || '';
+  document.getElementById('vNombreOtroInput').value = v.nombre || '';
+  document.getElementById('vCantidad').value = v.cantidad;
+  document.getElementById('vPrecioTotal').value = v.total;
+
+  // Método de pago y pago mixto.
+  const metodo = v.metodoPago || 'efectivo';
+  document.getElementById('vMetodoPago').value = metodo;
+  document.querySelectorAll('[data-payment-method]').forEach(b=>{
+    b.classList.toggle('active', b.dataset.paymentMethod === metodo);
+  });
+  const splitBox = document.getElementById('vSplitPago');
+  if(splitBox){
+    splitBox.style.display = metodo === 'mixto' ? '' : 'none';
+    document.getElementById('vEfectivoMonto').value = v.efectivoMonto || 0;
+    document.getElementById('vQrMonto').value = v.qrMonto || 0;
+  }
+  // Quién cobró por QR.
+  document.getElementById('vQrPersona').value = v.qrPersona || '';
+  updateQrTabLabel(document.querySelector('[data-payment-method="qr"]'));
+  // Modo destino: en el invitado queda fijo (la venta no cambia de base).
+  updateVentaDestinoUI(modo, true);
+  recalcVentaPrecioUnitario();
+  openModal('modalVenta');
+}
+
+// Actualiza una venta existente (cantidad, total, pago) y ajusta el stock y el
+// efectivo del modo al que pertenece. Funciona igual para el dueño y para el
+// invitado (que guarda en la base del modo de la venta).
+function updateVenta(id, modo, data){
+  const cantidad = parseFloat(data.cantidad) || 0;
+  const total = parseFloat(data.total) || 0;
+  const precioUnitario = cantidad > 0 ? total / cantidad : 0;
+  const applyStockDeltaModo = currentModo === 'invitado' ? modo : currentModo;
+  const dbObj = currentModo === 'invitado' ? loadModoDB(modo) : db;
+  // Se guarda el MISMO objeto que se modificó (en invitado no volver a leer
+  // de LocalStorage, o se perdería la edición).
+  const persist = () => currentModo === 'invitado' ? persistModoDB(modo, dbObj) : saveDB();
+
+  const v = dbObj.ventas.find(x => x.id === id);
+  if(!v) return false;
+
+  const oldCantidad = v.cantidad || 0;
+  const oldTotal = v.total || 0;
+  const deltaCant = oldCantidad - cantidad;
+
+  // Ajusta el stock: devuelve la cantidad que se vendió antes y descuenta la
+  // nueva (para "OTRO" no hay producto ni stock).
+  if(v.codigo !== 'OTRO'){
+    const p = findProductoInDB(dbObj, v.codigo) || getProductoByCodigo(v.codigo);
+    if(p){
+      p.stock = (p.stock || 0) + deltaCant;
+      touchProducto(p);
+      applyStockDelta(p, deltaCant, applyStockDeltaModo);
+    }
+  }
+
+  // Ajusta el efectivo de la caja: sale lo viejo, entra lo nuevo.
+  dbObj.finanzas = dbObj.finanzas || {};
+  dbObj.finanzas.caja = (Number(dbObj.finanzas.caja) || 0) + (total - oldTotal);
+
+  // Actualiza los campos editables.
+  v.cantidad = cantidad;
+  v.precioUnitario = precioUnitario;
+  v.total = total;
+  v.nombre = data.nombre || v.nombre;
+  v.metodoPago = data.metodoPago;
+  v.qrPersona = data.qrPersona || '';
+  v.efectivoMonto = data.efectivoMonto || 0;
+  v.qrMonto = data.qrMonto || 0;
+
+  persist();
+  if(currentModo === 'invitado') db = buildGuestDB();
+  renderVentas();
+  renderInventario();
+  renderProductos();
+  renderFinanzas();
+  return true;
+}
+
 function openVentaModal(producto){
+  resetVentaEditUI();
   document.getElementById('vEsOtro').value = '0';
   document.getElementById('vNombreDisplayBox').style.display = '';
   document.getElementById('vNombreOtroLabel').style.display = 'none';
@@ -1256,6 +1658,9 @@ function openVentaModal(producto){
     btn.classList.toggle('active', btn.dataset.paymentMethod === 'efectivo');
   });
   document.getElementById('vMetodoPago').value = 'efectivo';
+  const qrTabOpen = document.querySelector('[data-payment-method="qr"]');
+  if(qrTabOpen) qrTabOpen.textContent = '📱 QR';
+  resetSplitPagoUI();
   updateVentaDestinoUI(producto.modoOrigin || 'manual', true);
   recalcVentaPrecioUnitario();
   openModal('modalVenta');
@@ -1265,6 +1670,7 @@ function openVentaModal(producto){
 // libre y un precio. Se registra en el historial de ventas, pero nunca se
 // crea como producto ni afecta ningún stock.
 function openVentaModalOtro(){
+  resetVentaEditUI();
   document.getElementById('vEsOtro').value = '1';
   document.getElementById('vNombreDisplayBox').style.display = 'none';
   document.getElementById('vNombreOtroLabel').style.display = '';
@@ -1277,10 +1683,39 @@ function openVentaModalOtro(){
     btn.classList.toggle('active', btn.dataset.paymentMethod === 'efectivo');
   });
   document.getElementById('vMetodoPago').value = 'efectivo';
+  const qrTabOpen = document.querySelector('[data-payment-method="qr"]');
+  if(qrTabOpen) qrTabOpen.textContent = '📱 QR';
+  resetSplitPagoUI();
   updateVentaDestinoUI('manual', false);
   recalcVentaPrecioUnitario();
   openModal('modalVenta');
   setTimeout(()=> document.getElementById('vNombreOtroInput').focus(), 50);
+}
+
+// Pago mixto (QR + efectivo): si no hay nada escrito aún, deja por defecto
+// todo en efectivo; la otra casilla se rellena sola con el total menos lo
+// escrito (lo hace el listener de cada campo).
+function syncSplitPago(){
+  const box = document.getElementById('vSplitPago');
+  if(!box) return;
+  const total = parseFloat(document.getElementById('vPrecioTotal').value) || 0;
+  const totalEl = document.getElementById('vSplitTotal');
+  if(totalEl) totalEl.textContent = fmtMoney(total);
+  const ef = document.getElementById('vEfectivoMonto');
+  const qr = document.getElementById('vQrMonto');
+  const efVal = parseFloat(ef.value);
+  const qrVal = parseFloat(qr.value);
+  if((isNaN(efVal) && isNaN(qrVal)) || (total > 0 && efVal === 0 && qrVal === 0)){
+    ef.value = total.toFixed(2);
+    qr.value = '0.00';
+  }
+}
+function resetSplitPagoUI(){
+  const box = document.getElementById('vSplitPago');
+  if(!box) return;
+  box.style.display = 'none';
+  document.getElementById('vEfectivoMonto').value = '';
+  document.getElementById('vQrMonto').value = '';
 }
 
 function handleVentaSubmit(e){
@@ -1303,6 +1738,16 @@ function handleVentaSubmit(e){
     return;
   }
 
+  let efectivoMonto = 0, qrMonto = 0;
+  if(metodoPago === 'mixto'){
+    efectivoMonto = parseFloat(document.getElementById('vEfectivoMonto').value) || 0;
+    qrMonto = parseFloat(document.getElementById('vQrMonto').value) || 0;
+    if(Math.abs((efectivoMonto + qrMonto) - total) > 0.01){
+      toast('Efectivo + QR deben sumar el total', 'error');
+      return;
+    }
+  }
+
   let codigo, nombre;
   if(esOtro){
     nombre = document.getElementById('vNombreOtroInput').value.trim();
@@ -1317,7 +1762,21 @@ function handleVentaSubmit(e){
   }
 
   const modoDestino = document.getElementById('vModoDestino') ? document.getElementById('vModoDestino').value : 'manual';
-  const ventaGuardada = saveVenta({ codigo, nombre, cantidad, total, metodoPago, modoDestino });
+  const qrPersona = document.getElementById('vQrPersona') ? document.getElementById('vQrPersona').value : '';
+
+  // Si el modal está en modo "editar", actualiza la venta existente (ajusta
+  // stock y efectivo) en vez de registrar una nueva.
+  if(editingVentaId){
+    const ok = updateVenta(editingVentaId, editingVentaModo, { codigo, nombre, cantidad, total, metodoPago, qrPersona, efectivoMonto, qrMonto });
+    resetVentaEditUI();
+    closeAllModals();
+    if(!ok){ toast('No se encontró la venta', 'error'); return; }
+    playClickSound();
+    toast('Venta actualizada', 'success');
+    return;
+  }
+
+  const ventaGuardada = saveVenta({ codigo, nombre, cantidad, total, metodoPago, modoDestino, qrPersona, efectivoMonto, qrMonto });
   notifySale(ventaGuardada);
   playCashRegisterSound();
   closeAllModals();
@@ -1428,7 +1887,7 @@ function renderScanResultInto(elementId, codigo, context){
   document.getElementById(`btnActionFromScan_${elementId}`).addEventListener('click', ()=>{
     if(context === 'inventario'){
       closeInventarioScan();
-      openInventarioDetalleForm(p, codigo);
+      openInventarioCantidadBox(p, codigo);
     }else if(context === 'compra'){
       closeCompraScan();
       openCompraDetalleForm(p, codigo);
@@ -1584,56 +2043,6 @@ function playProModeSound(){
   });
 }
 
-// Sonido del menú lateral en modo pro: TIMBRE DORADO PREMIUM. Una campanita
-// de cristal (Mi5) rica y cálida, con un toque grave dorado (La3) muy suave
-// y un centelleo de plata alto al final. Corto, elegante y lujoso, como tocar
-// una copa de oro al navegar.
-function playGoldClink(){
-  scheduleOnAudio(ctx => {
-    const now = ctx.currentTime;
-    const t0 = now + 0.01;
-
-    // Campanita de cristal: parciales brillantes de metal fino
-    const bell = (freq, t, dur, vol) => {
-      const partials = [1, 2.01, 2.92, 4.03, 5.4];
-      const gains = [1, 0.42, 0.26, 0.14, 0.07];
-      partials.forEach((mul, i) => {
-        const o = ctx.createOscillator();
-        const g = ctx.createGain();
-        o.type = 'sine';
-        o.frequency.value = freq * mul;
-        o.connect(g);
-        g.connect(ctx.destination);
-        g.gain.setValueAtTime(0.0001, t);
-        g.gain.exponentialRampToValueAtTime(vol * gains[i], t + 0.004);
-        g.gain.exponentialRampToValueAtTime(0.0001, t + dur * (0.5 + i * 0.18));
-        o.start(t);
-        o.stop(t + dur + 0.1);
-      });
-    };
-
-    // Nota principal de cristal (Mi5) + quinta arriba (Si5) muy suave
-    bell(659.26, t0, 0.8, 0.15);
-    bell(987.77, t0 + 0.05, 0.7, 0.06);
-
-    // Toque dorado grave (La3): cálido y breve, da cuerpo sin ensuciar
-    const low = ctx.createOscillator();
-    const lg = ctx.createGain();
-    low.type = 'sine';
-    low.frequency.value = 220;
-    low.connect(lg);
-    lg.connect(ctx.destination);
-    lg.gain.setValueAtTime(0.0001, t0);
-    lg.gain.linearRampToValueAtTime(0.05, t0 + 0.02);
-    lg.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.5);
-    low.start(t0);
-    low.stop(t0 + 0.55);
-
-    // Centelleo de plata: destello agudo y breve al final
-    bell(2637.02, t0 + 0.12, 0.4, 0.04);
-  });
-}
-
 // Aplica a cada pestaña exclusiva del modo pro su demora de aparición para
 // que salgan UNA POR UNA (la animación y el barrido de brillo viven en CSS,
 // usando la variable --reveal-delay). Además, hace que el menú BAJE (se
@@ -1719,6 +2128,18 @@ function handleScannedCode(codigo, fromCamera){
     // Al detectar el código se cierra el escáner y se abre directo el
     // formulario "Registrar ingreso" (no hay tarjeta de resultado que mostrar).
     handleCompraScan(codigo);
+    return;
+  }
+  if(scanContext === 'venta'){
+    // Al detectar el código se cierra el escáner y se abre directo el
+    // formulario de registro de venta con ese producto.
+    handleVentaScan(codigo);
+    return;
+  }
+  if(scanContext === 'codigobarras'){
+    // "Añadir código de barras": el primer código es el del producto y el
+    // segundo (código de barras) se guarda en ese producto.
+    handleCodigoBarrasScan(codigo, fromCamera);
     return;
   }
   renderScanResult(codigo);
@@ -1835,7 +2256,30 @@ function renderHistorial(){
   }
 }
 
-const PAYMENT_LABELS = { efectivo: '💵 Efectivo', qr: '📱 QR' };
+const PAYMENT_LABELS = { efectivo: '💵 Efectivo', qr: '📱 QR', mixto: '💵📱 QR y Efectivo' };
+
+// Personas que cobran por QR. Se eligen al registrar una venta con QR y se
+// usan en el "Ajuste de cuentas" para separar lo cobrado por cada uno.
+const QR_PERSONAS = ['Abner', 'José', 'Jona', 'Richard'];
+
+// Muestra en el botón QR quién cobra, p. ej. "📱 QR de ABNER".
+function updateQrTabLabel(qrTab){
+  if(!qrTab) return;
+  const sel = document.getElementById('vQrPersona');
+  qrTab.textContent = '📱 QR de ' + (sel ? (sel.value || '') : '').toUpperCase();
+}
+
+// Abre el recuadro "QR de" para elegir quién cobra. Se abre CADA vez que se
+// pulsa el botón QR (aunque ya diga "QR de ABNER") para poder cambiarlo.
+function openQrPersonaPicker(){
+  const container = document.getElementById('qrPersonaOptions');
+  if(!container) return;
+  const actual = document.getElementById('vQrPersona').value;
+  container.innerHTML = QR_PERSONAS.map(p =>
+    `<button type="button" class="btn btn-secondary qr-persona-option${p === actual ? ' active' : ''}" data-qr-persona="${escapeHtml(p)}" style="width:100%; margin-bottom:8px;">${escapeHtml(p)}</button>`
+  ).join('');
+  openModal('modalQrPersona');
+}
 
 // Filtro de la vista Ventas: por defecto solo muestra las ventas de HOY.
 // 'hoy' | 'ayer' | 'anteayer' | 'todas' | 'YYYY-MM-DD'
@@ -1863,10 +2307,281 @@ function ventasFiltradas(){
     return true;
   });
 }
+
+// La fecha (YYYY-MM-DD) que se está viendo en la ventana de Ventas, o null si
+// el filtro está en "Todas". Sirve para que gastos/préstamos y el ajuste de
+// cuentas (CAMBIO incluido) se guarden y muestren POR DÍA, igual que las ventas.
+function ventaFilterDateKey(){
+  if(/^\d{4}-\d{2}-\d{2}$/.test(ventaDateFilter)) return ventaDateFilter;
+  if(ventaDateFilter === 'hoy') return dateKeyOffset(0);
+  if(ventaDateFilter === 'ayer') return dateKeyOffset(1);
+  if(ventaDateFilter === 'anteayer') return dateKeyOffset(2);
+  return null; // 'todas'
+}
 function ventasFilterLabel(){
   const map = { hoy: 'de hoy', ayer: 'de ayer', anteayer: 'de anteayer', todas: 'de todas las fechas' };
   return map[ventaDateFilter] || 'del ' + ventaDateFilter;
 }
+
+// Etiqueta de la columna "Pago": para QR y para el pago mixto muestra además quién cobró el QR.
+function pagoLabel(v){
+  if(v.metodoPago === 'mixto'){
+    let txt = '💵📱 QR y Efectivo';
+    if(v.qrPersona) txt += ` · ${escapeHtml(v.qrPersona)}`;
+    return txt;
+  }
+  const base = PAYMENT_LABELS[v.metodoPago] || v.metodoPago || '';
+  return v.metodoPago === 'qr' && v.qrPersona ? `${base} · ${escapeHtml(v.qrPersona)}` : base;
+}
+
+// Parte de una venta que entra por QR (0 si es de contado).
+function qrMontoDeVenta(v){
+  if(v.metodoPago === 'qr') return parseFloat(v.total) || 0;
+  if(v.metodoPago === 'mixto') return parseFloat(v.qrMonto) || 0;
+  return 0;
+}
+// Parte de una venta que entra por efectivo (0 si es solo QR).
+function efectivoMontoDeVenta(v){
+  if(v.metodoPago === 'efectivo') return parseFloat(v.total) || 0;
+  if(v.metodoPago === 'mixto') return parseFloat(v.efectivoMonto) || 0;
+  return 0;
+}
+
+// "CAMBIO": monto inicial (fondo de cambio) con el que arranca la cuenta del
+// día. Se guarda POR DÍA (uno por fecha) y solo en este dispositivo, para que
+// al cambiar el filtro (Hoy/Ayer/otra fecha) cada día tenga su propio monto.
+// Si todavía no hay un monto para el día de hoy, usa el valor que estaba
+// guardado antes (por modo).
+function cambioStorageKey(fechaKey){
+  const fecha = fechaKey || dateKeyOffset(0);
+  return 'stockferre_cambio_v1_' + currentModo + '_' + fecha;
+}
+function getCambioBase(fechaKey){
+  const key = cambioStorageKey(fechaKey);
+  try{
+    const v = localStorage.getItem(key);
+    if(v != null) return parseFloat(v) || 0;
+  }catch(e){}
+  if(!fechaKey || fechaKey === dateKeyOffset(0)){
+    try{ return parseFloat(localStorage.getItem('stockferre_cambio_v1_' + currentModo)) || 0; }catch(e){}
+  }
+  return 0;
+}
+function setCambioBase(v, fechaKey){
+  const val = Math.max(0, parseFloat(v) || 0);
+  try{ localStorage.setItem(cambioStorageKey(fechaKey), String(val)); }catch(e){}
+}
+// "Ajuste de cuentas": resume el dinero de las ventas que se están mostrando
+// (por defecto las de hoy) en Total Bs, Efectivo y QR, con el desglose de QR
+// por cada persona que cobra. En los pagos mixtos, cada parte va a su columna.
+// La suma total empieza desde el monto de "CAMBIO" del DÍA (ya no desde cero).
+function renderAjusteCuentas(list){
+  const panel = document.getElementById('ajusteCuentas');
+  if(!panel) return;
+  list = list || [];
+  const dia = ventaFilterDateKey() || dateKeyOffset(0);
+  const total = list.reduce((s,v)=> s + (parseFloat(v.total) || 0), 0);
+  const efectivo = list.reduce((s,v)=> s + efectivoMontoDeVenta(v), 0);
+  const qr = list.reduce((s,v)=> s + qrMontoDeVenta(v), 0);
+  // Los gastos/préstamos marcados como "ajustar" del día que se ve restan del total vendido.
+  const gastosAjustados = gastosPrestamosDelDia().filter(g=>g.ajustar).reduce((s,g)=> s + (parseFloat(g.bs)||0), 0);
+  const cambioBase = getCambioBase(dia);
+  const totalFinal = cambioBase + total - gastosAjustados;
+  document.getElementById('ajusteTotal').textContent = fmtMoney(totalFinal);
+  document.getElementById('ajusteEfectivo').textContent = fmtMoney(efectivo);
+  document.getElementById('ajusteQr').textContent = fmtMoney(qr);
+  // Refleja el monto de CAMBIO guardado (sin pisar lo que se está escribiendo).
+  const cambioEl = document.getElementById('ajusteCambio');
+  if(cambioEl && document.activeElement !== cambioEl) cambioEl.value = cambioBase;
+  const notaG = document.getElementById('ajusteGastosNota');
+  if(notaG){
+    if(gastosAjustados > 0){
+      notaG.style.display = '';
+      notaG.textContent = `(−${fmtMoney(gastosAjustados)} en gastos/préstamos ajustados del total)`;
+    }else{
+      notaG.style.display = 'none';
+      notaG.textContent = '';
+    }
+  }
+  const fechaEl = document.getElementById('ajusteFecha');
+  if(fechaEl) fechaEl.textContent = ventasFilterLabel();
+  const det = document.getElementById('ajusteQrDetalle');
+  const porPersona = QR_PERSONAS
+    .map(p => ({ persona: p, total: list.filter(v => v.qrPersona === p).reduce((s,v)=> s + qrMontoDeVenta(v), 0) }))
+    .filter(x => x.total > 0);
+  if(det){
+    if(porPersona.length){
+      det.style.display = '';
+      det.innerHTML = porPersona.map(x => `<button type="button" class="ajuste-qr-chip" data-qr-persona="${escapeHtml(x.persona)}" title="Ver los pagos por QR de ${escapeHtml(x.persona)}">📱 <strong>${escapeHtml(x.persona)}</strong> · ${fmtMoney(x.total)}</button>`).join('');
+    }else{
+      det.style.display = 'none';
+      det.innerHTML = '';
+    }
+  }
+}
+
+// Gastos/préstamos del DÍA que se está viendo en Ventas (Hoy/Ayer/una fecha;
+// si el filtro es "Todas" muestra todos). Son los que ajustan el estado de
+// cuentas. Los de "sin color" solo se ven en el invitado: no se envían a ningún modo.
+function gastosPrestamosDelDia(){
+  const dia = ventaFilterDateKey();
+  return (db.gastosPrestamos || []).filter(g => {
+    if(dia && ventaFechaKey(g.fecha) !== dia) return false;
+    if(currentModo !== 'invitado' && g.modo === 'ninguno') return false;
+    return true;
+  });
+}
+
+// Quita duplicados por id (misma fecha/hora al escribirse en ambos modos).
+function dedupeGastosById(list){
+  const map = new Map();
+  (list || []).forEach(g => { if(g && g.id != null && !map.has(g.id)) map.set(g.id, g); });
+  return Array.from(map.values());
+}
+
+// Almacén NEUTRO del invitado: gastos/préstamos "sin color" que NO se mandan
+// ni a Manuales ni a Eléctricas. Viven solo en este dispositivo del invitado.
+function loadGuestNeutralGastos(){
+  try{
+    const raw = localStorage.getItem('stockferre_guest_gastos_v1');
+    if(raw){
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed : [];
+    }
+  }catch(e){}
+  return [];
+}
+function saveGuestNeutralGastos(list){
+  try{ localStorage.setItem('stockferre_guest_gastos_v1', JSON.stringify(list)); }catch(e){}
+}
+
+// Guarda los gastos/préstamos. En modo invitado se reparten según el color:
+// naranja → Manuales, amarillo → Eléctricas, sin color → se queda en el almacén
+// neutral (NO se envía a ningún modo). En los modos del dueño se guarda normal.
+function saveGastosPrestamos(){
+  if(currentModo === 'invitado'){
+    const g = dedupeGastosById(db.gastosPrestamos || []);
+    ['manual','electrico'].forEach(modo => {
+      const m = loadModoDB(modo);
+      m.gastosPrestamos = g.filter(x => {
+        const md = (x.modo === undefined || x.modo === null) ? 'ninguno' : x.modo;
+        return md === modo;
+      });
+      persistModoDB(modo, m);
+    });
+    saveGuestNeutralGastos(g.filter(x => {
+      const md = (x.modo === undefined || x.modo === null) ? 'ninguno' : x.modo;
+      return md === 'ninguno';
+    }));
+  }else{
+    // Los "sin color" no pertenecen a la base de un modo: se descartan.
+    db.gastosPrestamos = (db.gastosPrestamos || []).filter(x => x.modo !== 'ninguno');
+    saveDB();
+  }
+}
+
+// Lista de gastos/préstamos del día + total (estilo "Historial de pagos QR").
+// Cada fila tiene un punto de color (naranja = Manuales, amarillo = Eléctricas) que
+// redirige el gasto al modo elegido, y su recuadro "Ajustar" para tachar los
+// que restan del total del ajuste de cuentas.
+function renderGastosPrestamos(){
+  const listEl = document.getElementById('gastosPrestamosList');
+  const totalEl = document.getElementById('gastosPrestamosTotal');
+  const nota = document.getElementById('gpAjustadoNota');
+  if(!listEl || !totalEl || !nota) return;
+  const esInvitado = currentModo === 'invitado';
+  const legendEl = document.getElementById('gpLegend');
+  if(legendEl) legendEl.style.display = esInvitado ? '' : 'none';
+  const fechaEl = document.getElementById('gpFecha');
+  if(fechaEl) fechaEl.textContent = ventasFilterLabel();
+  const list = dedupeGastosById(gastosPrestamosDelDia());
+  listEl.innerHTML = list.map(g => {
+    const md = (g.modo === undefined || g.modo === null) ? 'ninguno' : g.modo;
+    const dotCls = md === 'electrico' ? 'el' : (md === 'manual' ? 'man' : 'none');
+    const etiquetaModo = md === 'electrico' ? 'Eléctricas (amarillo)' : (md === 'manual' ? 'Manuales (naranja)' : 'Sin color');
+    const dotTitle = esInvitado
+      ? etiquetaModo + ' — toca para cambiar'
+      : etiquetaModo;
+    const dotBtn = esInvitado
+      ? `<button type="button" class="gp-modo-dot ${dotCls}" title="${dotTitle}" data-gp-modo="${escapeHtml(g.id)}"></button>`
+      : `<span class="gp-modo-dot static ${dotCls}" title="${dotTitle}"></span>`;
+    return `
+    <div class="gp-row">
+      <strong>${fmtMoney(g.bs)}</strong>
+      <span class="gp-obs">${g.observacion ? escapeHtml(g.observacion) : '-'}</span>
+      ${dotBtn}
+      <label class="gp-tag" title="Restar del total del ajuste de cuentas">
+        <input type="checkbox" class="gp-chk" data-gp-ajustar="${escapeHtml(g.id)}" ${g.ajustar ? 'checked' : ''}> Ajustar
+      </label>
+      <button type="button" class="btn-icon" title="Eliminar" data-delete-gp="${escapeHtml(g.id)}">🗑️</button>
+    </div>`;
+  }).join('');
+  const totalG = list.reduce((s,g)=> s + (parseFloat(g.bs)||0), 0);
+  const ajustados = list.filter(g=>g.ajustar).reduce((s,g)=> s + (parseFloat(g.bs)||0), 0);
+  totalEl.innerHTML = `Total <strong>${fmtMoney(totalG)}</strong>`;
+  nota.textContent = ajustados > 0 ? `Ajusta al estado de cuentas: −${fmtMoney(ajustados)}` : '';
+}
+
+function addGastoPrestamo(data){
+  db.gastosPrestamos.push({
+    id: uid('gp'),
+    bs: parseFloat(data.bs) || 0,
+    observacion: data.observacion || '',
+    ajustar: false,
+    modo: data.modo || (currentModo === 'invitado' ? 'ninguno' : currentModo),
+    // Se guarda en el día que se está viendo en Ventas (si es "Todas", hoy).
+    fecha: ventaFilterDateKey() || todayISO()
+  });
+  saveGastosPrestamos();
+  renderVentas();
+}
+
+// Cambia el color/destino del gasto/préstamo: naranja → Manuales, amarillo →
+// Eléctricas, gris (sin color) → no se envía a ningún modo.
+function toggleGastoPrestamoModo(id){
+  const g = (db.gastosPrestamos || []).find(x => x.id === id);
+  if(!g) return;
+  const orden = ['manual','electrico','ninguno'];
+  const cur = (g.modo === undefined || g.modo === null) ? 'ninguno' : g.modo;
+  const nuevo = orden[(orden.indexOf(cur) + 1) % orden.length];
+  if(currentModo === 'invitado'){
+    g.modo = nuevo;
+    saveGastosPrestamos();
+  }else{
+    // El dueño está viendo UNA base: el gasto se saca de ambas bases y queda
+    // en la que corresponde al color elegido (gris = se queda en la actual,
+    // sin enviarse a ningún modo).
+    const otro = currentModo === 'manual' ? 'electrico' : 'manual';
+    g.modo = nuevo;
+    const m = loadModoDB(otro);
+    m.gastosPrestamos = (m.gastosPrestamos || []).filter(x => x.id !== id);
+    db.gastosPrestamos = (db.gastosPrestamos || []).filter(x => x.id !== id);
+    if(nuevo === otro){
+      m.gastosPrestamos.push(g);
+    }else{
+      db.gastosPrestamos.push(g);
+    }
+    persistModoDB(otro, m);
+    saveDB();
+    toast('Gasto enviado a ' + (nuevo === 'electrico' ? 'Eléctricas' : nuevo === 'manual' ? 'Manuales' : 'sin modo'), 'success');
+  }
+  renderVentas();
+}
+
+function toggleGastoPrestamoAjustar(id){
+  const g = db.gastosPrestamos.find(x => x.id === id);
+  if(!g) return;
+  g.ajustar = !g.ajustar;
+  saveGastosPrestamos();
+  renderVentas();
+}
+
+function deleteGastoPrestamo(id){
+  db.gastosPrestamos = (db.gastosPrestamos || []).filter(x => x.id !== id);
+  saveGastosPrestamos();
+  renderVentas();
+}
+
 function syncVentasChips(){
   document.querySelectorAll('.venta-date-chip').forEach(btn => {
     btn.classList.toggle('active', btn.dataset.ventaDate === ventaDateFilter);
@@ -1915,14 +2630,30 @@ function gananciaVenta(v){
   return (unit - costo) * (parseFloat(v.cantidad) || 1);
 }
 
+// En el invitado, el resumen de Ventas muestra también el total vendido al
+// precio de venta separado por cada modo: Manuales y Eléctricas. A cada modo se
+// le restan los gastos/préstamos del día que llevan su color (naranja →
+// Manuales, amarillo → Eléctricas; los "sin color" no restan de ninguno).
+function guestModoTotalesHTML(list){
+  const gastos = dedupeGastosById(gastosPrestamosDelDia());
+  const gastoPorModo = modo => gastos.filter(g=>g.modo === modo).reduce((s,g)=> s + (parseFloat(g.bs)||0), 0);
+  const manVendido = (list||[]).filter(v=>v.modo === 'manual').reduce((s,v)=> s + (parseFloat(v.total)||0), 0);
+  const elVendido = (list||[]).filter(v=>v.modo === 'electrico').reduce((s,v)=> s + (parseFloat(v.total)||0), 0);
+  const man = manVendido - gastoPorModo('manual');
+  const el = elVendido - gastoPorModo('electrico');
+  return `<span class="ventas-modo-totales"><span class="modo-total man">🛠️ Manuales: <strong>${fmtMoney(man)}</strong></span> · <span class="modo-total el">⚡ Eléctricas: <strong>${fmtMoney(el)}</strong></span></span>`;
+}
+
 function renderVentas(){
   const tbody = document.querySelector('#ventasTable tbody');
   const summary = document.getElementById('ventasSummary');
-  const colspan = currentRole === 'guest' ? 7 : 9;
+  const colspan = currentRole === 'guest' ? 9 : 10;
 
   if(db.ventas.length === 0){
     tbody.innerHTML = `<tr class="empty-row"><td colspan="${colspan}">Todavía no registraste ninguna venta.</td></tr>`;
-    summary.textContent = '0 ventas';
+    summary.innerHTML = currentRole === 'guest' ? `0 ventas<br>${guestModoTotalesHTML([])}` : '0 ventas';
+    renderAjusteCuentas([]);
+    renderGastosPrestamos();
     syncVentasChips();
     maybeShowExportReminder();
     return;
@@ -1930,18 +2661,25 @@ function renderVentas(){
 
   const list = ventasFiltradas();
   if(list.length === 0){
-    tbody.innerHTML = `<tr class="empty-row"><td colspan="${colspan}">No hay ventas ${ventasFilterLabel()}.</td></tr>`;
-    summary.textContent = `0 ventas ${ventasFilterLabel()}`;
+    tbody.innerHTML = `<tr class="empty-row"><td colspan="${colspan}">No hay ventas ${escapeHtml(ventasFilterLabel())}.</td></tr>`;
+    summary.innerHTML = currentRole === 'guest'
+      ? `0 ventas ${escapeHtml(ventasFilterLabel())}<br>${guestModoTotalesHTML([])}`
+      : `0 ventas ${escapeHtml(ventasFilterLabel())}`;
+    renderAjusteCuentas([]);
+    renderGastosPrestamos();
     syncVentasChips();
     maybeShowExportReminder();
     return;
   }
 
-  tbody.innerHTML = list.map(v => {
+  tbody.innerHTML = list.map((v, idx) => {
     const gan = gananciaVenta(v);
     const ganCell = gan === null ? '<td class="admin-only">-</td>' : `<td class="admin-only"><strong>${fmtMoney(gan)}</strong></td>`;
+    // Acciones: todos pueden editar la venta; solo el dueño puede eliminarla.
+    const accionesCell = `<td><button class="btn-icon" title="Editar venta" data-edit-venta="${v.id}">✏️</button><button class="btn-icon" title="Eliminar" data-delete-venta="${v.id}">🗑️</button></td>`;
     return `
     <tr>
+      <td class="venta-num">${idx + 1}</td>
       <td>${fmtHistoryDate(v.fecha)}</td>
       <td><strong>${escapeHtml(v.codigo)}</strong></td>
       <td>${escapeHtml(v.nombre)}</td>
@@ -1949,15 +2687,15 @@ function renderVentas(){
       <td>${fmtMoney(v.precioUnitario)}</td>
       <td><strong>${fmtMoney(v.total)}</strong></td>
       ${ganCell}
-      <td>${PAYMENT_LABELS[v.metodoPago] || v.metodoPago}</td>
-      ${currentRole === 'guest' ? '' : `<td><button class="btn-icon" title="Eliminar" data-delete-venta="${v.id}">🗑️</button></td>`}
+      <td>${pagoLabel(v)}</td>
+      ${accionesCell}
     </tr>`;
   }).join('');
 
   const totalMonto = list.reduce((sum, v) => sum + v.total, 0);
   if(currentRole === 'guest'){
-    // El invitado solo ve la suma de lo vendido (precio de venta).
-    summary.textContent = `${list.length} venta${list.length === 1 ? '' : 's'} ${ventasFilterLabel()} · Total ${fmtMoney(totalMonto)}`;
+    // El invitado solo ve la suma de lo vendido (precio de venta) por cada modo.
+    summary.innerHTML = `${list.length} venta${list.length === 1 ? '' : 's'} ${escapeHtml(ventasFilterLabel())} · Total <strong>${fmtMoney(totalMonto)}</strong><br>${guestModoTotalesHTML(list)}`;
   }else{
     // El dueño ve el total vendido y la ganancia neta (total − costo de compra).
     let costoTotal = 0;
@@ -1968,6 +2706,8 @@ function renderVentas(){
     const gananciaNeta = totalMonto - costoTotal;
     summary.textContent = `${list.length} venta${list.length === 1 ? '' : 's'} ${ventasFilterLabel()} · Total ${fmtMoney(totalMonto)} · Ganancia neta ${fmtMoney(gananciaNeta)}`;
   }
+  renderAjusteCuentas(list);
+  renderGastosPrestamos();
   syncVentasChips();
   maybeShowExportReminder();
 }
@@ -2072,7 +2812,7 @@ function exportTopVentasCSV(){
   const rows = productosMasVendidos();
   if(rows.length === 0){ toast('No hay productos para exportar', 'error'); return; }
   const header = ['POSICION','CODIGO','PRODUCTO','VENDIDOS','STOCK','STOCK_MINIMO'];
-  const data = rows.map((r, i) => [i + 1, r.p.codigo, r.p.nombre, csvNumber(r.vendidos, 0), csvNumber(r.p.stock, 0), csvNumber(r.p.stockMin || 0, 0)]);
+  const data = rows.map((r, i) => [i + 1, csvText(r.p.codigo), r.p.nombre, csvNumber(r.vendidos, 0), csvNumber(r.p.stock, 0), csvNumber(r.p.stockMin || 0, 0)]);
   const sufijo = topVentasMesFilter ? topVentasMesFilter : 'todo_el_ano';
   downloadCSV(`stockferre_mas_vendidos_${sufijo}.csv`, header, data);
   toast('Top de más vendidos exportado', 'success');
@@ -2204,7 +2944,7 @@ function exportPedidosCSV(){
   if(pedidoRows.length === 0){ toast('No hay productos para exportar', 'error'); return; }
   const header = ['POSICION','MARCA','CODIGO','PRODUCTO','STOCK','STOCK_MINIMO','CANTIDAD_PEDIR'];
   const data = pedidoRows.map(({ p }, i) => [
-    i + 1, p.marca || '', p.codigo, p.nombre,
+    i + 1, p.marca || '', csvText(p.codigo), p.nombre,
     csvNumber(p.stock, 0), csvNumber(p.stockMin || 0, 0), csvNumber(pedidoCant(p), 0)
   ]);
   downloadCSV(`stockferre_pedidos_${todayISO().slice(0,10)}.csv`, header, data);
@@ -2389,6 +3129,18 @@ function renderCompras(){
 
 // Abre la ventana con el historial de ingresos (compras) del producto: cada
 // compra con su fecha, proveedor, precio de compra, cantidad y observaciones.
+// Color que identifica a cada persona que cobra por QR: se usa como borde del
+// historial de pagos para distinguirlas de un vistazo.
+function qrPersonaColor(persona){
+  const colores = { 'Abner': '#e53e3e', 'José': '#38a169', 'Jona': '#3182ce', 'Richard': '#dd6b20' };
+  return colores[persona] || '#805ad5';
+}
+// Pinta el borde de un modal con el color indicado.
+function pintarBordeModal(modalId, color){
+  const modal = document.getElementById(modalId);
+  if(modal) modal.style.border = `3px solid ${color}`;
+}
+
 function openCompraHistorial(codigo){
   const compras = db.compras.filter(c => c.codigo === codigo);
   const p = getProductoByCodigo(codigo);
@@ -2414,7 +3166,44 @@ function openCompraHistorial(codigo){
       </tr>
     `).join('');
   }
+  pintarBordeModal('modalCompraHistorial', '#805ad5');
   openModal('modalCompraHistorial');
+}
+
+// Historial de pagos por QR de una persona: ventana con cada venta donde esa
+// persona cobró por QR. Muestra el número de la venta, fecha, código,
+// producto, cuánto fue en QR y (si fue mixta) cuánto en efectivo, y el total.
+function openQrHistorial(persona){
+  const ventas = db.ventas.filter(v => v.qrPersona === persona && qrMontoDeVenta(v) > 0);
+  const info = document.getElementById('histQrInfo');
+  const tbody = document.querySelector('#histQrTable tbody');
+  if(!info || !tbody) return;
+  info.innerHTML = `📱 <strong>${escapeHtml(persona)}</strong> · <span style="font-size:12px;">Pagos por QR de ${ventas.length} venta${ventas.length === 1 ? '' : 's'}</span>`;
+  if(ventas.length === 0){
+    tbody.innerHTML = `<tr class="empty-row"><td colspan="7">${escapeHtml(persona)} no tiene pagos por QR registrados.</td></tr>`;
+  }else{
+    tbody.innerHTML = ventas.map(v => {
+      const nro = db.ventas.indexOf(v) + 1;
+      const efCell = v.metodoPago === 'mixto' ? fmtMoney(efectivoMontoDeVenta(v)) : '-';
+      return `
+      <tr>
+        <td>${nro}</td>
+        <td>${fmtHistoryDate(v.fecha)}</td>
+        <td><strong>${escapeHtml(v.codigo)}</strong></td>
+        <td>${escapeHtml(v.nombre)}</td>
+        <td><strong>${fmtMoney(qrMontoDeVenta(v))}</strong></td>
+        <td>${efCell}</td>
+        <td>${fmtMoney(v.total)}</td>
+      </tr>`;
+    }).join('');
+  }
+  const totalQr = ventas.reduce((s,v)=> s + qrMontoDeVenta(v), 0);
+  const footer = document.getElementById('histQrFooter');
+  if(footer){
+    footer.innerHTML = `<td colspan="4" style="text-align:right; font-weight:700;">Total QR</td><td style="font-weight:800; color:var(--primary);">${fmtMoney(totalQr)}</td><td colspan="2"></td>`;
+  }
+  pintarBordeModal('modalQrHistorial', qrPersonaColor(persona));
+  openModal('modalQrHistorial');
 }
 
 // Desde la ventana de características (pestaña Productos): abre la ventana de
@@ -2524,7 +3313,7 @@ function exportComprasCSV(){
   }
   const header = ['FECHA','CODIGO','PRODUCTO','PROVEEDOR','CANTIDAD','PRECIO UNITARIO','TOTAL','METODO DE PAGO','OBSERVACIONES'];
   const rows = db.compras.map(c => [
-    c.fecha, c.codigo, c.nombre, c.proveedor || '', csvNumber(c.cantidad), csvNumber(c.precioUnitario, 2), csvNumber(c.total, 2), c.metodoPago, c.observaciones || ''
+    c.fecha, csvText(c.codigo), c.nombre, c.proveedor || '', csvNumber(c.cantidad), csvNumber(c.precioUnitario, 2), csvNumber(c.total, 2), c.metodoPago, c.observaciones || ''
   ]);
   downloadCSV(`stockferre_ingresos_${todayISO().slice(0,10)}.csv`, header, rows);
   toast('Ingresos exportados', 'success');
@@ -3206,7 +3995,15 @@ function renderInventario(){
       normalize(p.codigoBarras).includes(search)
     );
   }
-  list.sort((a,b)=> a.nombre.localeCompare(b.nombre, 'es'));
+  list.sort((a,b)=>{
+    // Los productos registrados en inventario en ESTE dispositivo aparecen
+    // primero (los más recientes arriba); el stock se sincroniza igual en
+    // todos los dispositivos desde la nube, sin importar el orden local.
+    const da = invUpdates[a.id] || '';
+    const db = invUpdates[b.id] || '';
+    if(da !== db) return da > db ? -1 : 1;
+    return a.nombre.localeCompare(b.nombre, 'es');
+  });
 
   if(list.length === 0){
     tbody.innerHTML = `<tr class="empty-row"><td colspan="7">No hay productos que coincidan.</td></tr>`;
@@ -3296,40 +4093,46 @@ function closeInventarioScan(){
   closeAllModals();
 }
 
-// Al detectar un código en la pestaña de Inventario, el comportamiento es
-// idéntico al de la pestaña "Escanear" (misma cámara, mismo resultado debajo):
-// la única diferencia es que el botón de acción dice "Registrar" y lleva al
-// recuadro de cantidad / código de barras en vez de abrir una venta.
+// Al detectar un código en la pestaña de Inventario se abre directamente el
+// recuadro de cantidad: muestra el código y la descripción del producto, con
+// una tabla de números 1-6 para registrar rápido y un botón "Más" para
+// escribir una cantidad distinta con el teclado.
 function handleInventoryScan(codigo){
-  renderScanResultInto('invScanResultBox', codigo, 'inventario');
+  const p = getProductoByCodigo(codigo);
+  const box = document.getElementById('invScanResultBox');
+  if(!p){
+    if(box) box.innerHTML = `<div class="scan-not-found">⚠️ No se encontró ningún producto con el código <strong>${escapeHtml(codigo)}</strong>.</div>`;
+    toast('Producto no encontrado', 'error');
+    return;
+  }
+  if(box) box.innerHTML = '';
+  openInventarioCantidadBox(p, codigo);
 }
 
 // Abre el recuadro de "Registrar inventario" ya con la descripción del
-// producto lista, pidiendo solo cantidad y código de barras.
-function openInventarioDetalleForm(producto, codigo){
+// producto lista. Se puede registrar con los botones 1-6 (registro inmediato)
+// o tocar "Más" para escribir una cantidad con el teclado y luego "Registrar".
+function openInventarioCantidadBox(producto, codigo){
   document.getElementById('invCodigo').value = codigo;
+  document.getElementById('invCodigoDisplay').textContent = codigo;
   document.getElementById('invNombreDisplay').textContent = producto.nombre;
   document.getElementById('invStockActualDisplay').textContent = `Stock actual: ${producto.stock || 0}`;
   document.getElementById('invCantidad').value = 1;
-  document.getElementById('invCodigoBarras').value = producto.codigoBarras || '';
+  document.getElementById('invMasBox').style.display = 'none';
   openModal('modalInventarioDetalle');
 }
 
-function handleInventarioSubmit(e){
-  e.preventDefault();
+function registrarInventarioCantidad(cantidad){
   const codigo = document.getElementById('invCodigo').value;
-  const cantidad = parseFloat(document.getElementById('invCantidad').value);
-  const codigoBarras = document.getElementById('invCodigoBarras').value.trim();
+  const p = getProductoByCodigo(codigo);
+  if(!p) return;
 
   if(!cantidad || cantidad <= 0){
     toast('Ingresa una cantidad válida', 'error');
     return;
   }
-  const p = getProductoByCodigo(codigo);
-  if(!p) return;
 
   p.stock = (p.stock || 0) + cantidad;
-  if(codigoBarras) p.codigoBarras = codigoBarras;
   touchProducto(p);
   markInventarioActualizado(p.id);
   logInventarioHistorial(p, cantidad, 'registro (escáner)');
@@ -3343,6 +4146,12 @@ function handleInventarioSubmit(e){
   // Sigue escaneando el siguiente producto sin que el usuario tenga que
   // volver a tocar el botón (pensado para hacer un conteo físico seguido)
   openInventarioScan();
+}
+
+function handleInventarioSubmit(e){
+  e.preventDefault();
+  const cantidad = parseFloat(document.getElementById('invCantidad').value);
+  registrarInventarioCantidad(cantidad);
 }
 
 /* -------------------------------------------------------------------------
@@ -3535,6 +4344,119 @@ function handleCompraSubmit(e){
    4d. NUEVA VENTA (buscar producto existente o vender algo "OTRO")
    ------------------------------------------------------------------------- */
 
+function openVentaScan(){
+  scanContext = 'venta';
+  moveScannerBlockTo('ventaScannerBlockPlaceholder');
+  document.getElementById('ventaScanResultBox').innerHTML = '';
+  const manualInput = document.getElementById('manualCodeInput');
+  if(manualInput) manualInput.value = '';
+  openModal('modalVentaScan');
+  if(!ocrActive && !zxingLiveActive) startActiveScanner();
+}
+
+function closeVentaScan(){
+  stopActiveScanner();
+  restoreScannerBlockHome();
+  closeAllModals();
+}
+
+// Al detectar un código en "Nueva venta": si el producto existe se cierra el
+// escáner y se abre directo el formulario de venta con ese producto. Si no
+// existe, se avisa en el propio escáner y se puede seguir escaneando.
+function handleVentaScan(codigo){
+  const p = getProductoByCodigo(codigo);
+  if(!p){
+    const box = document.getElementById('ventaScanResultBox');
+    if(box) box.innerHTML = `<p class="hint" style="margin:0;">No se encontró el código <strong>${escapeHtml(codigo)}</strong>. Verificá que esté bien escrito o escaneá de nuevo. Si el producto no está en el inventario, usá "OTRO".</p>`;
+    toast('Producto no encontrado', 'error');
+    return;
+  }
+  closeVentaScan();
+  openVentaModal(p);
+}
+
+/* -------------------------------------------------------------------------
+   AÑADIR CÓDIGO DE BARRAS (solo modo pro)
+   Pestaña parecida a "Escanear" pero SIN el modo de escáner de código de
+   barras. El flujo tiene DOS pasos, todo automático:
+     1º  Se escanea el CÓDIGO del producto (numérico o alfanumérico). Si
+         existe, se muestra el código y la descripción con claridad y la
+         cámara pasa SOLA al modo de código de barras.
+     2º  Se escanea el código de barras físico del producto y se guarda (o
+         cambia) en el producto. Luego vuelve al modo numérico para poder
+         continuar con otro producto.
+   ------------------------------------------------------------------------- */
+
+// Producto al que se le va a guardar el código de barras (null = aún no se
+// identificó ningún producto en esta sesión de la pestaña).
+let barcodePendingProduct = null;
+
+function openCodigoBarrasView(){
+  scanContext = 'codigobarras';
+  barcodePendingProduct = null;
+  moveScannerBlockTo('codigoBarrasScannerPlaceholder');
+  // En esta pestaña el escáner de código de barras NO aparece como botón:
+  // solo se usa automáticamente después de identificar el producto.
+  const cbTab = document.querySelector('[data-scan-code-mode="codigobarras"]');
+  if(cbTab) cbTab.style.display = 'none';
+  const box = document.getElementById('codigoBarrasResult');
+  if(box) box.innerHTML = '';
+  setScanCodeMode('numerico').finally(()=>{
+    if(!ocrActive && !zxingLiveActive) startActiveScanner();
+  });
+}
+
+function handleCodigoBarrasScan(codigo, fromCamera){
+  const box = document.getElementById('codigoBarrasResult');
+  if(!box) return;
+
+  if(!barcodePendingProduct){
+    // PASO 1: identificar el producto por su código interno.
+    const p = getProductoByCodigo(codigo);
+    if(!p){
+      box.innerHTML = `<div class="scan-not-found">⚠️ No se encontró ningún producto con el código <strong>${escapeHtml(codigo)}</strong>. Verificá que esté bien escrito o escaneá de nuevo.</div>`;
+      toast('Producto no encontrado', 'error');
+      return;
+    }
+    barcodePendingProduct = p;
+    box.innerHTML = `
+      <div class="scan-result-card">
+        <h4>📦 ${escapeHtml(p.nombre)}</h4>
+        <div class="sr-row"><span>Código</span><strong>${escapeHtml(p.codigo)}</strong></div>
+        <div class="sr-row"><span>Código de barras actual</span><strong>${escapeHtml(p.codigoBarras || '-')}</strong></div>
+        <p class="hint" style="margin:10px 0 0;">📷 Ahora escaneá el <strong>código de barras</strong> de este producto: la cámara ya cambió sola y se guardará automáticamente.</p>
+      </div>`;
+    // Pasa sola al escáner de código de barras.
+    setScanCodeMode('codigobarras').finally(()=>{
+      if(!ocrActive && !zxingLiveActive) startActiveScanner();
+    });
+    if(fromCamera) scrollToScanResult('codigoBarrasResult');
+    return;
+  }
+
+  // PASO 2: se detectó el código de barras → se guarda en el producto.
+  const p = barcodePendingProduct;
+  barcodePendingProduct = null;
+  p.codigoBarras = codigo;
+  touchProducto(p);
+  saveDB();
+  syncProductoDoc(p); // mantiene el documento del producto en la nube al día
+  box.innerHTML = `
+    <div class="scan-result-card">
+      <h4>✅ Código de barras guardado</h4>
+      <div class="sr-row"><span>Producto</span><strong>${escapeHtml(p.nombre)}</strong></div>
+      <div class="sr-row"><span>Código</span><strong>${escapeHtml(p.codigo)}</strong></div>
+      <div class="sr-row"><span>Código de barras</span><strong>${escapeHtml(codigo)}</strong></div>
+      <p class="hint" style="margin:10px 0 0;">Volvió al modo numérico: ya podés escanear el código de otro producto.</p>
+    </div>`;
+  // Vuelve al modo numérico para escanear el siguiente producto.
+  setScanCodeMode('numerico').finally(()=>{
+    if(!ocrActive && !zxingLiveActive) startActiveScanner();
+  });
+  if(fromCamera) scrollToScanResult('codigoBarrasResult');
+  toast('Código de barras guardado', 'success');
+}
+
 function openNuevaVentaModal(){
   document.getElementById('ventaSearchInput').value = '';
   renderVentaSearchResults();
@@ -3568,9 +4490,61 @@ function renderVentaSearchResults(){
   `).join('');
 }
 
+// "Nuevo ingreso" abre la misma ventana de búsqueda que "Nueva venta", con su
+// botón de escáner y el buscador por nombre/código. Al elegir un producto se
+// abre el formulario de registro del ingreso.
+function openNuevaCompraModal(){
+  document.getElementById('compraSearchInput').value = '';
+  renderCompraSearchResults();
+  openModal('modalNuevaCompra');
+  setTimeout(()=> document.getElementById('compraSearchInput').focus(), 50);
+}
+
+function renderCompraSearchResults(){
+  const container = document.getElementById('compraSearchResults');
+  if(!container) return;
+  const search = normalize(document.getElementById('compraSearchInput').value);
+
+  let list = db.productos.slice();
+  if(search){
+    list = list.filter(p =>
+      normalize(p.nombre).includes(search) ||
+      normalize(p.codigo).includes(search)
+    );
+  }
+  list.sort((a,b)=> a.nombre.localeCompare(b.nombre, 'es'));
+  list = list.slice(0, 30);
+
+  if(list.length === 0){
+    container.innerHTML = `<p class="hint" style="margin:0 0 8px;">No se encontró ningún producto. Escanea un código nuevo y el producto se creará al registrar el ingreso.</p>`;
+    return;
+  }
+  container.innerHTML = list.map(p => `
+    <button type="button" class="venta-search-item" data-compra-select="${p.id}">
+      <span class="vsi-nombre">${escapeHtml(p.nombre)}</span>
+      <span class="vsi-meta">${escapeHtml(p.codigo)} · Compra ${fmtMoney(p.precioCompra)}</span>
+    </button>
+  `).join('');
+}
+
 const csvEscapeField = v => {
   v = String(v ?? '');
+  // Protección contra inyección de fórmulas: si el texto empieza con =, +, -,
+  // @ o tabulador, Excel lo interpreta como fórmula. Se antepone un apóstrofo
+  // para que Excel lo trate como texto plano.
+  if(/^[=+\-@\t]/.test(v)) v = "'" + v;
   return /[",\n]/.test(v) ? '"' + v.replace(/"/g,'""') + '"' : v;
+};
+
+// Fuerza a Excel a tratar un campo como TEXTO anteponiendo un apóstrofo.
+// Sin esto, una columna con códigos mezclados (números como 12399 y
+// alfanuméricos como ABG031.1) hace que Excel detecte la columna como número
+// y marque como "errores" los alfanuméricos (los productos INGCO salen "sin
+// código"). Con el apóstrofo Excel muestra el código limpio como texto.
+// Al re-importar, parseCSV quita el apóstrofo, así los códigos no se corrompen.
+const csvText = v => {
+  v = String(v ?? '');
+  return v ? "'" + v : '';
 };
 
 // Formatea un número para el CSV exportado usando COMA como separador
@@ -3588,7 +4562,16 @@ function csvNumber(n, decimals){
 }
 
 function downloadCSV(filename, header, rows){
-  const csv = [header, ...rows].map(r => r.map(csvEscapeField).join(',')).join('\n');
+  // Asegura que TODAS las filas tengan exactamente el mismo número de columnas
+  // que el encabezado (ni una más ni una menos). Así ningún producto puede
+  // salir "desfasado" (dato en la columna equivocada) aunque su registro venga
+  // incompleto o tenga campos de más.
+  const hLen = header.length;
+  const csv = [header, ...rows].map(r => {
+    const row = Array.isArray(r) ? r.slice(0, hLen) : [];
+    while(row.length < hLen) row.push('');
+    return row.map(csvEscapeField).join(',');
+  }).join('\n');
   const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -3600,21 +4583,92 @@ function downloadCSV(filename, header, rows){
   URL.revokeObjectURL(url);
 }
 
-function exportProductosCSV(){
+// Exporta a Excel (.xls en formato XML 2003) con TIPOS DE COLUMNA explícitos.
+// A diferencia del CSV, Excel abre este archivo sin "errores" ni apóstrofos:
+// los códigos van como Texto (no se convierten a número ni se pierden) y los
+// precios/stock como Número. Cada hoja: { name, header, rows, types } donde
+// types es un arreglo de 'text'/'number' en el mismo orden que header.
+function downloadXLS(filename, sheets){
+  const escXML = s => String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  const p = [];
+  p.push('<?xml version="1.0" encoding="UTF-8"?>');
+  p.push('<?mso-application progid="Excel.Sheet"?>');
+  p.push('<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet" xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">');
+  sheets.forEach(sheet => {
+    p.push(`<Worksheet ss:Name="${escXML(sheet.name)}"><Table>`);
+    p.push('<Row>' + sheet.header.map(h => `<Cell><Data ss:Type="String">${escXML(h)}</Data></Cell>`).join('') + '</Row>');
+    sheet.rows.forEach(row => {
+      const cells = row.map((v, i) => {
+        if(sheet.types[i] === 'number'){
+          const n = Number(v) || 0;
+          return `<Cell><Data ss:Type="Number">${n}</Data></Cell>`;
+        }
+        return `<Cell><Data ss:Type="String">${escXML(v)}</Data></Cell>`;
+      });
+      p.push('<Row>' + cells.join('') + '</Row>');
+    });
+    p.push('</Table></Worksheet>');
+  });
+  p.push('</Workbook>');
+  const blob = new Blob([p.join('')], { type: 'application/vnd.ms-excel;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+// Parsea un archivo .xls en formato XML 2003 (el mismo que genera downloadXLS)
+// y devuelve un arreglo de filas, para poder importarlo en la app igual que un CSV.
+function parseExcelXML(text){
+  const doc = new DOMParser().parseFromString(text, 'application/xml');
+  const rows = [];
+  const rowEls = doc.getElementsByTagName('Row');
+  for(let i = 0; i < rowEls.length; i++){
+    const cells = rowEls[i].getElementsByTagName('Cell');
+    const row = [];
+    for(let j = 0; j < cells.length; j++){
+      const dataEls = cells[j].getElementsByTagName('Data');
+      row.push(dataEls.length ? (dataEls[0].textContent || '') : '');
+    }
+    rows.push(row);
+  }
+  return rows;
+}
+
+// ¿El archivo importado es un .xls de Excel (XML 2003) en vez de un CSV?
+function isExcelXMLFile(file, text){
+  const name = String(file && file.name || '').toLowerCase();
+  if(name.endsWith('.xls')) return true;
+  return String(text || '').trim().startsWith('<?xml');
+}
+
+// Exporta los productos a un archivo Excel (.xls) que abre directo sin errores
+// ni apóstrofos. El CSV no podía hacerlo: Excel detecta la columna de códigos
+// como número (por la mayoría de códigos numéricos) y marca como "errores" los
+// alfanuméricos (los INGCO salían sin código). Con .xls cada columna declara
+// su tipo (Texto para códigos, Número para precios) y Excel no infiere nada.
+// La columna IMAGEN solo marca si el producto tiene foto guardada en este
+// dispositivo: las fotos completas se respaldan con "Exportar backup" (JSON).
+function exportProductosExcel(){
   if(db.productos.length === 0){
     toast('No hay productos para exportar', 'error');
     return;
   }
   const header = ['CODIGO','CODIGO DE BARRAS','DESCRIPCION','MARCA','CATEGORIA','PRECIO COMPRA','PRECIO MARCA','PRECIO VENTA','STOCK','STOCK MIN','CARACTERISTICAS','IMAGEN'];
+  const types = ['text','text','text','text','text','number','number','number','number','number','text','text'];
   const rows = db.productos.map(p => [
-    p.codigo, p.codigoBarras||'', p.nombre, p.marca||'', p.categoria||'',
-    csvNumber(p.precioCompra, 2), csvNumber(p.precioMarca, 2), csvNumber(p.precioVenta, 2), csvNumber(p.stock),
-    csvNumber(p.stockMin),
+    p.codigo || '', p.codigoBarras || '', p.nombre, p.marca || '', p.categoria || '',
+    p.precioCompra, p.precioMarca, p.precioVenta, p.stock,
+    p.stockMin,
     p.caracteristicas || '',
-    getImage(p.id)
+    getImage(p.id) ? '[foto local]' : ''
   ]);
-  downloadCSV(`stockferre_productos_${todayISO().slice(0,10)}.csv`, header, rows);
-  toast('Productos exportados', 'success');
+  downloadXLS(`stockferre_productos_${todayISO().slice(0,10)}.xls`, [{ name: 'Productos', header, rows, types }]);
+  toast('Productos exportados a Excel (las fotos se respaldan con "Exportar backup")', 'success');
 }
 
 // Importa un CSV de inventario (CODIGO, DESCRIPCION, ..., STOCK) para
@@ -3681,9 +4735,10 @@ function exportVentasCSV(){
     toast('No hay ventas para exportar', 'error');
     return;
   }
-  const header = ['FECHA','CODIGO','PRODUCTO','CANTIDAD','PRECIO UNITARIO','TOTAL','METODO DE PAGO'];
+  const header = ['FECHA','CODIGO','PRODUCTO','CANTIDAD','PRECIO UNITARIO','TOTAL','METODO DE PAGO','EFECTIVO','QR','QR PERSONA'];
   const rows = db.ventas.map(v => [
-    v.fecha, v.codigo, v.nombre, csvNumber(v.cantidad), csvNumber(v.precioUnitario, 2), csvNumber(v.total, 2), v.metodoPago
+    v.fecha, csvText(v.codigo), v.nombre, csvNumber(v.cantidad), csvNumber(v.precioUnitario, 2), csvNumber(v.total, 2), v.metodoPago,
+    csvNumber(efectivoMontoDeVenta(v), 2), csvNumber(qrMontoDeVenta(v), 2), csvText(v.qrPersona || '')
   ]);
   downloadCSV(`stockferre_ventas_${todayISO().slice(0,10)}.csv`, header, rows);
   toast('Ventas exportadas', 'success');
@@ -3710,7 +4765,10 @@ function importVentasCSV(file){
         cantidad: headers.indexOf('CANTIDAD'),
         precioUnitario: headers.findIndex(h => h.includes('PRECIO') && h.includes('UNITARIO')),
         total: headers.indexOf('TOTAL'),
-        metodoPago: headers.findIndex(h => h.includes('PAGO'))
+        metodoPago: headers.findIndex(h => h.includes('PAGO')),
+        efectivo: headers.findIndex(h => h.includes('EFECTIVO')),
+        qrMonto: headers.findIndex(h => h === 'QR'),
+        qrPersona: headers.findIndex(h => h.includes('PERSONA'))
       };
       if(idx.codigo === -1 || idx.nombre === -1 || idx.total === -1){
         toast('El CSV debe tener al menos columnas CODIGO, PRODUCTO y TOTAL', 'error');
@@ -3724,6 +4782,17 @@ function importVentasCSV(file){
         const cantidad = idx.cantidad > -1 ? (parseFloat(String(r[idx.cantidad]).replace(',','.')) || 1) : 1;
         const total = parsePrecio(r[idx.total]);
         const precioUnitario = idx.precioUnitario > -1 ? parsePrecio(r[idx.precioUnitario]) : (cantidad > 0 ? total / cantidad : 0);
+        const mp = idx.metodoPago > -1 ? String(r[idx.metodoPago] || '').toLowerCase() : '';
+        const metodoPago = mp.includes('mixto') ? 'mixto' : (mp.includes('qr') ? 'qr' : 'efectivo');
+        let efectivoMonto = 0, qrMonto = 0;
+        if(metodoPago === 'mixto'){
+          efectivoMonto = idx.efectivo > -1 ? parsePrecio(r[idx.efectivo]) : 0;
+          qrMonto = idx.qrMonto > -1 ? parsePrecio(r[idx.qrMonto]) : (total - efectivoMonto);
+        }else if(metodoPago === 'qr'){
+          qrMonto = total;
+        }else{
+          efectivoMonto = total;
+        }
         db.ventas.push({
           id: uid('venta'),
           codigo: String(r[idx.codigo] || '').trim() || 'OTRO',
@@ -3731,7 +4800,10 @@ function importVentasCSV(file){
           cantidad,
           precioUnitario,
           total,
-          metodoPago: idx.metodoPago > -1 ? (String(r[idx.metodoPago]||'').toLowerCase().includes('qr') ? 'qr' : 'efectivo') : 'efectivo',
+          metodoPago,
+          qrPersona: idx.qrPersona > -1 ? String(r[idx.qrPersona] || '').trim() : '',
+          efectivoMonto,
+          qrMonto,
           fecha: idx.fecha > -1 ? (r[idx.fecha] || todayISO()) : todayISO()
         });
         importadas++;
@@ -3756,7 +4828,7 @@ function exportInventarioCSV(){
   }
   const header = ['CODIGO','DESCRIPCION','MARCA','CATEGORIA','CODIGO DE BARRAS','STOCK'];
   const rows = db.productos.map(p => [
-    p.codigo, p.nombre, p.marca||'', p.categoria||'', p.codigoBarras||'', csvNumber(p.stock)
+    csvText(p.codigo), p.nombre, p.marca||'', p.categoria||'', csvText(p.codigoBarras||''), csvNumber(p.stock)
   ]);
   downloadCSV(`stockferre_inventario_${todayISO().slice(0,10)}.csv`, header, rows);
   toast('Inventario exportado', 'success');
@@ -3787,6 +4859,7 @@ function getAllCategoryNames(){
 }
 
 function renderProductos(){
+  resetImgLazy();
   populateCategoryFilter();
   populateCategoryDatalist();
 
@@ -3810,15 +4883,22 @@ function renderProductos(){
   if(list.length === 0){
     tbody.innerHTML = `<tr class="empty-row"><td colspan="${currentRole === 'guest' ? 11 : 12}">No hay productos que coincidan.</td></tr>`;
   }else{
-    tbody.innerHTML = list.map(p => {
+    tbody.innerHTML = list.map((p, idx) => {
       const bajo = (p.stockMin || 0) > 0 && p.stock <= p.stockMin;
       const img = getImage(p.id);
+      const countImg = getImageCount(p.id);
+      const thumb = img
+        ? (idx < IMG_LAZY_FIRST
+            ? `<img src="${img}" class="prod-thumb" alt="" data-img-product="${p.id}" decoding="async">`
+            : `<div class="prod-thumb-lazy" data-lazy-img="${p.id}"><div class="prod-thumb prod-thumb-empty">🖼️</div></div>`)
+        : `<div class="prod-thumb prod-thumb-empty">🖼️</div>`;
       return `
       <tr data-product-id="${p.id}">
         <td class="prod-img-cell">
           <div class="prod-img-wrap">
-            ${img ? `<img src="${img}" class="prod-thumb" alt="" data-img-product="${p.id}">` : `<div class="prod-thumb prod-thumb-empty">🖼️</div>`}
-            ${currentRole === 'guest' ? '' : `<button class="btn btn-sm btn-secondary prod-img-btn" data-img-product="${p.id}">${img ? 'Cambiar' : 'Añadir imagen'}</button>`}
+            ${thumb}
+            ${countImg > 1 ? `<span class="prod-img-count" data-img-product="${p.id}">${countImg}</span>` : ''}
+            ${currentRole === 'guest' ? '' : `<button class="btn btn-sm btn-secondary prod-img-btn" data-img-product="${p.id}">Añadir foto</button>`}
           </div>
         </td>
         <td><strong>${escapeHtml(p.codigo)}</strong></td>
@@ -3838,6 +4918,7 @@ function renderProductos(){
         </td>`}
       </tr>`;
     }).join('');
+    armImgLazyLoader(tbody);
   }
 
   updateSidebarProductCount();
@@ -3944,6 +5025,7 @@ function handleProductSubmit(e){
    7b. IMAGEN DEL PRODUCTO (local, no Firebase)
    ------------------------------------------------------------------------- */
 let imgTargetId = null;
+let imgTargetIndex = 0; // foto actualmente visible en el carrusel del modal
 let detTargetId = null; // id del producto abierto en la ventana de características
 
 // Muestra la ventana con las características del producto. Los campos que se
@@ -3952,15 +5034,26 @@ function openProductDetails(productId){
   const p = getProductoById(productId);
   if(!p) return;
   detTargetId = productId;
-  const img = getImage(p.id);
+  // Todas las fotos del producto, deslizables.
+  const detImgs = getImages(p.id);
   const detImg = document.getElementById('detImg');
-  if(img){
-    detImg.src = img;
-    detImg.style.display = 'block';
+  // Si la página en caché es vieja, detImg es un <img>: se muestra la primera foto.
+  if(detImg.tagName !== 'DIV'){
+    if(detImgs.length){
+      detImg.src = detImgs[0];
+      detImg.style.display = 'block';
+    }else{
+      detImg.removeAttribute('src');
+      detImg.style.display = 'none';
+    }
+  }else if(detImgs.length){
+    detImg.innerHTML = detImgs.map((src, i)=>`<img src="${src}" alt="Foto ${i+1}" decoding="async">`).join('');
+    detImg.style.display = 'flex';
   }else{
-    detImg.removeAttribute('src');
+    detImg.innerHTML = '';
     detImg.style.display = 'none';
   }
+  updateDetImgCounter();
   document.getElementById('detCodigo').textContent = p.codigo || '-';
   document.getElementById('detBarras').textContent = p.codigoBarras || '-';
   document.getElementById('detNombre').textContent = p.nombre || '-';
@@ -3976,6 +5069,22 @@ function openProductDetails(productId){
   const detVerIngresos = document.getElementById('btnDetVerIngresos');
   if(detVerIngresos) detVerIngresos.style.display = currentRole === 'guest' ? 'none' : '';
   openModal('modalProductoDetalle');
+}
+
+// Muestra "2 / 3" debajo de las fotos del modal de detalles al deslizar.
+function updateDetImgCounter(){
+  const carousel = document.getElementById('detImg');
+  const counter = document.getElementById('detImgCounter');
+  if(!counter || !carousel || carousel.tagName !== 'DIV') return;
+  const imgs = carousel.querySelectorAll('img');
+  if(imgs.length < 2){ counter.textContent = ''; return; }
+  const center = carousel.scrollLeft + carousel.clientWidth / 2;
+  let active = 0;
+  imgs.forEach((img, i)=>{
+    const c = img.offsetLeft + img.offsetWidth / 2;
+    if(Math.abs(c - center) < Math.abs(imgs[active].offsetLeft + imgs[active].offsetWidth / 2 - center)) active = i;
+  });
+  counter.textContent = (active + 1) + ' / ' + imgs.length;
 }
 
 // Guarda las características escritas en el recuadro blanco de la ventana del producto.
@@ -3994,35 +5103,108 @@ function openImageModal(productId){
   const p = getProductoById(productId);
   if(!p) return;
   imgTargetId = productId;
+  imgTargetIndex = 0;
   document.getElementById('imgProductName').textContent = p.nombre;
   document.getElementById('imgProductCode').textContent = p.codigo + (p.codigoBarras ? ' · ' + p.codigoBarras : '');
-  const img = getImage(productId);
-  const preview = document.getElementById('imgPreview');
-  const removeBtn = document.getElementById('btnImgRemove');
-  if(img){
-    preview.src = img;
-    preview.style.display = 'block';
-    removeBtn.style.display = '';
-  }else{
-    preview.removeAttribute('src');
-    preview.style.display = 'none';
-    removeBtn.style.display = 'none';
-  }
-  document.getElementById('imgUrlRow').style.display = 'none';
+  renderImgCarousel();
   document.getElementById('imgUrlInput').value = '';
+  document.getElementById('imgUrlStatus').style.display = 'none';
   document.getElementById('btnImgLoadUrl').disabled = false;
   openModal('modalImagen');
 }
 
+// Dibuja todas las fotos del producto en el carrusel (se desliza al arrastrar).
+function renderImgCarousel(){
+  const imgs = getImages(imgTargetId);
+  const carousel = document.getElementById('imgPreview');
+  const wrap = document.getElementById('imgPreviewWrap');
+  const info = document.getElementById('imgPreviewInfo');
+  const removeBtn = document.getElementById('btnImgRemove');
+  if(!carousel) return;
+  // Si la página en caché es vieja, imgPreview es un <img> y no un carrusel:
+  // se usa el modo simple (una sola foto a la vez).
+  if(carousel.tagName !== 'DIV'){
+    if(imgs.length){
+      carousel.src = imgs[0];
+      carousel.style.display = 'block';
+      if(removeBtn) removeBtn.style.display = '';
+    }else{
+      carousel.removeAttribute('src');
+      carousel.style.display = 'none';
+      if(removeBtn) removeBtn.style.display = 'none';
+    }
+    if(wrap) wrap.style.display = imgs.length ? 'block' : 'none';
+    if(info) info.style.display = 'none';
+    return;
+  }
+  if(imgs.length === 0){
+    carousel.innerHTML = '';
+    if(wrap) wrap.style.display = 'none';
+    if(info) info.style.display = 'none';
+    if(removeBtn) removeBtn.style.display = 'none';
+    return;
+  }
+  carousel.innerHTML = imgs.map((src, i)=>`<img src="${src}" alt="Foto ${i+1}" data-index="${i}" decoding="async">`).join('');
+  if(wrap) wrap.style.display = 'block';
+  if(info) info.style.display = 'flex';
+  if(removeBtn) removeBtn.style.display = '';
+  carousel.scrollLeft = 0;
+  updateImgIndicator();
+}
+
+// Actualiza el contador, los puntos y las flechas según la foto visible.
+function updateImgIndicator(){
+  const carousel = document.getElementById('imgPreview');
+  if(!carousel || carousel.tagName !== 'DIV') return;
+  // querySelectorAll devuelve un NodeList (sin .map): se convierte a arreglo.
+  const imgs = Array.from(carousel.querySelectorAll('img'));
+  const total = imgs.length;
+  if(!total) return;
+  // La foto activa es la que está más cerca del centro del carrusel.
+  const center = carousel.scrollLeft + carousel.clientWidth / 2;
+  let active = 0;
+  imgs.forEach((img, i)=>{
+    const c = img.offsetLeft + img.offsetWidth / 2;
+    if(Math.abs(c - center) < Math.abs(imgs[active].offsetLeft + imgs[active].offsetWidth / 2 - center)) active = i;
+  });
+  imgTargetIndex = active;
+  const counter = document.getElementById('imgPreviewCounter');
+  if(counter) counter.textContent = (active + 1) + ' / ' + total;
+  const dots = document.getElementById('imgPreviewDots');
+  if(dots) dots.innerHTML = imgs.map((_, i)=>
+    `<span class="carousel-dot${i === active ? ' active' : ''}" data-index="${i}"></span>`
+  ).join('');
+  const prev = document.getElementById('btnImgPrev');
+  const next = document.getElementById('btnImgNext');
+  if(prev) prev.style.visibility = total > 1 ? 'visible' : 'hidden';
+  if(next) next.style.visibility = total > 1 ? 'visible' : 'hidden';
+  const removeBtn = document.getElementById('btnImgRemove');
+  if(removeBtn) removeBtn.textContent = total > 1 ? `🗑️ Quitar foto ${active + 1}/${total}` : '🗑️ Quitar imagen';
+}
+
+// Mueve el carrusel hacia el lado indicado (1 = siguiente, -1 = anterior).
+function slideImgCarousel(dir){
+  const carousel = document.getElementById('imgPreview');
+  if(!carousel || carousel.tagName !== 'DIV') return;
+  const imgs = carousel.querySelectorAll('img');
+  if(imgs.length < 2) return;
+  const next = Math.min(Math.max(imgTargetIndex + dir, 0), imgs.length - 1);
+  const targetLeft = imgs[next].getBoundingClientRect().left - carousel.getBoundingClientRect().left + carousel.scrollLeft;
+  carousel.scrollTo({ left: targetLeft, behavior: 'smooth' });
+  imgTargetIndex = next;
+  updateImgIndicator();
+}
+
 function handleImgFile(file){
   if(!file || !imgTargetId) return;
+  if(getImages(imgTargetId).length >= MAX_IMGS){ toast('Máximo 3 fotos por producto', 'error'); return; }
   compressImage(file).then(data=>{
     return saveImageLocal(imgTargetId, data);
   }).then(ok=>{
     if(ok){
-      closeAllModals();
+      renderImgCarousel();
       renderProductos();
-      toast('Imagen guardada en este dispositivo', 'success');
+      toast('Foto añadida en este dispositivo', 'success');
     }else{
       toast('No se pudo guardar la imagen', 'error');
     }
@@ -4035,20 +5217,33 @@ function handleImgFile(file){
 function handleImgUrl(){
   const url = document.getElementById('imgUrlInput').value.trim();
   if(!url || !imgTargetId){ toast('Escribe una URL válida', 'error'); return; }
-  document.getElementById('btnImgLoadUrl').disabled = true;
+  if(getImages(imgTargetId).length >= MAX_IMGS){ toast('Máximo 3 fotos por producto', 'error'); return; }
+  const btn = document.getElementById('btnImgLoadUrl');
+  const status = document.getElementById('imgUrlStatus');
+  btn.disabled = true;
+  if(status){ status.style.display = 'block'; status.textContent = '⏳ Cargando imagen... (si tarda, se intenta con un proxy)'; }
   fetchImageAsDataURL(url).then(data=>{
-    return saveImageLocal(imgTargetId, data);
+    status.textContent = '⏳ Comprimiendo imagen...';
+    return compressDataURL(data);
+  }).then(compressed=>{
+    // Se guarda también el link original: así el export puede mostrar la URL
+    // de la foto en la columna IMAGEN (respaldo del origen de cada imagen).
+    return saveImageLocal(imgTargetId, compressed, url);
   }).then(ok=>{
-    document.getElementById('btnImgLoadUrl').disabled = false;
+    btn.disabled = false;
+    if(status) status.style.display = 'none';
     if(ok){
-      closeAllModals();
+      renderImgCarousel();
       renderProductos();
-      toast('Imagen guardada en este dispositivo', 'success');
+      document.getElementById('imgUrlInput').value = '';
+      toast('Foto añadida (con su link) en este dispositivo', 'success');
     }else{
       toast('No se pudo guardar la imagen', 'error');
     }
   }).catch(err=>{
-    document.getElementById('btnImgLoadUrl').disabled = false;
+    btn.disabled = false;
+    const msg = (err && err.message) ? err.message : 'No se pudo cargar la imagen desde esa URL.';
+    if(status){ status.style.display = 'block'; status.textContent = '⚠️ ' + msg; }
     console.error(err);
     toast('No se pudo cargar la imagen desde esa URL', 'error');
   });
@@ -4056,14 +5251,22 @@ function handleImgUrl(){
 
 function removeCurrentImage(){
   if(!imgTargetId) return;
+  const imgs = getImages(imgTargetId);
+  if(imgs.length === 0) return;
+  const idx = Math.min(Math.max(imgTargetIndex, 0), imgs.length - 1);
   const nombre = document.getElementById('imgProductName').textContent;
-  confirmDialog('Quitar imagen', `¿Quitar la imagen de "${nombre}"?`, ()=>{
-    removeImageLocal(imgTargetId).then(ok=>{
+  const texto = imgs.length > 1
+    ? `¿Quitar la foto ${idx + 1} de ${imgs.length} de "${nombre}"?`
+    : `¿Quitar la imagen de "${nombre}"?`;
+  confirmDialog('Quitar foto', texto, ()=>{
+    removeImageAtLocal(imgTargetId, idx).then(ok=>{
       if(ok){
+        imgTargetIndex = Math.max(0, idx - 1);
+        renderImgCarousel();
         renderProductos();
-        toast('Imagen quitada', 'success');
+        toast('Foto quitada', 'success');
       }else{
-        toast('No se pudo quitar la imagen', 'error');
+        toast('No se pudo quitar la foto', 'error');
       }
     });
   });
@@ -4095,6 +5298,10 @@ function parseCSV(text, delimiter){
   text = text.replace(/\r\n/g,'\n').replace(/\r/g,'\n');
   delimiter = delimiter || detectDelimiter(text);
 
+  // Quita el apóstrofo con que se exportan los códigos para que Excel los lea
+  // como texto (ver csvText). Así, al re-importar, '12399 vuelve a ser 12399.
+  const clean = f => (f.length && f[0] === "'") ? f.slice(1) : f;
+
   const rows = [];
   let row = [], field = '', inQuotes = false;
 
@@ -4109,12 +5316,12 @@ function parseCSV(text, delimiter){
       }
     }else{
       if(ch === '"'){ inQuotes = true; }
-      else if(ch === delimiter){ row.push(field); field = ''; }
-      else if(ch === '\n'){ row.push(field); rows.push(row); row = []; field = ''; }
+      else if(ch === delimiter){ row.push(clean(field)); field = ''; }
+      else if(ch === '\n'){ row.push(clean(field)); rows.push(row); row = []; field = ''; }
       else{ field += ch; }
     }
   }
-  if(field.length || row.length){ row.push(field); rows.push(row); }
+  if(field.length || row.length){ row.push(clean(field)); rows.push(row); }
   return rows.filter(r => r.some(c => String(c).trim() !== ''));
 }
 
@@ -4141,7 +5348,10 @@ function importProductsCSV(file){
   const reader = new FileReader();
   reader.onload = (e)=>{
     try{
-      const rows = parseCSV(e.target.result);
+      // Acepta CSV (coma, punto y coma o tabulador) o .xls exportado por la app
+      // (Excel XML 2003) para que lo que se exporta también se pueda importar.
+      const text = e.target.result;
+      const rows = isExcelXMLFile(file, text) ? parseExcelXML(text) : parseCSV(text);
       if(rows.length < 2){
         toast('El archivo CSV no tiene datos', 'error');
         return;
@@ -4222,11 +5432,14 @@ function importProductsCSV(file){
           creados++;
         }
         // Si el CSV trae una columna IMAGEN, se guarda la foto en este
-        // dispositivo (local, no Firebase).
+        // dispositivo (local, no Firebase). Si el valor es un link (https),
+        // se guarda también como el link original de la foto para poder
+        // re-exportarlo después (columna IMAGEN con la URL de respaldo).
         if(idx.imagen > -1 && productoId){
           const imgVal = String(r[idx.imagen] || '').trim();
           if(imgVal && (imgVal.startsWith('data:') || /^https?:\/\//i.test(imgVal))){
-            saveImageLocal(productoId, imgVal);
+            // Reemplaza las fotos del producto con la del CSV (una sola foto).
+            saveImagesLocal(productoId, [imgVal], /^https?:\/\//i.test(imgVal) ? [imgVal] : ['']);
           }
         }
       }
@@ -4249,7 +5462,7 @@ function importProductsCSV(file){
    ------------------------------------------------------------------------- */
 
 function exportBackup(){
-  const data = Object.assign({}, db, { imagenes: imgCache });
+  const data = Object.assign({}, db, { imagenes: imgCache, imgUrl: imgUrlCache });
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -4280,10 +5493,13 @@ function importBackup(file){
         });
         saveDB();
         syncProductoDocs(db.productos, currentModo); // los productos restaurados también van a la nube
-        // Restaura las imágenes locales (solo de este dispositivo)
+        // Restaura las imágenes locales (solo de este dispositivo), incluyendo
+        // el link original de cada foto cuando lo tenía. Soporta tanto el
+        // formato viejo (1 sola foto) como el nuevo (varias fotos por producto).
+        const urlsMap = (parsed.imgUrl && typeof parsed.imgUrl === 'object') ? parsed.imgUrl : {};
         if(parsed.imagenes && typeof parsed.imagenes === 'object'){
           Promise.all(
-            Object.keys(parsed.imagenes).map(id => saveImageLocal(id, parsed.imagenes[id]))
+            Object.keys(parsed.imagenes).map(id => saveImagesLocal(id, parsed.imagenes[id], urlsMap[id] || ''))
           ).then(()=> loadImagesForModo(currentModo));
         }
         renderProductos();
@@ -4330,6 +5546,7 @@ const VIEW_TITLES = {
   retiros: 'Pagos',
   deudas: 'Deudas',
   gastos: 'Gastos del día',
+  codigobarras: 'Añadir código de barras',
   inventario: 'Inventario',
   historial: 'Historial',
   config: 'Configuración'
@@ -4345,8 +5562,9 @@ function updateInicioClock(){
 }
 
 function showView(name){
+  if(welcomeTimer){ clearTimeout(welcomeTimer); welcomeTimer = null; }
   currentView = name;
-  if(currentRole === 'guest' && (name === 'inventario' || name === 'config' || name === 'compras' || name === 'finanzas' || name === 'retiros' || name === 'deudas' || name === 'gastos' || name === 'topventas' || name === 'pedidos')){
+  if(currentRole === 'guest' && (name === 'inventario' || name === 'config' || name === 'compras' || name === 'finanzas' || name === 'retiros' || name === 'deudas' || name === 'gastos' || name === 'codigobarras' || name === 'topventas' || name === 'pedidos')){
     toast('Los invitados no tienen acceso a esa sección', 'error');
     name = 'productos';
   }
@@ -4362,6 +5580,10 @@ function showView(name){
   closeAllModals(); // por si venías con el escáner de inventario u otro modal abierto
   restoreScannerBlockHome();
   scanContext = 'lookup';
+  // Fuera de "Añadir código de barras" el modo de escáner de código de barras
+  // vuelve a estar disponible en la pestaña Escanear.
+  const cbTab = document.querySelector('[data-scan-code-mode="codigobarras"]');
+  if(cbTab) cbTab.style.display = '';
 
   if(name === 'inicio') updateInicioClock();
   if(name === 'productos') renderProductos();
@@ -4379,6 +5601,8 @@ function showView(name){
   if(name === 'escaner'){
     document.getElementById('scanResult').innerHTML = '';
     if(!ocrActive && !zxingLiveActive) startActiveScanner();
+  }else if(name === 'codigobarras'){
+    openCodigoBarrasView();
   }else{
     stopActiveScanner();
   }
@@ -4436,7 +5660,13 @@ function syncRememberSwitchUI(){
 function getNotifEnabled(){
   try{ return JSON.parse(localStorage.getItem(NOTIF_KEY)) || {}; }catch(e){ return {}; }
 }
-function notifEnabled(modo){ return !!getNotifEnabled()[modo]; }
+// De FÁBRICA está activado: si nunca se tocó el suich en este dispositivo, la
+// opción viene en ON (el permiso del navegador se pide con el primer gesto).
+function notifEnabled(modo){
+  const obj = getNotifEnabled();
+  if(obj[modo] === undefined) return true;
+  return !!obj[modo];
+}
 function setNotifEnabled(modo, on){
   const obj = getNotifEnabled();
   obj[modo] = !!on;
@@ -4448,69 +5678,58 @@ function syncNotifSwitchUI(){
   sw.checked = currentModo === 'invitado' ? false : notifEnabled(currentModo);
 }
 
-// Modo pro: recuerda en este dispositivo si el usuario lo dejó activado.
-// El tema dorado (body.gold-theme) es independiente: solo cambia los colores
-// y sus sonidos, no las pestañas del modo pro.
-// El destello (barrido de brillo de los botones) solo se muestra en el momento
-// de ACTIVAR el modo pro con el interruptor, nunca al abrir la app con el modo
-// pro ya activado (para eso está body.pro-flash-done).
+// Modo pro: recuerda en este dispositivo si el usuario lo dejó abierto (el
+// submenú con Estado Financiero / Pagos / Deudas). El tema de colores es
+// independiente: solo cambia los colores.
 function syncProModeUI(){
   let pro = false;
-  let gold = false;
   try{ pro = localStorage.getItem('stockferre_proMode') === '1'; }catch(e){}
-  try{ gold = localStorage.getItem('stockferre_goldTheme') === '1'; }catch(e){}
-  const sw = document.getElementById('proModeSwitch');
-  if(sw) sw.checked = pro;
-  const ts = document.getElementById('themeSwitch');
-  if(ts) ts.checked = gold;
-  document.body.classList.toggle('pro-mode', pro);
-  document.body.classList.toggle('gold-theme', gold);
+  const group = document.getElementById('proGroup');
+  const sub = document.getElementById('proSub');
   if(pro){
-    // Al abrir la app con el modo pro ya activado las pestañas aparecen con un
-    // fade suave, sin el destello (el destello solo ocurre al activarlo).
-    document.body.classList.add('pro-flash-done');
-    revealProOnlyItems(false); // al cargar: demora en cascada, sin sonido
+    if(group) group.classList.add('open');
+    if(sub) sub.classList.add('open');
   }
+  applyTheme(readSavedTheme(), false);
 }
 
-// Activa/desactiva el MODO PRO (desbloquea las pestañas exclusivas y enciende
-// de paso el tema dorado). Al activarse, las pestañas salen una por una con su
-// sonido y el panel de Opciones se cierra.
-function applyProMode(on){
-  document.body.classList.toggle('pro-mode', on);
-  document.body.classList.toggle('gold-theme', on);
-  if(on){
-    // Al activar el modo pro se permite el destello UNA vez en este momento.
-    document.body.classList.remove('pro-flash-done');
-  }
-  const proSw = document.getElementById('proModeSwitch');
-  const themeSw = document.getElementById('themeSwitch');
-  if(proSw) proSw.checked = on;
-  if(themeSw) themeSw.checked = on;
+// Pestaña "👑 Modo Pro": al presionarla abre/cierra el submenú que se desliza
+// hacia abajo con las pestañas exclusivas (Estado Financiero, Pagos, Deudas,
+// Gastos del día).
+function toggleProMode(){
+  const group = document.getElementById('proGroup');
+  const sub = document.getElementById('proSub');
+  if(!group || !sub) return;
+  const on = !group.classList.contains('open');
+  group.classList.toggle('open', on);
+  sub.classList.toggle('open', on);
   try{ localStorage.setItem('stockferre_proMode', on ? '1' : '0'); }catch(err){}
-  try{ localStorage.setItem('stockferre_goldTheme', on ? '1' : '0'); }catch(err){}
-  // Si se desactiva estando en una pestaña exclusiva del modo pro, salir de ella
-  if(!on && ['finanzas','retiros','deudas','gastos','topventas'].indexOf(currentView) !== -1){
-    showView('productos');
-  }
-  if(on){
-    playProModeSound();       // sonido de revelación del modo pro
-    revealProOnlyItems(true); // pestañas pro salen una por una, con destello y sonido
-    const opts = document.getElementById('sidebarOptions');
-    if(opts) opts.classList.remove('open'); // cerrar Opciones al activar pro
-    showView('topventas');    // ir a Más vendidos al activar el modo pro
-  }
-  toast(on ? '👑 Modo pro activado: todo brilla' : 'Modo pro desactivado', 'success');
 }
 
-// Suich de tema: SOLO enciende/apaga el color dorado (y sus sonidos), sin
-// tocar las pestañas del modo pro. Dorado off = tema blanco/claro.
-function applyGoldTheme(on){
-  document.body.classList.toggle('gold-theme', on);
-  const themeSw = document.getElementById('themeSwitch');
-  if(themeSw) themeSw.checked = on;
-  try{ localStorage.setItem('stockferre_goldTheme', on ? '1' : '0'); }catch(err){}
-  toast(on ? '🎨 Tema dorado activado' : '🎨 Tema blanco activado', 'success');
+// Paleta de temas: blanco, negro, naranjado o amarillo.
+function readSavedTheme(){
+  try{
+    let t = localStorage.getItem('stockferre_theme');
+    if(t === 'dorado') return 'negro';
+    if(t) return t;
+  }catch(e){}
+  return 'negro';
+}
+
+// Aplica el tema elegido en la paleta. Si showToast es true avisa con un
+// mensaje (al abrir la app se aplica en silencio).
+function applyTheme(color, showToast){
+  if(!color || color === 'dorado') color = 'negro';
+  document.body.classList.remove('theme-blanco', 'theme-negro', 'theme-naranja', 'theme-amarillo');
+  document.body.classList.add('theme-' + color);
+  try{ localStorage.setItem('stockferre_theme', color); }catch(err){}
+  document.querySelectorAll('.palette-swatch').forEach(sw=>{
+    sw.classList.toggle('active', sw.dataset.theme === color);
+  });
+  if(showToast){
+    const NOMBRES = { blanco:'blanco', negro:'negro', naranja:'naranjado', amarillo:'amarillo' };
+    toast('🎨 Tema ' + (NOMBRES[color] || color) + ' activado', 'success');
+  }
 }
 function notificationsSupported(){ return 'Notification' in window; }
 function requestNotifPermission(){
@@ -4525,9 +5744,15 @@ function requestNotifPermission(){
 }
 function notifySale(venta){
   if(!notificationsSupported()) return;
-  if(Notification.permission !== 'granted') return;
   if(!notifEnabled(currentModo)) return;
   if(!venta) return;
+  if(Notification.permission !== 'granted'){
+    // Las notificaciones vienen activadas de fábrica, pero el navegador pide
+    // el permiso una sola vez: se solicita con este gesto del usuario (al
+    // registrar la venta) si aún no fue concedido ni denegado.
+    requestNotifPermission();
+    return;
+  }
   try{
     const total = (venta.total !== undefined && venta.total !== null) ? venta.total : 0;
     const cantidad = venta.cantidad || 1;
@@ -4541,7 +5766,6 @@ function notifySale(venta){
 // nuevas (ventas registradas en otro dispositivo).
 function notifyNewRemoteSales(prevIds, newVentas){
   if(!notificationsSupported()) return;
-  if(Notification.permission !== 'granted') return;
   if(!notifEnabled(currentModo)) return;
   const prev = new Set(prevIds || []);
   (newVentas || []).forEach(v => {
@@ -4627,7 +5851,7 @@ function switchModoData(modo){
   else connectFirebase();
 }
 
-// Punto de entrada desde los botones de Inicio (🔧 Manuales / ⚡ Eléctricas).
+// Punto de entrada desde los botones de Inicio (🛠️ Manuales / ⚡ Eléctricas).
 // Si ese modo tiene contraseña puesta, pide la contraseña antes de entrar;
 // si no, entra directo como dueño (admin) — así es "por ahora".
 function attemptEnterModo(modo){
@@ -4681,7 +5905,8 @@ function enterModo(modo){
 }
 
 // Pantalla de bienvenida: se muestra al entrar a un modo, con el nombre en el
-// color de ese modo (rojo/azul/verde). Conserva el menú lateral para navegar.
+// color de ese modo (naranja/amarillo/verde). Conserva el menú lateral para
+// navegar. Dura medio segundo y salta sola a la pestaña Productos.
 function showWelcomeForMode(modo){
   document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
   document.getElementById('view-welcome').classList.add('active');
@@ -4689,6 +5914,14 @@ function showWelcomeForMode(modo){
     : modo === 'electrico' ? 'Herramientas Eléctricas'
     : 'TIENDA 1';
   document.getElementById('welcomeSubtitle').textContent = sub;
+  // Logo grande debajo del título: 🛠️ en Manuales, ⚡ en Eléctricas, y en el
+  // Invitado los dos logos juntos (🛠️ ⚡) en una sola fila.
+  const logoEl = document.getElementById('welcomeLogo');
+  if(logoEl){
+    logoEl.innerHTML = modo === 'manual' ? '<span>🛠️</span>'
+      : modo === 'electrico' ? '<span>⚡</span>'
+      : '<span>🛠️</span><span>⚡</span>';
+  }
   document.querySelectorAll('.nav-item[data-view]').forEach(btn=> btn.classList.remove('active'));
   document.getElementById('viewTitle').textContent = sub;
   document.body.classList.remove('inicio-theme');
@@ -4697,6 +5930,9 @@ function showWelcomeForMode(modo){
   closeAllModals();
   restoreScannerBlockHome();
   scanContext = 'lookup';
+  // Salto automático a la pestaña de productos tras medio segundo.
+  if(welcomeTimer) clearTimeout(welcomeTimer);
+  welcomeTimer = setTimeout(()=>{ welcomeTimer = null; showView('productos'); }, 500);
   // Sonido de ingreso de sesión al entrar a las pantallas de bienvenida
   setTimeout(playLoginSound, 350);
 }
@@ -4828,10 +6064,36 @@ function restoreModo(){
 }
 
 function updateSidebarBrand(){
+  const iconEl = document.querySelector('.sidebar-brand .brand-icon');
   const strongEl = document.querySelector('.sidebar-brand .brand-text strong');
   const smallEl = document.querySelector('.sidebar-brand .brand-text small');
+  // Logo según el modo: Manuales usa la llave cruzada con martillo 🛠️,
+  // Eléctricas el ⚡ amarillo, y el Invitado muestra los dos juntos.
+  // En el Invitado los logos NO van arriba con las letras: se quitan de ahí y
+  // se muestran debajo de las pestañas, apilados en vertical y centrados.
+  if(iconEl){
+    iconEl.innerHTML = currentModo === 'invitado' ? ''
+      : (currentModo === 'manual' ? '🛠️' : '⚡');
+  }
+  const logosEl = document.getElementById('sidebarLogos');
+  if(logosEl){
+    logosEl.innerHTML = currentModo === 'invitado' ? '<span>🛠️</span><span>⚡</span>' : '';
+  }
   if(strongEl) strongEl.textContent = MODO_LABELS[currentModo] || 'TIENDA 1';
-  if(smallEl) smallEl.textContent = currentRole === 'guest' ? '👤 Modo invitado' : 'Consulta de productos';
+  if(smallEl){
+    // "Consulta de productos" desaparece en Manuales y Eléctricas; en el
+    // Invitado se muestra "Modo invitado".
+    if(currentRole === 'guest'){
+      smallEl.textContent = '👤 Modo invitado';
+      smallEl.style.display = '';
+    }else if(currentModo === 'manual' || currentModo === 'electrico'){
+      smallEl.textContent = '';
+      smallEl.style.display = 'none';
+    }else{
+      smallEl.textContent = 'Consulta de productos';
+      smallEl.style.display = '';
+    }
+  }
 }
 
 // El botón "🔒 Agregar contraseña" se muestra dentro de Manuales y Eléctricas
@@ -4883,9 +6145,11 @@ function closeModalById(id){
 function closeAllModals(){
   const inventarioScanWasOpen = document.getElementById('modalInventarioScan').classList.contains('open');
   const barcodeScanWasOpen = document.getElementById('modalBarcodeScan').classList.contains('open');
+  const ventaScanWasOpen = document.getElementById('modalVentaScan').classList.contains('open');
+  const compraScanWasOpen = document.getElementById('modalCompraScan').classList.contains('open');
   document.querySelectorAll('.modal.open').forEach(m => m.classList.remove('open'));
   document.getElementById('modalBackdrop').classList.remove('open');
-  if(inventarioScanWasOpen){
+  if(inventarioScanWasOpen || ventaScanWasOpen || compraScanWasOpen){
     stopActiveScanner();
     restoreScannerBlockHome();
     scanContext = 'lookup';
@@ -5514,19 +6778,22 @@ function setupEventListeners(){
     });
   });
 
-  // Sonido de clic al apretar cualquier botón del menú lateral. Con el tema
-  // dorado activo el clic suena a campana dorada; si no, chime suave.
+  // Sonido de clic al apretar cualquier botón del menú lateral.
   document.getElementById('sidebar').addEventListener('click', (e)=>{
-    if(e.target.closest('button')){
-      if(document.body.classList.contains('gold-theme')) playGoldClink();
-      else playClickSound();
-    }
+    if(e.target.closest('button')) playClickSound();
   });
 
   // Botón "Opciones": abre/cierra el panel inferior del menú (productos,
   // estado de sincronización, contraseña, volver al inicio, sesión y avisos).
   document.getElementById('btnToggleOptions').addEventListener('click', ()=>{
     document.getElementById('sidebarOptions').classList.toggle('open');
+  });
+
+  // "CAMBIO" en Ajuste de cuentas: al modificarlo, la suma del día que se ve
+  // pasa a empezar desde ese monto en vez de cero. Se guarda por día.
+  document.getElementById('ajusteCambio').addEventListener('change', (e)=>{
+    setCambioBase(parseFloat(e.target.value) || 0, ventaFilterDateKey() || dateKeyOffset(0));
+    renderAjusteCuentas(ventasFiltradas());
   });
 
   // Sidebar móvil
@@ -5536,14 +6803,19 @@ function setupEventListeners(){
   });
   document.getElementById('sidebarOverlay').addEventListener('click', closeSidebarMobile);
 
-  // Botones de Inicio: Herramientas Manuales (rojo) / Herramientas Eléctricas (azul) / Invitado (verde)
+  // Botones de Inicio: Herramientas Manuales (naranja) / Herramientas Eléctricas (amarillo) / Invitado (verde)
   document.getElementById('btnModoManual').addEventListener('click', ()=> attemptEnterModo('manual'));
   document.getElementById('btnModoElectrico').addEventListener('click', ()=> attemptEnterModo('electrico'));
   document.getElementById('btnModoInvitado').addEventListener('click', ()=> enterModoAsGuest());
 
-  // Botón "Volver al Inicio" del menú lateral: regresa a la pantalla principal
-  document.getElementById('btnVolverInicio').addEventListener('click', ()=>{
+  // Botón casita (arriba, junto al nombre de la tienda): regresa a la pantalla
+  // principal como dueño (admin). Si no, quedaba el rol de invitado y después
+  // no se podía entrar a Manuales/Eléctricas desde Inicio.
+  document.getElementById('btnHome').addEventListener('click', ()=>{
     stopActiveScanner();
+    currentRole = 'admin';
+    try{ localStorage.setItem(ROLE_KEY, 'admin'); }catch(e){}
+    applyRoleUI();
     showView('inicio');
   });
 
@@ -5603,10 +6875,15 @@ function setupEventListeners(){
     }
   });
 
-  // Modo pro: desbloquea pestañas y enciende el tema dorado. El suich de tema
-  // blanco/dorado solo cambia el color (y sus sonidos), sin tocar las pestañas.
-  document.getElementById('proModeSwitch').addEventListener('change', (e)=> applyProMode(e.target.checked));
-  document.getElementById('themeSwitch').addEventListener('change', (e)=> applyGoldTheme(e.target.checked));
+  // Pestaña "👑 Modo Pro": abre/cierra el submenú (Estado Financiero / Pagos /
+  // Deudas) que se desliza hacia abajo. La paleta de colores solo cambia el
+  // tema (blanco, negro, naranjado, amarillo), sin tocar las pestañas.
+  document.getElementById('proToggle').addEventListener('click', toggleProMode);
+  document.getElementById('themePalette').addEventListener('click', (e)=>{
+    const sw = e.target.closest('.palette-swatch');
+    if(!sw) return;
+    applyTheme(sw.dataset.theme, true);
+  });
 
   // Agregar/cambiar/quitar contraseña (dentro de Manuales y Eléctricas)
   document.getElementById('btnAddPassword').addEventListener('click', openSetPasswordModal);
@@ -5653,7 +6930,7 @@ function setupEventListeners(){
 
   // Productos
   document.getElementById('btnNewProduct').addEventListener('click', ()=> openProductModal());
-  document.getElementById('btnExportProducts').addEventListener('click', exportProductosCSV);
+  document.getElementById('btnExportProducts').addEventListener('click', exportProductosExcel);
   document.getElementById('formProducto').addEventListener('submit', handleProductSubmit);
   document.getElementById('prodSearch').addEventListener('input', renderProductos);
   document.getElementById('prodSearch').addEventListener('change', (e)=>{
@@ -5678,15 +6955,41 @@ function setupEventListeners(){
   // Imagen del producto (local, no Firebase): tomar foto / subir / web
   document.getElementById('btnImgTakePhoto').addEventListener('click', ()=> document.getElementById('fileImgCamera').click());
   document.getElementById('btnImgUploadDevice').addEventListener('click', ()=> document.getElementById('fileImgGallery').click());
-  document.getElementById('btnImgToggleUrl').addEventListener('click', ()=>{
-    const row = document.getElementById('imgUrlRow');
-    row.style.display = row.style.display === 'none' ? '' : 'none';
-  });
   document.getElementById('btnImgLoadUrl').addEventListener('click', handleImgUrl);
   document.getElementById('imgUrlInput').addEventListener('keydown', (e)=>{
     if(e.key === 'Enter'){ e.preventDefault(); handleImgUrl(); }
   });
   document.getElementById('btnImgRemove').addEventListener('click', removeCurrentImage);
+  // Carrusel de fotos del modal de imagen: deslizar, flechas y puntos. Se
+  // protegen con existencias para que una versión vieja de la página en caché
+  // no rompa el arranque de la app.
+  const imgCarousel = document.getElementById('imgPreview');
+  if(imgCarousel) imgCarousel.addEventListener('scroll', ()=> requestAnimationFrame(updateImgIndicator));
+  const imgPrevBtn = document.getElementById('btnImgPrev');
+  if(imgPrevBtn) imgPrevBtn.addEventListener('click', ()=> slideImgCarousel(-1));
+  const imgNextBtn = document.getElementById('btnImgNext');
+  if(imgNextBtn) imgNextBtn.addEventListener('click', ()=> slideImgCarousel(1));
+  const imgDots = document.getElementById('imgPreviewDots');
+  if(imgDots && imgCarousel){
+    imgDots.addEventListener('click', (e)=>{
+      const dot = e.target.closest('.carousel-dot');
+      if(!dot) return;
+      const imgs = imgCarousel.querySelectorAll('img');
+      const idx = parseInt(dot.dataset.index || '0', 10);
+      if(imgs[idx]) imgCarousel.scrollTo({ left: imgs[idx].getBoundingClientRect().left - imgCarousel.getBoundingClientRect().left + imgCarousel.scrollLeft, behavior: 'smooth' });
+    });
+  }
+  // Contador del carrusel de fotos del modal de detalles.
+  const detImgEl = document.getElementById('detImg');
+  if(detImgEl) detImgEl.addEventListener('scroll', ()=> requestAnimationFrame(updateDetImgCounter));
+  // Busca la foto del producto en Google Imágenes usando código + marca
+  document.getElementById('btnImgWebSearch').addEventListener('click', ()=>{
+    const p = imgTargetId ? getProductoById(imgTargetId) : null;
+    if(!p) return;
+    const query = [p.codigo, p.marca].filter(Boolean).join(' ');
+    if(!query){ toast('El producto no tiene código', 'error'); return; }
+    window.open('https://www.google.com/search?q=' + encodeURIComponent(query) + '&tbm=isch', '_blank', 'noopener');
+  });
   document.getElementById('btnDetSaveCaract').addEventListener('click', saveDetCaracteristicas);
   document.getElementById('btnDetVerIngresos').addEventListener('click', ()=> openProductIngresos(detTargetId));
   document.getElementById('fileImgCamera').addEventListener('change', (e)=>{
@@ -5712,6 +7015,11 @@ function setupEventListeners(){
 
   // Ventas
   document.getElementById('btnNuevaVenta').addEventListener('click', openNuevaVentaModal);
+  document.getElementById('btnVentaScan').addEventListener('click', ()=>{
+    closeAllModals();
+    openVentaScan();
+  });
+  document.getElementById('btnCloseVentaScan').addEventListener('click', closeVentaScan);
   document.getElementById('btnExportVentas').addEventListener('click', exportVentasCSV);
   document.getElementById('btnImportVentas').addEventListener('click', ()=> document.getElementById('fileImportVentas').click());
   document.getElementById('fileImportVentas').addEventListener('change', (e)=>{
@@ -5743,8 +7051,33 @@ function setupEventListeners(){
     renderVentas();
   });
   document.getElementById('ventaDateInput').addEventListener('change', (e)=>{
-    ventaDateFilter = e.target.value || 'hoy';
+    ventaDateFilter = e.target.value || 'todas';
     renderVentas();
+  });
+  document.getElementById('ajusteQrDetalle').addEventListener('click', (e)=>{
+    const chip = e.target.closest('[data-qr-persona]');
+    if(!chip) return;
+    openQrHistorial(chip.dataset.qrPersona);
+  });
+  document.getElementById('formGastoPrestamo').addEventListener('submit', (e)=>{
+    e.preventDefault();
+    const bs = parseFloat(document.getElementById('gpBs').value);
+    if(!bs || bs <= 0){ toast('Ingresa un monto en Bs', 'error'); return; }
+    addGastoPrestamo({
+      bs: bs,
+      observacion: document.getElementById('gpObs').value.trim()
+    });
+    document.getElementById('gpBs').value = '';
+    document.getElementById('gpObs').value = '';
+    toast('Gasto/préstamo agregado', 'success');
+  });
+  document.getElementById('gastosPrestamosList').addEventListener('click', (e)=>{
+    const dot = e.target.closest('[data-gp-modo]');
+    if(dot){ toggleGastoPrestamoModo(dot.dataset.gpModo); return; }
+    const del = e.target.closest('[data-delete-gp]');
+    if(del){ deleteGastoPrestamo(del.dataset.deleteGp); return; }
+    const chk = e.target.closest('[data-gp-ajustar]');
+    if(chk) toggleGastoPrestamoAjustar(chk.dataset.gpAjustar);
   });
   document.getElementById('exportReminder').addEventListener('click', (e)=>{
     if(e.target.id === 'btnExportNow'){
@@ -5770,15 +7103,62 @@ function setupEventListeners(){
   });
   document.getElementById('formVenta').addEventListener('submit', handleVentaSubmit);
   document.getElementById('vCantidad').addEventListener('input', recalcVentaPrecioUnitario);
-  document.getElementById('vPrecioTotal').addEventListener('input', recalcVentaPrecioUnitario);
+  document.getElementById('vPrecioTotal').addEventListener('input', ()=>{
+    recalcVentaPrecioUnitario();
+    if(document.getElementById('vMetodoPago').value === 'mixto') syncSplitPago();
+  });
   document.querySelectorAll('[data-payment-method]').forEach(btn=>{
     btn.addEventListener('click', ()=>{
       document.querySelectorAll('[data-payment-method]').forEach(b=>b.classList.remove('active'));
       btn.classList.add('active');
       document.getElementById('vMetodoPago').value = btn.dataset.paymentMethod;
+      const qrTab = document.querySelector('[data-payment-method="qr"]');
+      const splitBox = document.getElementById('vSplitPago');
+      if(btn.dataset.paymentMethod === 'qr'){
+        openQrPersonaPicker(); // siempre abre el recuadro, aun con "QR de ABNER"
+        if(splitBox) splitBox.style.display = 'none';
+      }else if(btn.dataset.paymentMethod === 'mixto'){
+        if(splitBox) splitBox.style.display = '';
+        syncSplitPago();
+        openQrPersonaPicker(); // el QR también necesita saber de quién es
+      }else{
+        if(qrTab) qrTab.textContent = '📱 QR';
+        if(splitBox) splitBox.style.display = 'none';
+      }
     });
   });
+  // Reparto del pago mixto: al escribir uno de los dos montos, el otro se
+  // rellena solo con el total menos lo escrito.
+  const splitEf = document.getElementById('vEfectivoMonto');
+  const splitQr = document.getElementById('vQrMonto');
+  if(splitEf) splitEf.addEventListener('input', ()=>{
+    const total = parseFloat(document.getElementById('vPrecioTotal').value) || 0;
+    const ef = parseFloat(splitEf.value) || 0;
+    splitQr.value = Math.max(0, total - ef).toFixed(2);
+  });
+  if(splitQr) splitQr.addEventListener('input', ()=>{
+    const total = parseFloat(document.getElementById('vPrecioTotal').value) || 0;
+    const qr = parseFloat(splitQr.value) || 0;
+    splitEf.value = Math.max(0, total - qr).toFixed(2);
+  });
+  const qrSel = document.getElementById('vQrPersona');
+  if(qrSel) qrSel.innerHTML = QR_PERSONAS.map(p=>`<option value="${escapeHtml(p)}">${escapeHtml(p)}</option>`).join('');
+  const qrOpts = document.getElementById('qrPersonaOptions');
+  if(qrOpts){
+    qrOpts.addEventListener('click', (e)=>{
+      const btn = e.target.closest('[data-qr-persona]');
+      if(!btn) return;
+      document.getElementById('vQrPersona').value = btn.dataset.qrPersona;
+      updateQrTabLabel(document.querySelector('[data-payment-method="qr"]'));
+      closeModalById('modalQrPersona');
+    });
+  }
   document.querySelector('#ventasTable tbody').addEventListener('click', (e)=>{
+    const editId = e.target.closest('[data-edit-venta]')?.dataset.editVenta;
+    if(editId){
+      openVentaEditModal(editId);
+      return;
+    }
     const delId = e.target.closest('[data-delete-venta]')?.dataset.deleteVenta;
     if(!delId) return;
     const v = db.ventas.find(x => x.id === delId);
@@ -5789,7 +7169,19 @@ function setupEventListeners(){
   });
 
   // Compras
-  document.getElementById('btnNuevaCompra').addEventListener('click', openCompraScan);
+  document.getElementById('btnNuevaCompra').addEventListener('click', openNuevaCompraModal);
+  document.getElementById('btnCompraScan').addEventListener('click', ()=>{
+    closeAllModals();
+    openCompraScan();
+  });
+  document.getElementById('compraSearchInput').addEventListener('input', renderCompraSearchResults);
+  document.getElementById('compraSearchResults').addEventListener('click', (e)=>{
+    const id = e.target.closest('[data-compra-select]')?.dataset.compraSelect;
+    if(!id) return;
+    const p = getProductoById(id);
+    closeAllModals();
+    if(p) openCompraDetalleForm(p, p.codigo);
+  });
   document.getElementById('btnCloseCompraScan').addEventListener('click', closeCompraScan);
   document.getElementById('btnExportCompras').addEventListener('click', exportComprasCSV);
   document.getElementById('btnImportCompras').addEventListener('click', ()=> document.getElementById('fileImportCompras').click());
@@ -5975,6 +7367,18 @@ function setupEventListeners(){
     e.target.value = '';
   });
   document.getElementById('formInventario').addEventListener('submit', handleInventarioSubmit);
+  document.querySelectorAll('.inv-qty-btn').forEach(btn=>{
+    btn.addEventListener('click', ()=>{
+      registrarInventarioCantidad(parseInt(btn.dataset.invQty, 10));
+    });
+  });
+  document.getElementById('btnInvMas').addEventListener('click', ()=>{
+    const masBox = document.getElementById('invMasBox');
+    if(masBox){
+      masBox.style.display = 'block';
+      document.getElementById('invCantidad').focus();
+    }
+  });
   document.querySelector('#inventarioTable tbody').addEventListener('click', (e)=>{
     const editId = e.target.closest('[data-edit-inventario]')?.dataset.editInventario;
     if(editId){
@@ -5983,7 +7387,6 @@ function setupEventListeners(){
     }
   });
   document.getElementById('formEditarInventario').addEventListener('submit', handleEditarInventarioSubmit);
-  document.getElementById('btnScanBarcode').addEventListener('click', openBarcodeScanModal);
 
   // Historial
   document.getElementById('btnClearScanHistory').addEventListener('click', ()=>{

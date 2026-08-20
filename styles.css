@@ -201,6 +201,7 @@ body.modo-invitado .sidebar-logos{display:flex;}
 .ajuste-qr-chip.active{background:var(--primary); border-color:var(--primary); color:#fff;}
 .venta-num{color:var(--text-muted); font-size:12px;}
 .prod-img-btn{width:100%;}
+.prod-img-btn-autofill{font-size:11px; padding:3px 6px; margin-top:2px;}
 .prod-img-count{
   position:absolute; top:-6px; left:-6px; min-width:18px; height:18px; padding:0 5px;
   display:flex; align-items:center; justify-content:center;
@@ -784,3 +785,72 @@ body.theme-amarillo .btn-home{color:#fff;}
 body.theme-amarillo .table th{background:#fbeeb5; color:#7a6a10;}
 body.theme-amarillo .table tbody tr:hover{background:#fdeeb0;}
 body.theme-amarillo .btn-primary{color:#403000;}
+
+/* Repetidos en tabla de ventas (Manuales admin) */
+.venta-repetida{background:#fff8e1 !important;}
+.venta-repetida:hover{background:#ffecb3 !important;}
+.venta-duplicada{background:#ffebee !important; border-left:3px solid #e53935;}
+.venta-duplicada:hover{background:#ffcdd2 !important;}
+.badge-rep{display:inline-block; font-size:11px; font-weight:700; color:#e65100; background:#fff3e0; border-radius:8px; padding:1px 6px; margin-left:6px; vertical-align:middle;}
+.badge-dup{display:inline-block; font-size:11px; font-weight:700; color:#b71c1c; background:#ffebee; border-radius:8px; padding:1px 6px; margin-left:6px; vertical-align:middle;}
+/* Punto de modo en tabla de ventas (invitado) */
+.venta-modo-dot{display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:5px; vertical-align:middle; border:1px solid rgba(255,255,255,.3);}
+.venta-modo-dot.man{background:#f26522;}
+.venta-modo-dot.el{background:#f6c000;}
+
+/* ---------- GASTOS/PRESTAMOS: TIPO DE PAGO (Efectivo/QR) ---------- */
+.gp-tipo-pago{display:flex; gap:4px; flex-shrink:0;}
+.gp-tipo-pago .scan-tab{min-width:auto; padding:6px 10px; font-size:12px; flex:none;}
+.gp-tipo-badge{
+  display:inline-flex; align-items:center; gap:3px; font-size:11px; font-weight:700;
+  padding:3px 8px; border-radius:6px; cursor:pointer; border:1px solid var(--border);
+  background:var(--bg); color:var(--text-muted); white-space:nowrap; flex-shrink:0;
+  transition:all .15s ease;
+}
+.gp-tipo-badge:hover{border-color:var(--primary); color:var(--primary);}
+.gp-tipo-efectivo{color:#4ade80; border-color:rgba(74,222,128,.3); background:rgba(74,222,128,.08);}
+.gp-tipo-qr{color:#60a5fa; border-color:rgba(96,165,250,.3); background:rgba(96,165,250,.08);}
+
+/* ---------- AJUSTE DE CUENTAS: DINERO REAL ---------- */
+.ajuste-real-box{
+  display:flex; flex-wrap:wrap; align-items:center; gap:14px; margin-top:14px;
+  padding:14px; background:var(--bg); border:1px solid var(--border); border-radius:12px;
+}
+.ajuste-real-label{
+  display:flex; align-items:center; gap:8px; font-size:13px; font-weight:700;
+  color:var(--text-muted); text-transform:uppercase; letter-spacing:.04em;
+}
+.ajuste-real-input{
+  width:140px; text-align:right; font-weight:700; padding:6px 10px; font-size:15px;
+}
+.ajuste-real-resultado{
+  font-size:16px; font-weight:800; padding:6px 14px; border-radius:10px;
+}
+.ajuste-real-ok{color:#4ade80; background:rgba(74,222,128,.12); padding:6px 14px; border-radius:10px;}
+.ajuste-real-sobra{color:#fbbf24; background:rgba(251,191,36,.12); padding:6px 14px; border-radius:10px;}
+.ajuste-real-falta{color:#f87171; background:rgba(248,113,113,.12); padding:6px 14px; border-radius:10px;}
+
+/* ---------- BOTONES TOTALES POR MODO ---------- */
+.modo-total-btn{
+  display:inline-flex; align-items:center; gap:4px; font-size:13px; font-weight:700;
+  padding:6px 14px; border-radius:8px; border:1px solid var(--border); background:var(--bg);
+  color:var(--text-muted); cursor:pointer; transition:all .15s ease;
+}
+.modo-total-btn:hover{transform:scale(1.04); box-shadow:0 2px 8px rgba(0,0,0,.12);}
+.modo-total-btn.man{border-color:rgba(242,101,34,.3); color:#f26522;}
+.modo-total-btn.man:hover{background:rgba(242,101,34,.08);}
+.modo-total-btn.el{border-color:rgba(246,192,0,.3); color:#f6c000;}
+.modo-total-btn.el:hover{background:rgba(246,192,0,.08);}
+
+/* ---------- MODAL DETALLE POR MODO ---------- */
+.modo-detalle-grid{
+  display:grid; grid-template-columns:repeat(auto-fill, minmax(130px, 1fr));
+  gap:10px;
+}
+.modo-detalle-card{
+  display:flex; flex-direction:column; gap:2px; padding:10px 12px;
+  background:var(--bg); border:1px solid var(--border); border-radius:10px;
+  text-align:center;
+}
+.modo-detalle-label{font-size:11px; font-weight:600; color:var(--text-muted); text-transform:uppercase; letter-spacing:.03em;}
+.modo-detalle-value{font-size:16px; font-weight:800; color:var(--text);}

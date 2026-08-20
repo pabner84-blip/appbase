@@ -126,7 +126,6 @@ function touchProducto(p){
 // Carga inicial: siempre desde LocalStorage (instantáneo, funciona sin internet).
 // Si Firebase está configurado, connectFirebase() la reemplaza/sincroniza después.
 function loadDB(){
-  if(currentModo === 'invitado'){ db = buildGuestDB(); return; } // vista combinada de ambos modos
   try{
     let raw = localStorage.getItem(storageKey());
     if(!raw && currentModo === 'manual'){
@@ -139,7 +138,6 @@ function loadDB(){
 }
 
 function persistLocalCache(){
-  if(currentModo === 'invitado') return; // el invitado no tiene base propia
   try{
     localStorage.setItem(storageKey(), JSON.stringify(db));
   }catch(e){
@@ -202,7 +200,6 @@ function runQueuedWrite(docId, ref){
 }
 
 function saveDB(){
-  if(currentModo === 'invitado') return; // el invitado no escribe sobre las bases de cada modo
   persistLocalCache();
   if(fbReady && fbDocRef){
     const { historialEscaneos, historialBusquedas, historialInventario, ...syncData } = db;
@@ -211,12 +208,12 @@ function saveDB(){
 }
 
 /* -------------------------------------------------------------------------
-   1a. MODO INVITADO: catálogo combinado de ambos modos + escritura dirigida
-   El invitado NO tiene base de datos propia: lee los productos de
-   Herramientas Manuales y Herramientas Eléctricas y los combina en una vista
-   única. Las ventas que registra se guardan en la base del modo al que
-   pertenece el producto (o el que elija para "OTRO"), para que el dueño las
-   vea en la pestaña Ventas de cada modo.
+   1a. MODO INVITADO: catálogo combinado de ambos modos + base propia
+   El invitado tiene su propia base de datos para ventas, gastos y
+   finanzas. Lee los productos de Herramientas Manuales y Herramientas
+   Eléctricas para armar el catálogo, pero sus ventas/gastos se guardan
+   únicamente en su propia base (localStorage key: invitado).
+   El stock se descuenta del modo al que pertenece el producto.
    ------------------------------------------------------------------------- */
 
 // Historiales de la sesión del invitado (solo en memoria: se borran al salir)
@@ -233,30 +230,24 @@ function loadModoDB(modo){
   return defaultDB();
 }
 
-// Arma la vista combinada del invitado: productos de ambos modos (marcados
-// con modoOrigin para saber a qué base pertenece cada uno) y ventas unidas.
+// Arma la vista del invitado: productos de ambos modos (para el catálogo)
+// + ventas/gastos/finanzas de la base PROPIA del invitado (aislados de los
+// modos del dueño). Las ventas/gastos del invitado NUNCA se mezclan con
+// los de Manuales o Eléctricas.
 function buildGuestDB(){
   const m = loadModoDB('manual');
   const e = loadModoDB('electrico');
-  const merged = defaultDB();
-  merged.productos = [
+  const ownRaw = localStorage.getItem(storageKey());
+  const own = normalizeDB(ownRaw ? JSON.parse(ownRaw) : defaultDB());
+  own.productos = [
     ...m.productos.map(p => Object.assign({}, p, { modoOrigin: 'manual' })),
     ...e.productos.map(p => Object.assign({}, p, { modoOrigin: 'electrico' }))
   ];
-  merged.categorias = Array.from(new Set(m.categorias.concat(e.categorias).map(c => String(c||'').trim()).filter(Boolean)));
-  merged.ventas = [
-    ...m.ventas.map(v => Object.assign({}, v, { modo: 'manual' })),
-    ...e.ventas.map(v => Object.assign({}, v, { modo: 'electrico' }))
-  ].sort((a,b)=> new Date(b.fecha) - new Date(a.fecha));
-  merged.gastosPrestamos = dedupeGastosById([
-    ...(m.gastosPrestamos||[]).map(g => Object.assign({}, g, { modo: g.modo || 'manual' })),
-    ...(e.gastosPrestamos||[]).map(g => Object.assign({}, g, { modo: g.modo || 'electrico' })),
-    ...loadGuestNeutralGastos()
-  ]);
-  merged.historialEscaneos = guestSessionScans;
-  merged.historialBusquedas = guestSessionSearches;
-  merged.historialInventario = guestSessionInventory;
-  return merged;
+  own.categorias = Array.from(new Set(m.categorias.concat(e.categorias).map(c => String(c||'').trim()).filter(Boolean)));
+  own.historialEscaneos = guestSessionScans;
+  own.historialBusquedas = guestSessionSearches;
+  own.historialInventario = guestSessionInventory;
+  return own;
 }
 
 // Busca por código/código de barras DENTRO de una base específica.
@@ -361,9 +352,9 @@ function disconnectGuestFirebase(){
   guestUnsubs = [];
 }
 
-// En modo invitado conecta a Firestore de ambos modos (lectura + escucha)
-// para que el invitado vea datos recientes; las escrituras van por
-// persistModoDB() al documento del modo correcto.
+// En modo invitado conecta a Firestore: escucha los documentos de Manuales y
+// Eléctricas (solo para catálogo/productos) y también el documento propio del
+// invitado (ventas/gastos/finanzas). Cada uno se mantiene aislado.
 function connectGuestFirebase(){
   if(typeof firebaseConfig === 'undefined' || !firebaseConfig.apiKey || !firebaseConfig.projectId) return;
   if(typeof firebase === 'undefined') return;
@@ -371,6 +362,7 @@ function connectGuestFirebase(){
     if(!firebase.apps || !firebase.apps.length){ firebase.initializeApp(firebaseConfig); }
     const fbFirestore = firebase.firestore();
     enableOfflinePersistence(fbFirestore); // no bloquea la conexión
+    // 1) Escucha documentos de Manuales y Eléctricas (solo para catálogo/productos)
     ['manual','electrico'].forEach(modo => {
       const ref = fbFirestore.collection('stockferre').doc('inventario_' + modo);
       ref.get().then(snap=>{
@@ -398,11 +390,38 @@ function connectGuestFirebase(){
         if(currentModo === 'invitado'){ db = buildGuestDB(); rerenderCurrentView(); }
       }, ()=>{ /* ignorar */ });
       guestUnsubs.push(unsub);
-      // Documentos de productos (stock atómico): crea los que falten y
-      // mantiene el stock local al día con el valor exacto de la nube.
       backfillProductos(modo);
       startStockListener(modo);
     });
+    // 2) Escucha el documento PROPIO del invitado (ventas/gastos/finanzas)
+    const ownRef = fbFirestore.collection('stockferre').doc('inventario_invitado');
+    ownRef.get().then(snap=>{
+      if(snap.exists){
+        const prevRaw = localStorage.getItem(storageKey());
+        const prev = prevRaw ? normalizeDB(JSON.parse(prevRaw)) : defaultDB();
+        const remote = normalizeDB(snap.data());
+        const merged = mergeRemoteIntoLocal(prev, remote);
+        merged.historialEscaneos = guestSessionScans;
+        merged.historialBusquedas = guestSessionSearches;
+        merged.historialInventario = guestSessionInventory;
+        try{ localStorage.setItem(storageKey(), JSON.stringify(merged)); }catch(e){}
+        if(currentModo === 'invitado'){ db = buildGuestDB(); rerenderCurrentView(); }
+      }
+    }).catch(()=>{});
+    const ownUnsub = ownRef.onSnapshot(snap=>{
+      if(snap.metadata.hasPendingWrites) return;
+      if(!snap.exists) return;
+      const prevRaw = localStorage.getItem(storageKey());
+      const prev = prevRaw ? normalizeDB(JSON.parse(prevRaw)) : defaultDB();
+      const remote = normalizeDB(snap.data());
+      const merged = mergeRemoteIntoLocal(prev, remote);
+      merged.historialEscaneos = guestSessionScans;
+      merged.historialBusquedas = guestSessionSearches;
+      merged.historialInventario = guestSessionInventory;
+      try{ localStorage.setItem(storageKey(), JSON.stringify(merged)); }catch(e){}
+      if(currentModo === 'invitado'){ db = buildGuestDB(); rerenderCurrentView(); }
+    }, ()=>{ /* ignorar */ });
+    guestUnsubs.push(ownUnsub);
   }catch(err){
     console.error('No se pudo conectar a Firebase en modo invitado', err);
   }
@@ -1234,6 +1253,7 @@ function fetchImageAsDataURL(url){
   // cada intento lento sumaba su espera al siguiente; en paralelo la demora
   // es la de una sola descarga.
   const proxied = [
+    LOCAL_PROXY + '/api/proxy?url=' + encodeURIComponent(url),
     'https://api.allorigins.win/raw?url=' + encodeURIComponent(url),
     'https://images.weserv.nl/?url=' + encodeURIComponent(url.replace(/^https?:\/\//i, '')),
     'https://corsproxy.io/?url=' + encodeURIComponent(url)
@@ -1374,9 +1394,12 @@ function saveVenta(data){
     fecha: todayISO()
   };
 
-  // En modo invitado la venta se guarda en la base del modo al que pertenece
-  // el producto (Manuales o Eléctricas), no en una base de invitado.
+  // En modo invitado la venta se guarda en su propia base (aislada).
   if(currentModo === 'invitado'){
+    // Etiqueta la venta con el modo de origen (manual/electrico) para
+    // poder mostrar el punto de color y devolver stock al modo correcto.
+    const prod = db.productos.find(p => normalize(p.codigo) === normalize(data.codigo));
+    venta.modoOrigin = (data.modoDestino) || (prod && prod.modoOrigin) || 'manual';
     guestCommitVenta(venta, data, cantidad);
     return venta;
   }
@@ -1400,28 +1423,24 @@ function saveVenta(data){
   return venta;
 }
 
-// El invitado vende productos de ambos modos: la venta se escribe en la base
-// del modo destino (por defecto, el modo del producto; para "OTRO" lo elige
-// el vendedor) y se descuenta el stock de esa base.
+// El invitado vende productos de ambos modos: la venta se guarda en su
+// propia base (aislada), pero el stock se descuenta del modo al que
+// pertenece el producto.
 function guestCommitVenta(venta, data, cantidad){
   const modo = data.modoDestino || 'manual';
-  const dbObj = loadModoDB(modo);
-  const p = findProductoInDB(dbObj, data.codigo);
+  const modoDB = loadModoDB(modo);
+  const p = findProductoInDB(modoDB, data.codigo);
   if(p){
     p.stock = (p.stock || 0) - cantidad;
     touchProducto(p);
-    applyStockDelta(p, -cantidad, modo); // descuenta también en la nube del modo
+    applyStockDelta(p, -cantidad, modo); // descuenta stock en la nube del modo
+    persistModoDB(modo, modoDB);
   }
-  dbObj.contador = dbObj.contador || { producto: 1, venta: 1 };
-  dbObj.contador.venta = dbObj.contador.venta || 1;
-  const n = dbObj.contador.venta++;
-  dbObj.ventas.unshift({ ...venta, id: 'v' + n + '_' + Date.now().toString(36) });
-  // El dinero de la venta se suma al efectivo del modo al que pertenece
-  dbObj.finanzas = dbObj.finanzas || {};
-  dbObj.finanzas.caja = (Number(dbObj.finanzas.caja) || 0) + (venta.total || 0);
-  persistModoDB(modo, dbObj);
-  // Reconstruye la vista combinada para que la venta aparezca al instante
-  db = buildGuestDB();
+  // La venta se escribe en la base PROPIA del invitado (no en la del modo)
+  db.ventas.unshift(venta);
+  db.finanzas = db.finanzas || {};
+  db.finanzas.caja = (Number(db.finanzas.caja) || 0) + (venta.total || 0);
+  saveDB();
   renderVentas();
   renderProductos();
 }
@@ -1430,38 +1449,30 @@ function guestCommitVenta(venta, data, cantidad){
 //   mantenerInventario = true  → el stock NO se toca (solo sale la venta).
 //   mantenerInventario = false → la cantidad se devuelve al stock del producto.
 function deleteVenta(id, mantenerInventario){
-  // El invitado elimina desde la base del modo al que pertenece la venta.
-  let dbObj = db;
-  let modo = currentModo;
-  if(currentModo === 'invitado'){
-    const m = loadModoDB('manual');
-    const e = loadModoDB('electrico');
-    const enM = m.ventas.some(v => v.id === id);
-    const enE = e.ventas.some(v => v.id === id);
-    dbObj = enM ? m : (enE ? e : null);
-    modo = enM ? 'manual' : 'electrico';
-  }
-  if(!dbObj) return;
-  const venta = dbObj.ventas.find(v => v.id === id);
+  const venta = db.ventas.find(v => v.id === id);
   if(!venta) return;
   if(!mantenerInventario){
-    const p = findProductoInDB(dbObj, venta.codigo);
-    if(p){
-      p.stock = (p.stock || 0) + venta.cantidad;
-      touchProducto(p);
-      applyStockDelta(p, venta.cantidad, modo); // devuelve la cantidad a la nube
+    // Devuelve stock al modo al que pertenece el producto
+    let modo = currentModo;
+    if(currentModo === 'invitado'){
+      const prod = db.productos.find(p => normalize(p.codigo) === normalize(venta.codigo));
+      modo = prod && prod.modoOrigin ? prod.modoOrigin : 'manual';
+    }
+    if(modo !== 'invitado'){
+      const modoDB = loadModoDB(modo);
+      const p = findProductoInDB(modoDB, venta.codigo);
+      if(p){
+        p.stock = (p.stock || 0) + venta.cantidad;
+        touchProducto(p);
+        applyStockDelta(p, venta.cantidad, modo);
+        persistModoDB(modo, modoDB);
+      }
     }
   }
-  dbObj.ventas = dbObj.ventas.filter(v => v.id !== id);
-  // Al eliminar una venta, el dinero que se recibió sale del efectivo actual
-  dbObj.finanzas = dbObj.finanzas || {};
-  dbObj.finanzas.caja = (Number(dbObj.finanzas.caja) || 0) - (venta.total || 0);
-  if(currentModo === 'invitado'){
-    persistModoDB(modo, dbObj);
-    db = buildGuestDB();
-  }else{
-    saveDB();
-  }
+  db.ventas = db.ventas.filter(v => v.id !== id);
+  db.finanzas = db.finanzas || {};
+  db.finanzas.caja = (Number(db.finanzas.caja) || 0) - (venta.total || 0);
+  saveDB();
   renderVentas();
   renderInventario();
   renderProductos();
@@ -1479,11 +1490,23 @@ function vaciarHistorialVentas(){
 function vaciarVentasConStock(restaurarStock){
   if(restaurarStock){
     db.ventas.forEach(v => {
-      const p = getProductoByCodigo(v.codigo);
-      if(p){
-        p.stock = (p.stock || 0) + v.cantidad;
-        touchProducto(p);
-        applyStockDelta(p, v.cantidad); // devuelve la cantidad a la nube
+      const modo = v.modoOrigin || currentModo;
+      if(currentModo === 'invitado' && modo !== 'invitado'){
+        const modoDB = loadModoDB(modo);
+        const p = findProductoInDB(modoDB, v.codigo);
+        if(p){
+          p.stock = (p.stock || 0) + v.cantidad;
+          touchProducto(p);
+          applyStockDelta(p, v.cantidad, modo);
+          persistModoDB(modo, modoDB);
+        }
+      }else{
+        const p = getProductoByCodigo(v.codigo);
+        if(p){
+          p.stock = (p.stock || 0) + v.cantidad;
+          touchProducto(p);
+          applyStockDelta(p, v.cantidad);
+        }
       }
     });
   }
@@ -1536,23 +1559,13 @@ function resetVentaEditUI(){
 // registrada. Se llena el mismo formulario con los datos y al guardar se
 // actualiza la venta, el stock y el efectivo del modo al que pertenece.
 function openVentaEditModal(id){
-  let v = null;
-  let modo = currentModo;
-  if(currentModo === 'invitado'){
-    // El invitado ve las ventas de ambos modos: busca a cuál pertenece.
-    const m = loadModoDB('manual');
-    const e = loadModoDB('electrico');
-    v = m.ventas.find(x => x.id === id) || e.ventas.find(x => x.id === id);
-    modo = m.ventas.some(x => x.id === id) ? 'manual' : 'electrico';
-  }else{
-    v = db.ventas.find(x => x.id === id);
-  }
+  const v = db.ventas.find(x => x.id === id);
   if(!v){
     toast('No se encontró la venta', 'error');
     return;
   }
   editingVentaId = v.id;
-  editingVentaModo = modo;
+  editingVentaModo = currentModo;
   const title = document.querySelector('#modalVenta .modal-header h3');
   if(title) title.textContent = '✏️ Editar venta';
   const btn = document.querySelector('#formVenta button[type="submit"]');
@@ -1584,8 +1597,9 @@ function openVentaEditModal(id){
   // Quién cobró por QR.
   document.getElementById('vQrPersona').value = v.qrPersona || '';
   updateQrTabLabel(document.querySelector('[data-payment-method="qr"]'));
-  // Modo destino: en el invitado queda fijo (la venta no cambia de base).
-  updateVentaDestinoUI(modo, true);
+  // Modo destino: editable al editar para permitir cambiar Manuales ↔ Eléctricas.
+  const modoVenta = v.modoOrigin || currentModo;
+  updateVentaDestinoUI(modoVenta, false);
   recalcVentaPrecioUnitario();
   openModal('modalVenta');
 }
@@ -1593,39 +1607,45 @@ function openVentaEditModal(id){
 // Actualiza una venta existente (cantidad, total, pago) y ajusta el stock y el
 // efectivo del modo al que pertenece. Funciona igual para el dueño y para el
 // invitado (que guarda en la base del modo de la venta).
-function updateVenta(id, modo, data){
+function updateVenta(id, oldModo, data){
   const cantidad = parseFloat(data.cantidad) || 0;
   const total = parseFloat(data.total) || 0;
   const precioUnitario = cantidad > 0 ? total / cantidad : 0;
-  const applyStockDeltaModo = currentModo === 'invitado' ? modo : currentModo;
-  const dbObj = currentModo === 'invitado' ? loadModoDB(modo) : db;
-  // Se guarda el MISMO objeto que se modificó (en invitado no volver a leer
-  // de LocalStorage, o se perdería la edición).
-  const persist = () => currentModo === 'invitado' ? persistModoDB(modo, dbObj) : saveDB();
-
-  const v = dbObj.ventas.find(x => x.id === id);
+  const v = db.ventas.find(x => x.id === id);
   if(!v) return false;
 
   const oldCantidad = v.cantidad || 0;
   const oldTotal = v.total || 0;
-  const deltaCant = oldCantidad - cantidad;
+  const newModo = (currentModo === 'invitado' && data.modoDestino) ? data.modoDestino : oldModo;
 
-  // Ajusta el stock: devuelve la cantidad que se vendió antes y descuenta la
-  // nueva (para "OTRO" no hay producto ni stock).
   if(v.codigo !== 'OTRO'){
-    const p = findProductoInDB(dbObj, v.codigo) || getProductoByCodigo(v.codigo);
-    if(p){
-      p.stock = (p.stock || 0) + deltaCant;
-      touchProducto(p);
-      applyStockDelta(p, deltaCant, applyStockDeltaModo);
+    // Devuelve stock al modo VIEJO
+    if(oldModo !== 'invitado'){
+      const modoDB = loadModoDB(oldModo);
+      const p = findProductoInDB(modoDB, v.codigo);
+      if(p){
+        p.stock = (p.stock || 0) + oldCantidad;
+        touchProducto(p);
+        applyStockDelta(p, oldCantidad, oldModo);
+        persistModoDB(oldModo, modoDB);
+      }
+    }
+    // Descuenta stock al modo NUEVO
+    if(newModo !== 'invitado'){
+      const modoDB = loadModoDB(newModo);
+      const p = findProductoInDB(modoDB, v.codigo);
+      if(p){
+        p.stock = (p.stock || 0) - cantidad;
+        touchProducto(p);
+        applyStockDelta(p, -cantidad, newModo);
+        persistModoDB(newModo, modoDB);
+      }
     }
   }
 
-  // Ajusta el efectivo de la caja: sale lo viejo, entra lo nuevo.
-  dbObj.finanzas = dbObj.finanzas || {};
-  dbObj.finanzas.caja = (Number(dbObj.finanzas.caja) || 0) + (total - oldTotal);
+  db.finanzas = db.finanzas || {};
+  db.finanzas.caja = (Number(db.finanzas.caja) || 0) + (total - oldTotal);
 
-  // Actualiza los campos editables.
   v.cantidad = cantidad;
   v.precioUnitario = precioUnitario;
   v.total = total;
@@ -1634,9 +1654,9 @@ function updateVenta(id, modo, data){
   v.qrPersona = data.qrPersona || '';
   v.efectivoMonto = data.efectivoMonto || 0;
   v.qrMonto = data.qrMonto || 0;
+  if(currentModo === 'invitado') v.modoOrigin = newModo;
 
-  persist();
-  if(currentModo === 'invitado') db = buildGuestDB();
+  saveDB();
   renderVentas();
   renderInventario();
   renderProductos();
@@ -1767,10 +1787,13 @@ function handleVentaSubmit(e){
   // Si el modal está en modo "editar", actualiza la venta existente (ajusta
   // stock y efectivo) en vez de registrar una nueva.
   if(editingVentaId){
-    const ok = updateVenta(editingVentaId, editingVentaModo, { codigo, nombre, cantidad, total, metodoPago, qrPersona, efectivoMonto, qrMonto });
+    const ok = updateVenta(editingVentaId, editingVentaModo, { codigo, nombre, cantidad, total, metodoPago, qrPersona, efectivoMonto, qrMonto, modoDestino });
     resetVentaEditUI();
     closeAllModals();
     if(!ok){ toast('No se encontró la venta', 'error'); return; }
+    renderVentas();
+    renderInventario();
+    renderProductos();
     playClickSound();
     toast('Venta actualizada', 'success');
     return;
@@ -1780,6 +1803,7 @@ function handleVentaSubmit(e){
   notifySale(ventaGuardada);
   playCashRegisterSound();
   closeAllModals();
+  renderVentas();
   renderInventario();
   renderProductos();
   toast('Venta registrada', 'success');
@@ -2289,6 +2313,11 @@ function localDateKey(d){
   return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
 }
 function ventaFechaKey(iso){
+  // Las fechas "YYYY-MM-DD" (p.ej. la fecha con la que se guardan los gastos)
+  // se devuelven tal cual: "new Date('2026-08-15')" se interpreta como
+  // medianoche UTC y, en zonas horarias detrás de UTC (Bolivia), correría el
+  // día un lugar atrás. Los timestamps completos (ventas) se pasan a fecha local.
+  if(/^\d{4}-\d{2}-\d{2}$/.test(iso || '')) return iso;
   try{ return localDateKey(new Date(iso)); }catch(e){ return ''; }
 }
 function dateKeyOffset(days){
@@ -2384,12 +2413,17 @@ function renderAjusteCuentas(list){
   const efectivo = list.reduce((s,v)=> s + efectivoMontoDeVenta(v), 0);
   const qr = list.reduce((s,v)=> s + qrMontoDeVenta(v), 0);
   // Los gastos/préstamos marcados como "ajustar" del día que se ve restan del total vendido.
-  const gastosAjustados = gastosPrestamosDelDia().filter(g=>g.ajustar).reduce((s,g)=> s + (parseFloat(g.bs)||0), 0);
+  const gastosDelDia = gastosPrestamosDelDia().filter(g=>g.ajustar);
+  const gastosAjustados = gastosDelDia.reduce((s,g)=> s + (parseFloat(g.bs)||0), 0);
+  const gastosEfectivo = gastosDelDia.filter(g=> (g.tipoPago||'efectivo') === 'efectivo').reduce((s,g)=> s + (parseFloat(g.bs)||0), 0);
+  const gastosQr = gastosDelDia.filter(g=> g.tipoPago === 'qr').reduce((s,g)=> s + (parseFloat(g.bs)||0), 0);
   const cambioBase = getCambioBase(dia);
   const totalFinal = cambioBase + total - gastosAjustados;
+  const efectivoFinal = cambioBase + efectivo - gastosEfectivo;
+  const qrFinal = qr - gastosQr;
   document.getElementById('ajusteTotal').textContent = fmtMoney(totalFinal);
-  document.getElementById('ajusteEfectivo').textContent = fmtMoney(efectivo);
-  document.getElementById('ajusteQr').textContent = fmtMoney(qr);
+  document.getElementById('ajusteEfectivo').textContent = fmtMoney(efectivoFinal);
+  document.getElementById('ajusteQr').textContent = fmtMoney(qrFinal);
   // Refleja el monto de CAMBIO guardado (sin pisar lo que se está escribiendo).
   const cambioEl = document.getElementById('ajusteCambio');
   if(cambioEl && document.activeElement !== cambioEl) cambioEl.value = cambioBase;
@@ -2397,7 +2431,12 @@ function renderAjusteCuentas(list){
   if(notaG){
     if(gastosAjustados > 0){
       notaG.style.display = '';
-      notaG.textContent = `(−${fmtMoney(gastosAjustados)} en gastos/préstamos ajustados del total)`;
+      let nota = `(−${fmtMoney(gastosAjustados)} en gastos/préstamos ajustados del total)`;
+      const parts = [];
+      if(gastosEfectivo > 0) parts.push(`💵 −${fmtMoney(gastosEfectivo)}`);
+      if(gastosQr > 0) parts.push(`📱 −${fmtMoney(gastosQr)}`);
+      if(parts.length) nota += ` — ${parts.join(', ')}`;
+      notaG.textContent = nota;
     }else{
       notaG.style.display = 'none';
       notaG.textContent = '';
@@ -2418,6 +2457,26 @@ function renderAjusteCuentas(list){
       det.innerHTML = '';
     }
   }
+  // Dinero real vs ajuste de cuentas
+  const realInput = document.getElementById('ajusteDineroReal');
+  const resultadoEl = document.getElementById('ajusteRealResultado');
+  if(realInput && resultadoEl){
+    const realVal = parseFloat(realInput.value);
+    if(!isNaN(realVal) && realVal >= 0){
+      const diferencia = realVal - efectivoFinal;
+      if(Math.abs(diferencia) < 0.005){
+        resultadoEl.innerHTML = `<span class="ajuste-real-ok">✅ Cuadra exacto</span>`;
+      }else if(diferencia > 0){
+        resultadoEl.innerHTML = `<span class="ajuste-real-sobra">💰 Sobran ${fmtMoney(diferencia)}</span>`;
+      }else{
+        resultadoEl.innerHTML = `<span class="ajuste-real-falta">⚠️ Faltan ${fmtMoney(Math.abs(diferencia))}</span>`;
+      }
+      resultadoEl.style.display = '';
+    }else{
+      resultadoEl.innerHTML = '';
+      resultadoEl.style.display = 'none';
+    }
+  }
 }
 
 // Gastos/préstamos del DÍA que se está viendo en Ventas (Hoy/Ayer/una fecha;
@@ -2425,11 +2484,11 @@ function renderAjusteCuentas(list){
 // cuentas. Los de "sin color" solo se ven en el invitado: no se envían a ningún modo.
 function gastosPrestamosDelDia(){
   const dia = ventaFilterDateKey();
-  return (db.gastosPrestamos || []).filter(g => {
+  return dedupeGastosById((db.gastosPrestamos || []).filter(g => {
     if(dia && ventaFechaKey(g.fecha) !== dia) return false;
     if(currentModo !== 'invitado' && g.modo === 'ninguno') return false;
     return true;
-  });
+  }));
 }
 
 // Quita duplicados por id (misma fecha/hora al escribirse en ambos modos).
@@ -2455,26 +2514,13 @@ function saveGuestNeutralGastos(list){
   try{ localStorage.setItem('stockferre_guest_gastos_v1', JSON.stringify(list)); }catch(e){}
 }
 
-// Guarda los gastos/préstamos. En modo invitado se reparten según el color:
-// naranja → Manuales, amarillo → Eléctricas, sin color → se queda en el almacén
-// neutral (NO se envía a ningún modo). En los modos del dueño se guarda normal.
+// Guarda los gastos/préstamos. En modo invitado se guarda en su propia base.
+// En los modos del dueño se guarda normal (sin "sin color").
 function saveGastosPrestamos(){
   if(currentModo === 'invitado'){
-    const g = dedupeGastosById(db.gastosPrestamos || []);
-    ['manual','electrico'].forEach(modo => {
-      const m = loadModoDB(modo);
-      m.gastosPrestamos = g.filter(x => {
-        const md = (x.modo === undefined || x.modo === null) ? 'ninguno' : x.modo;
-        return md === modo;
-      });
-      persistModoDB(modo, m);
-    });
-    saveGuestNeutralGastos(g.filter(x => {
-      const md = (x.modo === undefined || x.modo === null) ? 'ninguno' : x.modo;
-      return md === 'ninguno';
-    }));
+    db.gastosPrestamos = dedupeGastosById(db.gastosPrestamos || []);
+    saveDB();
   }else{
-    // Los "sin color" no pertenecen a la base de un modo: se descartan.
     db.gastosPrestamos = (db.gastosPrestamos || []).filter(x => x.modo !== 'ninguno');
     saveDB();
   }
@@ -2505,12 +2551,17 @@ function renderGastosPrestamos(){
     const dotBtn = esInvitado
       ? `<button type="button" class="gp-modo-dot ${dotCls}" title="${dotTitle}" data-gp-modo="${escapeHtml(g.id)}"></button>`
       : `<span class="gp-modo-dot static ${dotCls}" title="${dotTitle}"></span>`;
+    const tp = g.tipoPago || 'efectivo';
+    const tipoBadge = tp === 'qr'
+      ? `<button type="button" class="gp-tipo-badge gp-tipo-qr" title="📱 QR — toca para cambiar a Efectivo" data-gp-tipo-toggle="${escapeHtml(g.id)}">📱 QR</button>`
+      : `<button type="button" class="gp-tipo-badge gp-tipo-efectivo" title="💵 Efectivo — toca para cambiar a QR" data-gp-tipo-toggle="${escapeHtml(g.id)}">💵 Efectivo</button>`;
     return `
     <div class="gp-row">
       <strong>${fmtMoney(g.bs)}</strong>
       <span class="gp-obs">${g.observacion ? escapeHtml(g.observacion) : '-'}</span>
+      ${tipoBadge}
       ${dotBtn}
-      <label class="gp-tag" title="Restar del total del ajuste de cuentas">
+      <label class="gp-tag" title="Restar del total del ajuste de cuentas y de los precios de Manuales/Eléctricas">
         <input type="checkbox" class="gp-chk" data-gp-ajustar="${escapeHtml(g.id)}" ${g.ajustar ? 'checked' : ''}> Ajustar
       </label>
       <button type="button" class="btn-icon" title="Eliminar" data-delete-gp="${escapeHtml(g.id)}">🗑️</button>
@@ -2528,6 +2579,7 @@ function addGastoPrestamo(data){
     bs: parseFloat(data.bs) || 0,
     observacion: data.observacion || '',
     ajustar: false,
+    tipoPago: data.tipoPago || 'efectivo',
     modo: data.modo || (currentModo === 'invitado' ? 'ninguno' : currentModo),
     // Se guarda en el día que se está viendo en Ventas (si es "Todas", hoy).
     fecha: ventaFilterDateKey() || todayISO()
@@ -2574,10 +2626,20 @@ function toggleGastoPrestamoAjustar(id){
   g.ajustar = !g.ajustar;
   saveGastosPrestamos();
   renderVentas();
+  refreshModoDetalleIfOpen();
 }
 
 function deleteGastoPrestamo(id){
   db.gastosPrestamos = (db.gastosPrestamos || []).filter(x => x.id !== id);
+  saveGastosPrestamos();
+  renderVentas();
+  refreshModoDetalleIfOpen();
+}
+
+function toggleGastoPrestamoTipoPago(id){
+  const g = (db.gastosPrestamos || []).find(x => x.id === id);
+  if(!g) return;
+  g.tipoPago = g.tipoPago === 'qr' ? 'efectivo' : 'qr';
   saveGastosPrestamos();
   renderVentas();
 }
@@ -2621,10 +2683,12 @@ function maybeShowExportReminder(){
 }
 
 // Ganancia neta de una venta = (precio de venta por unidad − precio de compra)
-// × cantidad. Si el producto ya no existe (o fue "OTRO") no se puede calcular.
+// × cantidad. Si el producto ya no existe no se puede calcular.
+// La categoría "Otros" se excluye: no afecta la ganancia neta.
+function esCategoriaOtros(p){ return p && normalize(p.categoria) === 'OTROS'; }
 function gananciaVenta(v){
   const p = getProductoByCodigo(v.codigo);
-  if(!p) return null;
+  if(!p || esCategoriaOtros(p)) return null;
   const costo = parseFloat(p.precioCompra) || 0;
   const unit = parseFloat(v.precioUnitario) || 0;
   return (unit - costo) * (parseFloat(v.cantidad) || 1);
@@ -2632,16 +2696,99 @@ function gananciaVenta(v){
 
 // En el invitado, el resumen de Ventas muestra también el total vendido al
 // precio de venta separado por cada modo: Manuales y Eléctricas. A cada modo se
-// le restan los gastos/préstamos del día que llevan su color (naranja →
-// Manuales, amarillo → Eléctricas; los "sin color" no restan de ninguno).
+// le restan los gastos/préstamos del día que llevan su color Y están marcados
+// como "Ajustar" (tachados): el punto decide a qué modo va, y el recuadro de
+// tachar decide si resta de los precios. Se actualiza al instante.
+// Botones de total por modo: al hacer clic abren un modal con el desglose.
+let currentModoDetalleOpen = null;
+function refreshModoDetalleIfOpen(){ if(currentModoDetalleOpen) openModoDetalle(currentModoDetalleOpen); }
 function guestModoTotalesHTML(list){
-  const gastos = dedupeGastosById(gastosPrestamosDelDia());
-  const gastoPorModo = modo => gastos.filter(g=>g.modo === modo).reduce((s,g)=> s + (parseFloat(g.bs)||0), 0);
-  const manVendido = (list||[]).filter(v=>v.modo === 'manual').reduce((s,v)=> s + (parseFloat(v.total)||0), 0);
-  const elVendido = (list||[]).filter(v=>v.modo === 'electrico').reduce((s,v)=> s + (parseFloat(v.total)||0), 0);
-  const man = manVendido - gastoPorModo('manual');
-  const el = elVendido - gastoPorModo('electrico');
-  return `<span class="ventas-modo-totales"><span class="modo-total man">🛠️ Manuales: <strong>${fmtMoney(man)}</strong></span> · <span class="modo-total el">⚡ Eléctricas: <strong>${fmtMoney(el)}</strong></span></span>`;
+  return `<span class="ventas-modo-totales">
+    <button type="button" class="modo-total-btn man" data-modo-detalle="manual">🛠️ Total Manuales</button>
+    <button type="button" class="modo-total-btn el" data-modo-detalle="electrico">⚡ Total Eléctricas</button>
+  </span>`;
+}
+
+// Abre el modal de detalle por modo: calcula totales, efectivo, QR, gastos
+// y desglose QR por persona con enlace al historial.
+function openModoDetalle(modo){
+  currentModoDetalleOpen = modo;
+  const list = ventasFiltradas().filter(v => v.modoOrigin === modo);
+  const gastosAjustados = dedupeGastosById(gastosPrestamosDelDia()).filter(g => g.modo === modo && g.ajustar);
+  const totalVentas = list.reduce((s,v)=> s + (parseFloat(v.total)||0), 0);
+  const efectivoVentas = list.reduce((s,v)=> s + efectivoMontoDeVenta(v), 0);
+  const qrVentas = list.reduce((s,v)=> s + qrMontoDeVenta(v), 0);
+  const gastosEfectivo = gastosAjustados.filter(g=> (g.tipoPago||'efectivo')==='efectivo').reduce((s,g)=> s + (parseFloat(g.bs)||0), 0);
+  const gastosQr = gastosAjustados.filter(g=> g.tipoPago==='qr').reduce((s,g)=> s + (parseFloat(g.bs)||0), 0);
+  const gastosTotal = gastosAjustados.reduce((s,g)=> s + (parseFloat(g.bs)||0), 0);
+  const totalFinal = totalVentas - gastosTotal;
+  const efectivoFinal = efectivoVentas - gastosEfectivo;
+  const qrFinal = qrVentas - gastosQr;
+  const esMan = modo === 'manual';
+  const titulo = esMan ? '🛠️ Detalle Manuales' : '⚡ Detalle Eléctricas';
+  document.getElementById('modoDetalleTitle').textContent = titulo;
+  const grid = document.getElementById('modoDetalleGrid');
+  grid.innerHTML = `
+    <div class="modo-detalle-card">
+      <div class="modo-detalle-label">Total</div>
+      <div class="modo-detalle-value">${fmtMoney(totalFinal)}</div>
+    </div>
+    <div class="modo-detalle-card">
+      <div class="modo-detalle-label">💵 Efectivo</div>
+      <div class="modo-detalle-value" style="color:#4ade80">${fmtMoney(efectivoFinal)}</div>
+    </div>
+    <div class="modo-detalle-card">
+      <div class="modo-detalle-label">📱 QR</div>
+      <div class="modo-detalle-value" style="color:#60a5fa">${fmtMoney(qrFinal)}</div>
+    </div>
+    <div class="modo-detalle-card">
+      <div class="modo-detalle-label">Gastos ajustados</div>
+      <div class="modo-detalle-value" style="color:#f87171">−${fmtMoney(gastosTotal)}</div>
+    </div>
+  `;
+  // Historial de gastos (solo lectura) — muestra TODOS los gastos del modo, no solo ajustados
+  const allGastos = dedupeGastosById(gastosPrestamosDelDia()).filter(g => g.modo === modo);
+  const gastosContainer = document.getElementById('modoDetalleGastos');
+  if(gastosContainer){
+    if(allGastos.length){
+      gastosContainer.innerHTML = allGastos.map(g => {
+        const tp = g.tipoPago || 'efectivo';
+        const badge = tp === 'qr' ? '<span class="gp-tipo-badge gp-tipo-qr" style="cursor:default">📱 QR</span>' : '<span class="gp-tipo-badge gp-tipo-efectivo" style="cursor:default">💵 Efectivo</span>';
+        return `
+        <div class="gp-row">
+          <strong>${fmtMoney(g.bs)}</strong>
+          <span class="gp-obs">${g.observacion ? escapeHtml(g.observacion) : '-'}</span>
+          ${badge}
+          ${g.ajustar ? '<span class="gp-tag" style="color:var(--text-muted)">✓ Ajustar</span>' : ''}
+        </div>`;
+      }).join('');
+      const totalG = allGastos.reduce((s,g)=> s + (parseFloat(g.bs)||0), 0);
+      gastosContainer.innerHTML += `<div class="gp-total">Total gastos <strong>${fmtMoney(totalG)}</strong></div>`;
+    }else{
+      gastosContainer.innerHTML = `<p class="hint" style="text-align:center;">No hay gastos/préstamos para ${esMan ? 'Manuales' : 'Eléctricas'}.</p>`;
+    }
+  }
+  openModal('modalModoDetalle');
+}
+
+// Detecta ventas repetidas: "repetido" = mismo código aparece 2+ veces;
+// "duplicada" = mismo código y mismo precio total.
+function detectarRepetidosVentas(list){
+  const codeCount = new Map();
+  list.forEach(v => codeCount.set(v.codigo, (codeCount.get(v.codigo)||0) + 1));
+  const repetidos = new Set();
+  const duplicadas = new Set();
+  list.forEach(v => { if(codeCount.get(v.codigo) > 1) repetidos.add(v.id); });
+  for(let i = 0; i < list.length; i++){
+    for(let j = i + 1; j < list.length; j++){
+      const a = list[i], b = list[j];
+      if(a.codigo === b.codigo && a.total === b.total){
+        duplicadas.add(a.id);
+        duplicadas.add(b.id);
+      }
+    }
+  }
+  return { repetidos, duplicadas };
 }
 
 function renderVentas(){
@@ -2660,8 +2807,10 @@ function renderVentas(){
   }
 
   const list = ventasFiltradas();
-  if(list.length === 0){
-    tbody.innerHTML = `<tr class="empty-row"><td colspan="${colspan}">No hay ventas ${escapeHtml(ventasFilterLabel())}.</td></tr>`;
+  const search = normalize(document.getElementById('ventaSearch')?.value || '');
+  const filtered = search ? list.filter(v => normalize(v.codigo).includes(search) || normalize(v.nombre).includes(search)) : list;
+  if(filtered.length === 0){
+    tbody.innerHTML = `<tr class="empty-row"><td colspan="${colspan}">${search ? 'No se encontraron ventas para "' + escapeHtml(search) + '"' : 'No hay ventas ' + escapeHtml(ventasFilterLabel())}.</td></tr>`;
     summary.innerHTML = currentRole === 'guest'
       ? `0 ventas ${escapeHtml(ventasFilterLabel())}<br>${guestModoTotalesHTML([])}`
       : `0 ventas ${escapeHtml(ventasFilterLabel())}`;
@@ -2672,17 +2821,19 @@ function renderVentas(){
     return;
   }
 
-  tbody.innerHTML = list.map((v, idx) => {
+  tbody.innerHTML = filtered.map((v, idx) => {
     const gan = gananciaVenta(v);
     const ganCell = gan === null ? '<td class="admin-only">-</td>' : `<td class="admin-only"><strong>${fmtMoney(gan)}</strong></td>`;
-    // Acciones: todos pueden editar la venta; solo el dueño puede eliminarla.
     const accionesCell = `<td><button class="btn-icon" title="Editar venta" data-edit-venta="${v.id}">✏️</button><button class="btn-icon" title="Eliminar" data-delete-venta="${v.id}">🗑️</button></td>`;
+    const modoDot = currentRole === 'guest' && v.modoOrigin
+      ? `<span class="venta-modo-dot ${v.modoOrigin === 'manual' ? 'man' : 'el'}" title="${v.modoOrigin === 'manual' ? 'Manuales' : 'Eléctricas'}"></span>`
+      : '';
     return `
     <tr>
       <td class="venta-num">${idx + 1}</td>
       <td>${fmtHistoryDate(v.fecha)}</td>
       <td><strong>${escapeHtml(v.codigo)}</strong></td>
-      <td>${escapeHtml(v.nombre)}</td>
+      <td>${modoDot}${escapeHtml(v.nombre)}</td>
       <td>${v.cantidad}</td>
       <td>${fmtMoney(v.precioUnitario)}</td>
       <td><strong>${fmtMoney(v.total)}</strong></td>
@@ -2692,21 +2843,50 @@ function renderVentas(){
     </tr>`;
   }).join('');
 
-  const totalMonto = list.reduce((sum, v) => sum + v.total, 0);
-  if(currentRole === 'guest'){
-    // El invitado solo ve la suma de lo vendido (precio de venta) por cada modo.
-    summary.innerHTML = `${list.length} venta${list.length === 1 ? '' : 's'} ${escapeHtml(ventasFilterLabel())} · Total <strong>${fmtMoney(totalMonto)}</strong><br>${guestModoTotalesHTML(list)}`;
-  }else{
-    // El dueño ve el total vendido y la ganancia neta (total − costo de compra).
-    let costoTotal = 0;
-    list.forEach(v => {
-      const p = getProductoByCodigo(v.codigo);
-      if(p) costoTotal += (parseFloat(p.precioCompra) || 0) * (parseFloat(v.cantidad) || 1);
+  if(currentModo === 'manual'){
+    const { repetidos, duplicadas } = detectarRepetidosVentas(filtered);
+    const rows = tbody.querySelectorAll('tr');
+    rows.forEach((tr, i) => {
+      const v = filtered[i];
+      if(duplicadas.has(v.id)) tr.classList.add('venta-duplicada');
+      else if(repetidos.has(v.id)) tr.classList.add('venta-repetida');
     });
-    const gananciaNeta = totalMonto - costoTotal;
-    summary.textContent = `${list.length} venta${list.length === 1 ? '' : 's'} ${ventasFilterLabel()} · Total ${fmtMoney(totalMonto)} · Ganancia neta ${fmtMoney(gananciaNeta)}`;
+    const totRep = repetidos.size;
+    const totDup = duplicadas.size;
+    const totalMonto = filtered.reduce((sum, v) => sum + v.total, 0);
+    let costoTotal = 0;
+    let totalSinOtros = 0;
+    filtered.forEach(v => {
+      const p = getProductoByCodigo(v.codigo);
+      if(p && !esCategoriaOtros(p)){
+        costoTotal += (parseFloat(p.precioCompra) || 0) * (parseFloat(v.cantidad) || 1);
+        totalSinOtros += parseFloat(v.total) || 0;
+      }
+    });
+    const gananciaNeta = totalSinOtros - costoTotal;
+    let repNote = '';
+    if(totRep > 0) repNote += ` · <span style="color:#e65100;font-weight:700">${totRep} repetido${totRep>1?'s':''}</span>`;
+    if(totDup > 0) repNote += ` · <span style="color:#b71c1c;font-weight:700">${totDup} duplicada${totDup>1?'s':''}</span>`;
+    summary.innerHTML = `${filtered.length} venta${filtered.length === 1 ? '' : 's'} ${ventasFilterLabel()} · Total <strong>${fmtMoney(totalMonto)}</strong> · Ganancia neta ${fmtMoney(gananciaNeta)}${repNote}`;
+  }else{
+    const totalMonto = filtered.reduce((sum, v) => sum + v.total, 0);
+    if(currentRole === 'guest'){
+      summary.innerHTML = `${filtered.length} venta${filtered.length === 1 ? '' : 's'} ${escapeHtml(ventasFilterLabel())} · Total <strong>${fmtMoney(totalMonto)}</strong><br>${guestModoTotalesHTML(filtered)}`;
+    }else{
+      let costoTotal = 0;
+      let totalSinOtros = 0;
+      filtered.forEach(v => {
+        const p = getProductoByCodigo(v.codigo);
+        if(p && !esCategoriaOtros(p)){
+          costoTotal += (parseFloat(p.precioCompra) || 0) * (parseFloat(v.cantidad) || 1);
+          totalSinOtros += parseFloat(v.total) || 0;
+        }
+      });
+      const gananciaNeta = totalSinOtros - costoTotal;
+      summary.textContent = `${filtered.length} venta${filtered.length === 1 ? '' : 's'} ${ventasFilterLabel()} · Total ${fmtMoney(totalMonto)} · Ganancia neta ${fmtMoney(gananciaNeta)}`;
+    }
   }
-  renderAjusteCuentas(list);
+  renderAjusteCuentas(filtered);
   renderGastosPrestamos();
   syncVentasChips();
   maybeShowExportReminder();
@@ -3174,7 +3354,8 @@ function openCompraHistorial(codigo){
 // persona cobró por QR. Muestra el número de la venta, fecha, código,
 // producto, cuánto fue en QR y (si fue mixta) cuánto en efectivo, y el total.
 function openQrHistorial(persona){
-  const ventas = db.ventas.filter(v => v.qrPersona === persona && qrMontoDeVenta(v) > 0);
+  const dia = ventaFilterDateKey();
+  const ventas = db.ventas.filter(v => v.qrPersona === persona && qrMontoDeVenta(v) > 0 && (!dia || ventaFechaKey(v.fecha) === dia));
   const info = document.getElementById('histQrInfo');
   const tbody = document.querySelector('#histQrTable tbody');
   if(!info || !tbody) return;
@@ -3899,18 +4080,22 @@ function renderGastos(){
     const items = grupos[dia];
     const diaTotal = items.reduce((s,g)=> s + g.total, 0);
     html += `<tr class="gasto-day-row"><td colspan="6">📅 ${fmtFechaBonita(dia)} · <strong>${fmtMoney(diaTotal)}</strong></td></tr>`;
-    html += items.map(g => `
+    html += items.map(g => {
+      const tp = g.tipoPago || 'efectivo';
+      const tpBadge = tp === 'qr' ? '<span class="gp-tipo-badge gp-tipo-qr">📱 QR</span>' : '<span class="gp-tipo-badge gp-tipo-efectivo">💵 Efectivo</span>';
+      return `
       <tr>
         <td>${fmtHistoryDate(g.fecha)}</td>
         <td>${g.cantidad}</td>
         <td>${fmtMoney(g.bs)}</td>
         <td><strong>${fmtMoney(g.total)}</strong></td>
-        <td>${escapeHtml(g.obs || '-')}</td>
+        <td>${tpBadge} ${escapeHtml(g.obs || '-')}</td>
         <td>
           <button class="btn-icon" title="Editar" data-edit-gasto="${g.id}">✏️</button>
           <button class="btn-icon" title="Eliminar" data-delete-gasto="${g.id}">🗑️</button>
         </td>
-      </tr>`).join('');
+      </tr>`;
+    }).join('');
   });
   tbody.innerHTML = html;
   const totalGeneral = list.reduce((s,g)=> s + g.total, 0);
@@ -3931,6 +4116,10 @@ function openGastoModal(gasto){
   document.getElementById('gObs').value = gasto ? (gasto.obs || '') : '';
   document.getElementById('gFecha').value = gasto ? (gasto.fecha ? localDateKey(new Date(gasto.fecha)) : getLastGastoFecha()) : getLastGastoFecha();
   document.getElementById('gHora').value = gasto ? horaKey(new Date(gasto.fecha)) : horaNow();
+  const tp = gasto ? (gasto.tipoPago || 'efectivo') : 'efectivo';
+  document.querySelectorAll('#modalGasto .scan-tab[data-gasto-tipo]').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.gastoTipo === tp);
+  });
   recalcGastoTotal();
   openModal('modalGasto');
 }
@@ -3943,6 +4132,8 @@ function handleGastoSubmit(e){
   const obs = document.getElementById('gObs').value.trim();
   const fecha = document.getElementById('gFecha').value;
   const hora = document.getElementById('gHora').value;
+  const tipoBtn = document.querySelector('#modalGasto .scan-tab.active[data-gasto-tipo]');
+  const tipoPago = tipoBtn ? tipoBtn.dataset.gastoTipo : 'efectivo';
   if(isNaN(cant) || cant <= 0){ toast('Ingresa una cantidad válida', 'error'); return; }
   if(isNaN(bs) || bs <= 0){ toast('Ingresa un precio válido', 'error'); return; }
   const total = cant * bs;
@@ -3956,8 +4147,9 @@ function handleGastoSubmit(e){
     g.total = total;
     g.obs = obs;
     g.fecha = fechaISO;
+    g.tipoPago = tipoPago;
   }else{
-    db.gastos.unshift({ id: uid('gasto'), cantidad: cant, bs, total, obs, fecha: fechaISO });
+    db.gastos.unshift({ id: uid('gasto'), cantidad: cant, bs, total, obs, fecha: fechaISO, tipoPago });
   }
   setLastGastoFecha(fecha);
   saveDB();
@@ -4899,6 +5091,7 @@ function renderProductos(){
             ${thumb}
             ${countImg > 1 ? `<span class="prod-img-count" data-img-product="${p.id}">${countImg}</span>` : ''}
             ${currentRole === 'guest' ? '' : `<button class="btn btn-sm btn-secondary prod-img-btn" data-img-product="${p.id}">Añadir foto</button>`}
+            ${currentRole === 'guest' || countImg >= MAX_IMGS ? '' : `<button class="btn btn-sm btn-primary prod-img-btn prod-img-btn-autofill" data-auto-img="${p.id}" title="Buscar imagen en la web">🖼️ Autollenar</button>`}
           </div>
         </td>
         <td><strong>${escapeHtml(p.codigo)}</strong></td>
@@ -5249,6 +5442,207 @@ function handleImgUrl(){
   });
 }
 
+// Autollenar imagen: busca en la web la foto del producto y la guarda automáticamente.
+// Usa el servidor local (localhost:8765) si está corriendo, si no intenta con proxies CORS.
+// Si todo falla, abre Google Imágenes para búsqueda manual.
+const LOCAL_PROXY = 'http://localhost:8765';
+let localServerOk = null; // null = no probado, true/false = resultado del test
+
+async function autoFillProductImage(productId){
+  const p = getProductoById(productId);
+  if(!p) return;
+  if(getImages(productId).length >= MAX_IMGS){ toast('Este producto ya tiene 3 fotos', 'error'); return; }
+  const query = [p.codigo, p.marca, p.nombre].filter(Boolean).join(' ');
+  if(!query){ toast('El producto no tiene datos para buscar', 'error'); return; }
+
+  const btn = document.querySelector('[data-auto-img="'+productId+'"]');
+  const origText = btn ? btn.textContent : '';
+  if(btn){ btn.disabled = true; btn.textContent = '⏳ Buscando...'; }
+
+  try{
+    // Estrategia 1: Servidor local (más rápido y confiable)
+    if(localServerOk === null){
+      try{
+        const test = await fetch(LOCAL_PROXY + '/api/ping', {signal: AbortSignal.timeout(3000)});
+        localServerOk = test.ok;
+      }catch(e){ localServerOk = false; }
+    }
+    if(localServerOk){
+      const results = await localSearchImages(query);
+      if(results.length > 0){
+        await fetchAndSaveImage(productId, results[0]);
+        toast('✅ Imagen autollenada', 'success');
+        if(btn){ btn.disabled = false; btn.textContent = origText; }
+        return;
+      }
+    }
+  }catch(e){ console.warn('Servidor local falló:', e); }
+
+  try{
+    // Estrategia 2: DuckDuckGo Instant Answer API (CORS-friendly directo)
+    const ddgInstant = await ddgInstantImage(query);
+    if(ddgInstant){
+      await fetchAndSaveImage(productId, ddgInstant);
+      toast('✅ Imagen autollenada', 'success');
+      if(btn){ btn.disabled = false; btn.textContent = origText; }
+      return;
+    }
+  }catch(e){ console.warn('DDG Instant falló:', e); }
+
+  try{
+    // Estrategia 3: DuckDuckGo image search via proxies CORS
+    const ddgImg = await ddgImageSearchProxy(query);
+    if(ddgImg){
+      await fetchAndSaveImage(productId, ddgImg);
+      toast('✅ Imagen autollenada', 'success');
+      if(btn){ btn.disabled = false; btn.textContent = origText; }
+      return;
+    }
+  }catch(e){ console.warn('DDG proxy search falló:', e); }
+
+  // Estrategia 4: Abrir Google Imágenes para búsqueda manual
+  window.open('https://www.google.com/search?q='+encodeURIComponent(query)+'&tbm=isch', '_blank', 'noopener');
+  toast('⚠️ No se encontró automáticamente. Busca la imagen y cópiala.', 'warning');
+  if(btn){ btn.disabled = false; btn.textContent = origText; }
+}
+
+// Búsqueda de imágenes via servidor local (sin CORS).
+async function localSearchImages(query){
+  const resp = await fetch(LOCAL_PROXY + '/api/search-images?q='+encodeURIComponent(query), {signal: AbortSignal.timeout(10000)});
+  const data = await resp.json();
+  if(data.error) throw new Error(data.error);
+  return (data.results || [])
+    .filter(r => r.image && (!r.width || r.width >= 80) && (!r.height || r.height >= 80))
+    .map(r => r.image);
+}
+
+// Búsqueda de imágenes DuckDuckGo via proxies CORS externos (fallback).
+async function ddgImageSearchProxy(query){
+  const pageUrl = 'https://duckduckgo.com/?q='+encodeURIComponent(query)+'&iar=images&iax=images&ia=images';
+  const proxies = [
+    'https://api.allorigins.win/raw?url=',
+    'https://corsproxy.io/?url='
+  ];
+  let pageHtml = null;
+  for(const proxy of proxies){
+    try{
+      const resp = await fetch(proxy + encodeURIComponent(pageUrl), {signal: AbortSignal.timeout(8000)});
+      if(resp.ok){ pageHtml = await resp.text(); break; }
+    }catch(e){ continue; }
+  }
+  if(!pageHtml) throw new Error('No se pudo acceder a DuckDuckGo');
+  const vqdMatch = pageHtml.match(/vqd[=:]["']?([0-9a-zA-Z_-]+)/i);
+  if(!vqdMatch) throw new Error('No VQD token');
+  const apiUrl = 'https://duckduckgo.com/i.js?l=us-en&o=json&q='+encodeURIComponent(query)+'&vqd='+vqdMatch[1];
+  for(const proxy of proxies){
+    try{
+      const resp = await fetch(proxy + encodeURIComponent(apiUrl), {signal: AbortSignal.timeout(8000)});
+      if(resp.ok){
+        const apiData = await resp.json();
+        if(apiData.results && apiData.results.length > 0){
+          for(const r of apiData.results){
+            if((r.width||0) >= 100 && (r.height||0) >= 100) return r.image;
+          }
+          return apiData.results[0].image;
+        }
+      }
+    }catch(e){ continue; }
+  }
+  return null;
+}
+
+// Busca imagen en la API Instant Answer de DuckDuckGo (CORS-friendly, sin proxy).
+async function ddgInstantImage(query){
+  const url = 'https://api.duckduckgo.com/?q='+encodeURIComponent(query)+'&format=json';
+  const resp = await fetch(url, {signal: AbortSignal.timeout(5000)});
+  const data = await resp.json();
+  if(data.Image && /^https?:\/\//i.test(data.Image)) return data.Image;
+  if(data.AbstractImage && data.AbstractImage.Src && /^https?:\/\//i.test(data.AbstractImage.Src)){
+    return data.AbstractImage.Src;
+  }
+  return null;
+}
+
+// Descarga una imagen desde URL y la guarda como foto del producto.
+async function fetchAndSaveImage(productId, url){
+  const data = await fetchImageAsDataURL(url);
+  const compressed = await compressDataURL(data);
+  const ok = await saveImageLocal(productId, compressed, url);
+  if(!ok) throw new Error('No se pudo guardar');
+  if(imgTargetId === productId){
+    const imgInput = document.getElementById('imgUrlInput');
+    if(imgInput) imgInput.value = '';
+    renderImgCarousel();
+  }
+  renderProductos();
+}
+
+// Autollenar todos: recorre los productos sin imagen y les busca una foto.
+async function autoFillAllProducts(){
+  const sinFoto = db.productos.filter(p => getImages(p.id).length < MAX_IMGS);
+  if(!sinFoto.length){ toast('Todos los productos ya tienen foto', 'info'); return; }
+
+  // Verificar servidor local antes de empezar
+  if(localServerOk === null){
+    try{
+      const test = await fetch(LOCAL_PROXY + '/api/ping', {signal: AbortSignal.timeout(3000)});
+      localServerOk = test.ok;
+    }catch(e){ localServerOk = false; }
+  }
+  if(!localServerOk){
+    const esFile = location.protocol === 'file:';
+    const msg = esFile
+      ? '⚠️ Abre la app desde el servidor: haz doble clic en "Iniciar StockFerre.bat" y usa http://localhost:8765'
+      : '⚠️ El servidor local no está corriendo. Abre "Iniciar StockFerre.bat" primero.';
+    toast(msg, 'error');
+    return;
+  }
+
+  if(!confirm('Se buscarán imágenes para ' + sinFoto.length + ' producto(s) sin foto.\nEsto tardará unos minutos.\n\n¿Continuar?')) return;
+
+  const btn = document.getElementById('btnAutoFillAll');
+  const origText = btn ? btn.textContent : '';
+  if(btn){ btn.disabled = true; }
+
+  let ok = 0, fail = 0, total = sinFoto.length;
+
+  for(let i = 0; i < sinFoto.length; i++){
+    const p = sinFoto[i];
+    const query = [p.codigo, p.marca, p.nombre].filter(Boolean).join(' ');
+    if(!query){ fail++; continue; }
+
+    if(btn) btn.textContent = '⏳ ' + (i+1) + '/' + total + ' — ' + p.codigo;
+
+    try{
+      // 1. Servidor local (DuckDuckGo images + Wikipedia)
+      const results = await localSearchImages(query);
+      if(results.length > 0){
+        await fetchAndSaveImage(p.id, results[0]);
+        ok++;
+        await new Promise(r => setTimeout(r, 500));
+        continue;
+      }
+      // 2. DuckDuckGo Instant Answer (CORS directo)
+      const img = await ddgInstantImage(query);
+      if(img){
+        await fetchAndSaveImage(p.id, img);
+        ok++;
+        await new Promise(r => setTimeout(r, 500));
+        continue;
+      }
+      fail++;
+    }catch(e){
+      console.warn('AutoFill error para ' + p.codigo + ':', e);
+      fail++;
+    }
+    await new Promise(r => setTimeout(r, 400));
+  }
+
+  if(btn){ btn.disabled = false; btn.textContent = origText; }
+  renderProductos();
+  toast('✅ ' + ok + ' productos auto-rellenados · ⚠️ ' + fail + ' sin resultado', ok > 0 ? 'success' : 'warning');
+}
+
 function removeCurrentImage(){
   if(!imgTargetId) return;
   const imgs = getImages(imgTargetId);
@@ -5462,7 +5856,9 @@ function importProductsCSV(file){
    ------------------------------------------------------------------------- */
 
 function exportBackup(){
-  const data = Object.assign({}, db, { imagenes: imgCache, imgUrl: imgUrlCache });
+  // invUpdates = registro local de "últimos inventariados" (para que el orden
+  // de la pestaña Inventario también viaje en el backup).
+  const data = Object.assign({}, db, { imagenes: imgCache, imgUrl: imgUrlCache, invUpdates: invUpdates || {} });
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -5493,6 +5889,12 @@ function importBackup(file){
         });
         saveDB();
         syncProductoDocs(db.productos, currentModo); // los productos restaurados también van a la nube
+        // Restaura el orden local de inventario ("últimos registrados en este
+        // dispositivo") si el backup lo trae.
+        if(parsed.invUpdates && typeof parsed.invUpdates === 'object'){
+          invUpdates = parsed.invUpdates;
+          saveInvUpdates();
+        }
         // Restaura las imágenes locales (solo de este dispositivo), incluyendo
         // el link original de cada foto cuando lo tenía. Soporta tanto el
         // formato viejo (1 sola foto) como el nuevo (varias fotos por producto).
@@ -6143,6 +6545,7 @@ function closeModalById(id){
   }
 }
 function closeAllModals(){
+  currentModoDetalleOpen = null;
   const inventarioScanWasOpen = document.getElementById('modalInventarioScan').classList.contains('open');
   const barcodeScanWasOpen = document.getElementById('modalBarcodeScan').classList.contains('open');
   const ventaScanWasOpen = document.getElementById('modalVentaScan').classList.contains('open');
@@ -6796,6 +7199,14 @@ function setupEventListeners(){
     renderAjusteCuentas(ventasFiltradas());
   });
 
+  // "Dinero real" en Ajuste de cuentas: al escribir, compara con el efectivo ajustado
+  const realInput = document.getElementById('ajusteDineroReal');
+  if(realInput){
+    realInput.addEventListener('input', ()=>{
+      renderAjusteCuentas(ventasFiltradas());
+    });
+  }
+
   // Sidebar móvil
   document.getElementById('hamburgerBtn').addEventListener('click', ()=>{
     document.getElementById('sidebar').classList.add('open');
@@ -6941,12 +7352,14 @@ function setupEventListeners(){
     const editId = e.target.closest('[data-edit-product]')?.dataset.editProduct;
     const delId = e.target.closest('[data-delete-product]')?.dataset.deleteProduct;
     const imgId = e.target.closest('[data-img-product]')?.dataset.imgProduct;
+    const autoImgId = e.target.closest('[data-auto-img]')?.dataset.autoImg;
     if(editId) openProductModal(getProductoById(editId));
     if(delId) deleteProducto(delId);
     if(imgId) openImageModal(imgId);
+    if(autoImgId) autoFillProductImage(autoImgId);
     // Clic en cualquier parte de la fila (que no sea un botón/imagen) abre la
     // ventana de características del producto.
-    if(!editId && !delId && !imgId){
+    if(!editId && !delId && !imgId && !autoImgId){
       const row = e.target.closest('tr[data-product-id]');
       if(row) openProductDetails(row.dataset.productId);
     }
@@ -6989,6 +7402,10 @@ function setupEventListeners(){
     const query = [p.codigo, p.marca].filter(Boolean).join(' ');
     if(!query){ toast('El producto no tiene código', 'error'); return; }
     window.open('https://www.google.com/search?q=' + encodeURIComponent(query) + '&tbm=isch', '_blank', 'noopener');
+  });
+  // Autollenar imagen: busca automáticamente la foto del producto en la web
+  document.getElementById('btnImgAutoFill').addEventListener('click', ()=>{
+    if(imgTargetId) autoFillProductImage(imgTargetId);
   });
   document.getElementById('btnDetSaveCaract').addEventListener('click', saveDetCaracteristicas);
   document.getElementById('btnDetVerIngresos').addEventListener('click', ()=> openProductIngresos(detTargetId));
@@ -7054,6 +7471,11 @@ function setupEventListeners(){
     ventaDateFilter = e.target.value || 'todas';
     renderVentas();
   });
+  document.getElementById('ventaSearch').addEventListener('input', ()=> renderVentas());
+  document.getElementById('ventasSummary').addEventListener('click', (e)=>{
+    const modoBtn = e.target.closest('[data-modo-detalle]');
+    if(modoBtn){ openModoDetalle(modoBtn.dataset.modoDetalle); return; }
+  });
   document.getElementById('ajusteQrDetalle').addEventListener('click', (e)=>{
     const chip = e.target.closest('[data-qr-persona]');
     if(!chip) return;
@@ -7063,21 +7485,32 @@ function setupEventListeners(){
     e.preventDefault();
     const bs = parseFloat(document.getElementById('gpBs').value);
     if(!bs || bs <= 0){ toast('Ingresa un monto en Bs', 'error'); return; }
+    const tipoBtn = document.querySelector('#gpTipoPago .scan-tab.active');
+    const tipoPago = tipoBtn ? tipoBtn.dataset.gpTipo : 'efectivo';
     addGastoPrestamo({
       bs: bs,
-      observacion: document.getElementById('gpObs').value.trim()
+      observacion: document.getElementById('gpObs').value.trim(),
+      tipoPago: tipoPago
     });
     document.getElementById('gpBs').value = '';
     document.getElementById('gpObs').value = '';
     toast('Gasto/préstamo agregado', 'success');
   });
   document.getElementById('gastosPrestamosList').addEventListener('click', (e)=>{
+    const tipoBtn = e.target.closest('[data-gp-tipo-toggle]');
+    if(tipoBtn){ toggleGastoPrestamoTipoPago(tipoBtn.dataset.gpTipoToggle); return; }
     const dot = e.target.closest('[data-gp-modo]');
     if(dot){ toggleGastoPrestamoModo(dot.dataset.gpModo); return; }
     const del = e.target.closest('[data-delete-gp]');
     if(del){ deleteGastoPrestamo(del.dataset.deleteGp); return; }
     const chk = e.target.closest('[data-gp-ajustar]');
     if(chk) toggleGastoPrestamoAjustar(chk.dataset.gpAjustar);
+  });
+  document.getElementById('gpTipoPago').addEventListener('click', (e)=>{
+    const btn = e.target.closest('[data-gp-tipo]');
+    if(!btn) return;
+    document.querySelectorAll('#gpTipoPago .scan-tab').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
   });
   document.getElementById('exportReminder').addEventListener('click', (e)=>{
     if(e.target.id === 'btnExportNow'){
@@ -7298,6 +7731,12 @@ function setupEventListeners(){
   document.getElementById('formGasto').addEventListener('submit', handleGastoSubmit);
   document.getElementById('gCant').addEventListener('input', recalcGastoTotal);
   document.getElementById('gBs').addEventListener('input', recalcGastoTotal);
+  document.querySelector('#modalGasto .modal-body').addEventListener('click', (e)=>{
+    const btn = e.target.closest('[data-gasto-tipo]');
+    if(!btn) return;
+    document.querySelectorAll('#modalGasto .scan-tab[data-gasto-tipo]').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+  });
   document.querySelector('#gastosTable tbody').addEventListener('click', (e)=>{
     const editId = e.target.closest('[data-edit-gasto]')?.dataset.editGasto;
     const delId = e.target.closest('[data-delete-gasto]')?.dataset.deleteGasto;
@@ -7417,6 +7856,8 @@ function setupEventListeners(){
   // Importaciones CSV (desde Productos y desde Configuración)
   document.getElementById('btnImportProducts').addEventListener('click', ()=> document.getElementById('fileImportProducts').click());
   document.getElementById('btnImportProductsConfig').addEventListener('click', ()=> document.getElementById('fileImportProducts').click());
+  // Autollenar todos los productos
+  document.getElementById('btnAutoFillAll').addEventListener('click', autoFillAllProducts);
   document.getElementById('fileImportProducts').addEventListener('change', (e)=>{
     if(e.target.files[0]) importProductsCSV(e.target.files[0]);
     e.target.value = '';

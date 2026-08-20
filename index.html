@@ -171,6 +171,7 @@
         <button class="btn btn-primary admin-only" id="btnNewProduct">+ Nuevo producto</button>
         <button class="btn btn-secondary admin-only" id="btnExportProducts">📤 Exportar Excel</button>
         <button class="btn btn-secondary admin-only" id="btnImportProducts">📥 Importar CSV</button>
+        <button class="btn btn-primary admin-only" id="btnAutoFillAll">🖼️ Autollenar todos</button>
       </div>
       <div class="table-wrap">
         <table class="table" id="productsTable">
@@ -198,6 +199,7 @@
     <section class="view" id="view-ventas">
       <div class="toolbar">
         <button class="btn btn-primary" id="btnNuevaVenta">➕ Nueva venta</button>
+        <input type="text" id="ventaSearch" class="input" placeholder="🔍 Buscar por código o nombre..." style="flex:1; min-width:180px;">
         <button class="btn btn-secondary" id="btnExportVentas">📤 Exportar CSV</button>
         <button class="btn btn-secondary admin-only" id="btnImportVentas">📥 Importar CSV</button>
         <button class="btn btn-secondary admin-only" id="btnPurgeVentas">🧹 Borrar antiguas</button>
@@ -240,6 +242,12 @@
             <div class="fin-card"><span class="fin-label">💵 Efectivo</span><strong class="fin-value" id="ajusteEfectivo">Bs 0.00</strong></div>
             <div class="fin-card"><span class="fin-label">📱 QR</span><strong class="fin-value" id="ajusteQr">Bs 0.00</strong></div>
           </div>
+          <div class="ajuste-real-box" id="ajusteRealBox">
+            <label class="ajuste-real-label">💵 Dinero real en efectivo
+              <input type="number" id="ajusteDineroReal" class="input ajuste-real-input" step="0.01" min="0" placeholder="0.00">
+            </label>
+            <div class="ajuste-real-resultado" id="ajusteRealResultado"></div>
+          </div>
           <div class="ajuste-qr-detalle" id="ajusteQrDetalle" style="display:none;"></div>
           <p class="hint" id="ajusteGastosNota" style="display:none; margin:10px 0 0;"></p>
         </div>
@@ -247,9 +255,13 @@
       <div class="panel gastos-prestamos-panel" id="gastosPrestamosPanel">
         <div class="panel-header"><h3>🧾 Gastos/Prestamos</h3><span class="hint" id="gpFecha">de hoy</span></div>
         <div class="panel-body">
-          <form id="formGastoPrestamo" class="gp-form" style="margin-bottom:12px;">
+          <form id="formGastoPrestamo" class="gp-form" style="margin-bottom:12px; flex-wrap:wrap;">
             <input type="number" id="gpBs" class="input gp-bs-input" step="0.01" min="0.01" placeholder="Bs" required>
             <input type="text" id="gpObs" class="input gp-obs-input" placeholder="Observación (ej: préstamo a José, pasaje, comida...)">
+            <div class="gp-tipo-pago" id="gpTipoPago">
+              <button type="button" class="scan-tab active" data-gp-tipo="efectivo">💵 Efectivo</button>
+              <button type="button" class="scan-tab" data-gp-tipo="qr">📱 QR</button>
+            </div>
             <button type="submit" class="btn btn-secondary">Agregar</button>
           </form>
           <p class="hint gp-legend" id="gpLegend" style="margin-bottom:8px;"><span class="gp-dot-legend man"></span> Manuales &nbsp;·&nbsp; <span class="gp-dot-legend el"></span> Eléctricas &nbsp;·&nbsp; <span class="gp-dot-legend none"></span> Sin color (no envía) — toca el punto para cambiar</p>
@@ -603,6 +615,8 @@
       <button type="button" class="scan-tab" id="btnImgUploadDevice">📁 Del dispositivo</button>
     </div>
     <div style="text-align:center; margin:10px 0;">
+      <button type="button" class="btn btn-primary" id="btnImgAutoFill" style="margin-bottom:6px;">🖼️ Autollenar imagen</button>
+      <p class="hint" style="margin:2px 0 8px;">Busca automáticamente la foto del producto en la web y la guarda.</p>
       <button type="button" class="btn btn-secondary" id="btnImgWebSearch">🔍 Buscar foto en la web</button>
       <p class="hint" style="margin:4px 0 0;">Abre Google Imágenes con el código y la marca del producto para encontrar su foto. Luego copia el enlace de la imagen y pégalo en "🌐 Desde la web".</p>
     </div>
@@ -914,6 +928,21 @@
   </div>
 </div>
 
+<!-- Modal: Detalle por modo (Manuales / Eléctricas) -->
+<div class="modal modal-lg" id="modalModoDetalle">
+  <div class="modal-header">
+    <h3 id="modoDetalleTitle">Detalle</h3>
+    <button class="modal-close" data-close-modal>✕</button>
+  </div>
+  <div class="modal-body">
+    <div class="modo-detalle-grid" id="modoDetalleGrid"></div>
+    <div id="modoDetalleGastos" style="margin-top:14px;"></div>
+    <div class="form-actions" style="margin-top:14px;">
+      <button type="button" class="btn btn-secondary" data-close-modal>Cerrar</button>
+    </div>
+  </div>
+</div>
+
 <!-- Modal: Editar efectivo actual -->
 <div class="modal modal-sm" id="modalEditarCaja">
   <div class="modal-header">
@@ -1004,6 +1033,13 @@
       <label style="grid-column:1/-1;">Cantidad *<input type="number" id="gCant" class="input" step="1" min="1" value="1" required></label>
       <label style="grid-column:1/-1;">Bs (precio unitario) *<input type="number" id="gBs" class="input" step="0.01" min="0.01" required></label>
       <label style="grid-column:1/-1;">Observación<input type="text" id="gObs" class="input" placeholder="Ej: pasaje, comida, gasolina, flete..."></label>
+      <label style="grid-column:1/-1;">Tipo de pago
+        <div class="scan-mode-tabs" style="margin-top:4px;">
+          <button type="button" class="scan-tab active" data-gasto-tipo="efectivo">💵 Efectivo</button>
+          <button type="button" class="scan-tab" data-gasto-tipo="qr">📱 QR</button>
+        </div>
+      </label>
+      <input type="hidden" id="gTipoPago" value="efectivo">
       <label>Fecha del gasto<input type="date" id="gFecha" class="input" title="Fecha del gasto (por defecto hoy y se recuerda)."></label>
       <label>Hora<input type="time" id="gHora" class="input" title="Hora del gasto (por defecto la actual)."></label>
       <p class="hint" id="gTotalHint" style="grid-column:1/-1; margin:0;">Total: Bs 0.00</p>

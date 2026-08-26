@@ -201,6 +201,7 @@
         <button class="btn btn-primary" id="btnNuevaVenta">➕ Nueva venta</button>
         <input type="text" id="ventaSearch" class="input" placeholder="🔍 Buscar por código o nombre..." style="flex:1; min-width:180px;">
         <button class="btn btn-secondary" id="btnExportVentas">📤 Exportar CSV</button>
+        <button class="btn btn-secondary" id="btnExportVentasPDF">📄 Exportar PDF</button>
         <button class="btn btn-secondary admin-only" id="btnImportVentas">📥 Importar CSV</button>
         <button class="btn btn-secondary admin-only" id="btnPurgeVentas">🧹 Borrar antiguas</button>
         <button class="btn btn-danger admin-only" id="btnVaciarVentas">🧹 Vaciar historial</button>
@@ -209,7 +210,8 @@
         <button class="venta-date-chip active" data-venta-date="hoy">Hoy</button>
         <button class="venta-date-chip" data-venta-date="ayer">Ayer</button>
         <button class="venta-date-chip" data-venta-date="anteayer">Anteayer</button>
-        <input type="date" id="ventaDateInput" class="input venta-date-picker" title="Ver ventas de otra fecha">
+        <button type="button" class="venta-date-chip" id="ventaDateBtn" onclick="document.getElementById('ventaDateInput').showPicker()">📅 Calendario</button>
+        <input type="date" id="ventaDateInput" class="input venta-date-picker">
         <button class="venta-date-chip" data-venta-date="todas">Todas</button>
       </div>
       <div class="export-reminder" id="exportReminder" style="display:none;"></div>
@@ -218,7 +220,7 @@
         <table class="table" id="ventasTable">
           <thead>
             <tr>
-              <th>Nº</th><th>Fecha</th><th>Código</th><th>Producto</th><th>Cant.</th>
+              <th>Nº</th><th>Fecha</th><th></th><th>Código</th><th>Producto</th><th>Cant.</th>
               <th>Precio</th><th>Total</th><th class="admin-only">Ganancia neta</th><th>Pago</th><th>Acciones</th>
             </tr>
           </thead>
@@ -284,7 +286,8 @@
       <div class="ventas-dates" id="comprasDates">
         <button class="compra-date-chip active" data-compra-date="hoy">Hoy</button>
         <button class="compra-date-chip" data-compra-date="ayer">Ayer</button>
-        <input type="date" id="compraDateInput" class="input venta-date-picker" title="Ver ingresos de otra fecha">
+        <button type="button" class="compra-date-chip" id="compraDateBtn" onclick="document.getElementById('compraDateInput').showPicker()">📅 Calendario</button>
+        <input type="date" id="compraDateInput" class="input venta-date-picker">
         <button class="compra-date-chip" data-compra-date="todas">Todas</button>
       </div>
       <div style="margin:10px 0;">
@@ -296,7 +299,7 @@
         <table class="table" id="comprasTable">
           <thead>
             <tr>
-              <th>Código</th><th>Producto</th><th>Ingresos</th><th>Unidades</th>
+              <th></th><th>Código</th><th>Producto</th><th>Ingresos</th><th>Unidades</th>
               <th>Último precio</th><th>Última fecha</th><th>Total invertido</th><th>Historial</th>
             </tr>
           </thead>
@@ -427,7 +430,7 @@
         <table class="table" id="topVentasTable">
           <thead>
             <tr>
-              <th>#</th><th>Producto</th><th>Vendidos</th><th>Stock</th><th>Stock mínimo</th>
+              <th>#</th><th></th><th>Producto</th><th>Vendidos</th><th>Stock</th><th>Stock mínimo</th>
             </tr>
           </thead>
           <tbody></tbody>
@@ -450,7 +453,7 @@
         <table class="table" id="pedidosTable">
           <thead>
             <tr>
-              <th>#</th><th>Marca</th><th>Producto</th><th>Stock</th><th>Stock mín.</th><th>Cant. a pedir</th>
+              <th>#</th><th></th><th>Marca</th><th>Producto</th><th>Stock</th><th>Stock mín.</th><th>Cant. a pedir</th>
             </tr>
           </thead>
           <tbody></tbody>
@@ -471,7 +474,7 @@
         <table class="table" id="inventarioTable">
           <thead>
             <tr>
-              <th>Código</th><th>Cód. Barras</th><th>Descripción</th><th>Categoría</th><th>Stock</th><th>Última actualización</th><th>Acciones</th>
+              <th></th><th>Código</th><th>Cód. Barras</th><th>Descripción</th><th>Categoría</th><th>Stock</th><th>Última actualización</th><th>Acciones</th>
             </tr>
           </thead>
           <tbody></tbody>
@@ -490,7 +493,7 @@
           <div class="table-wrap" style="box-shadow:none; border-radius:0;">
             <table class="table" id="scanHistoryTable">
               <thead>
-                <tr><th>Código</th><th>Producto</th><th>Estado</th><th>Fecha</th></tr>
+                <tr><th></th><th>Código</th><th>Producto</th><th>Estado</th><th>Fecha</th></tr>
               </thead>
               <tbody></tbody>
             </table>
@@ -507,7 +510,7 @@
           <div class="table-wrap" style="box-shadow:none; border-radius:0;">
             <table class="table" id="inventarioHistoryTable">
               <thead>
-                <tr><th>Código</th><th>Producto</th><th>Cantidad</th><th>Stock resultante</th><th>Tipo</th><th>Fecha y hora</th></tr>
+                <tr><th></th><th>Código</th><th>Producto</th><th>Cantidad</th><th>Stock resultante</th><th>Tipo</th><th>Fecha y hora</th></tr>
               </thead>
               <tbody></tbody>
             </table>
@@ -938,6 +941,7 @@
     <div class="modo-detalle-grid" id="modoDetalleGrid"></div>
     <div id="modoDetalleGastos" style="margin-top:14px;"></div>
     <div class="form-actions" style="margin-top:14px;">
+      <button type="button" class="btn btn-secondary" id="btnExportModoDetallePDF">📄 Exportar PDF</button>
       <button type="button" class="btn btn-secondary" data-close-modal>Cerrar</button>
     </div>
   </div>
@@ -1161,6 +1165,30 @@
   </div>
 </div>
 
+<!-- Modal: Historial de ventas de un producto (más vendidos) -->
+<div class="modal modal-lg" id="modalHistorialVentaProducto">
+  <div class="modal-header">
+    <h3 id="historialVentaProductoTitle">Historial de ventas</h3>
+    <button class="modal-close" data-close-modal>✕</button>
+  </div>
+  <div class="modal-body">
+    <div id="historialVentaProductoResumen" class="hint" style="margin-bottom:10px;"></div>
+    <div class="table-wrap">
+      <table class="table" id="historialVentaProductoTable">
+        <thead>
+          <tr>
+            <th>Fecha</th><th>Cantidad</th><th>Precio unit.</th><th>Total</th><th>Método pago</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div class="form-actions" style="margin-top:12px;">
+      <button type="button" class="btn btn-secondary" data-close-modal>Cerrar</button>
+    </div>
+  </div>
+</div>
+
 <!-- Toast container -->
 <div class="toast-container" id="toastContainer"></div>
 
@@ -1174,6 +1202,11 @@
 <input type="file" id="fileImportBackup" accept=".json" hidden>
 <input type="file" id="fileImgCamera" accept="image/*" capture="environment" hidden>
 <input type="file" id="fileImgGallery" accept="image/*" hidden>
+
+<div class="img-lightbox" id="imgLightbox">
+  <button class="img-lightbox-close" id="imgLightboxClose">&times;</button>
+  <img src="" alt="" id="imgLightboxImg">
+</div>
 
 <script src='https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js'></script>
 <!-- ZXing: lector de códigos de barras (solo se usa en el botón 📷 de Código de barras) -->

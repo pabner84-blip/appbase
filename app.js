@@ -350,6 +350,8 @@ let guestUnsubs = [];
 function disconnectGuestFirebase(){
   guestUnsubs.forEach(u => { try{ u(); }catch(e){ /* ignorar */ } });
   guestUnsubs = [];
+  fbReady = false;
+  fbDocRef = null;
 }
 
 // En modo invitado conecta a Firestore: escucha los documentos de Manuales y
@@ -362,6 +364,7 @@ function connectGuestFirebase(){
     if(!firebase.apps || !firebase.apps.length){ firebase.initializeApp(firebaseConfig); }
     const fbFirestore = firebase.firestore();
     enableOfflinePersistence(fbFirestore); // no bloquea la conexión
+    setSyncStatus('connecting');
     // 1) Escucha documentos de Manuales y Eléctricas (solo para catálogo/productos)
     ['manual','electrico'].forEach(modo => {
       const ref = fbFirestore.collection('stockferre').doc('inventario_' + modo);
@@ -394,7 +397,10 @@ function connectGuestFirebase(){
       startStockListener(modo);
     });
     // 2) Escucha el documento PROPIO del invitado (ventas/gastos/finanzas)
+    //    y habilita escritura para que saveDB() suba ventas/gastos a Firebase.
     const ownRef = fbFirestore.collection('stockferre').doc('inventario_invitado');
+    fbDocRef = ownRef;
+    fbReady = true;
     ownRef.get().then(snap=>{
       if(snap.exists){
         const prevRaw = localStorage.getItem(storageKey());
@@ -407,7 +413,8 @@ function connectGuestFirebase(){
         try{ localStorage.setItem(storageKey(), JSON.stringify(merged)); }catch(e){}
         if(currentModo === 'invitado'){ db = buildGuestDB(); rerenderCurrentView(); }
       }
-    }).catch(()=>{});
+      setSyncStatus('synced');
+    }).catch(()=>{ setSyncStatus('synced'); });
     const ownUnsub = ownRef.onSnapshot(snap=>{
       if(snap.metadata.hasPendingWrites) return;
       if(!snap.exists) return;
@@ -424,6 +431,7 @@ function connectGuestFirebase(){
     guestUnsubs.push(ownUnsub);
   }catch(err){
     console.error('No se pudo conectar a Firebase en modo invitado', err);
+    setSyncStatus('error');
   }
 }
 
@@ -962,9 +970,11 @@ function getImageUrl(productId){
    cuando el usuario se acerca (IntersectionObserver). Así una lista larga de
    productos con foto carga mucho más rápido.
    ------------------------------------------------------------------------- */
-const IMG_LAZY_FIRST = 25; // filas iniciales que sí se pintan de inmediato
+const IMG_LAZY_FIRST = 10; // filas iniciales que sí se pintan de inmediato (menos = más rápido en móvil)
 let imgLazyObserver = null;
 let imgLazyObserved = new Set();
+
+function isMobile(){ return window.innerWidth < 768; }
 
 function getImgLazyObserver(){
   if(imgLazyObserver) return imgLazyObserver;
@@ -973,7 +983,7 @@ function getImgLazyObserver(){
     for(const entry of entries){
       if(entry.isIntersecting) hydrateLazyThumb(entry.target);
     }
-  }, { rootMargin: '300px' });
+  }, { rootMargin: isMobile() ? '100px' : '250px' });
   return imgLazyObserver;
 }
 
@@ -986,7 +996,7 @@ function hydrateLazyThumb(el){
   imgLazyObserved.delete(el);
   const img = pid ? getImage(pid) : '';
   if(img){
-    el.innerHTML = `<img src="${img}" class="prod-thumb" alt="" data-img-product="${pid}" decoding="async">`;
+    el.innerHTML = `<img src="${img}" class="prod-thumb" alt="" data-img-product="${pid}" decoding="async" loading="lazy">`;
   }
 }
 
@@ -1005,6 +1015,22 @@ function resetImgLazy(){
     imgLazyObserved.forEach(el=> imgLazyObserver.unobserve(el));
     imgLazyObserved = new Set();
   }
+}
+
+/* -------------------------------------------------------------------------
+   LIGHTBOX: muestra una imagen en pantalla completa al hacer clic
+   ------------------------------------------------------------------------- */
+function openImageLightbox(src){
+  if(!src) return;
+  const lb = document.getElementById('imgLightbox');
+  const img = document.getElementById('imgLightboxImg');
+  if(!lb || !img) return;
+  img.src = src;
+  lb.classList.add('open');
+}
+function closeImageLightbox(){
+  const lb = document.getElementById('imgLightbox');
+  if(lb) lb.classList.remove('open');
 }
 
 function loadImagesFromStore(modo){
@@ -2237,33 +2263,47 @@ function fmtDateShort(iso){
 function renderHistorial(){
   const scanBody = document.querySelector('#scanHistoryTable tbody');
   if(db.historialEscaneos.length === 0){
-    scanBody.innerHTML = `<tr class="empty-row"><td colspan="4">Todavía no escaneaste ningún código.</td></tr>`;
+    scanBody.innerHTML = `<tr class="empty-row"><td colspan="5">Todavía no escaneaste ningún código.</td></tr>`;
   }else{
-    scanBody.innerHTML = db.historialEscaneos.map(h => `
+    scanBody.innerHTML = db.historialEscaneos.map(h => {
+      const p = h.encontrado ? getProductoByCodigo(h.codigo) : null;
+      const img = p ? getImage(p.id) : '';
+      const thumb = img
+        ? `<img src="${img}" class="venta-thumb" alt="" loading="lazy" decoding="async">`
+        : `<div class="venta-thumb venta-thumb-empty">🖼️</div>`;
+      return `
       <tr>
+        <td class="venta-img-cell">${thumb}</td>
         <td><strong>${escapeHtml(h.codigo)}</strong></td>
         <td>${h.encontrado ? escapeHtml(h.nombre) : '-'}</td>
         <td>${h.encontrado ? '<span class="badge badge-success-soft">Encontrado</span>' : '<span class="badge badge-danger-soft">No encontrado</span>'}</td>
         <td>${fmtHistoryDate(h.fecha)}</td>
-      </tr>
-    `).join('');
+      </tr>`;
+    }).join('');
   }
 
   const invBody = document.querySelector('#inventarioHistoryTable tbody');
   if(invBody){
     if(db.historialInventario.length === 0){
-      invBody.innerHTML = `<tr class="empty-row"><td colspan="6">Todavía no hay registros de inventario.</td></tr>`;
+      invBody.innerHTML = `<tr class="empty-row"><td colspan="7">Todavía no hay registros de inventario.</td></tr>`;
     }else{
-      invBody.innerHTML = db.historialInventario.map(h => `
+      invBody.innerHTML = db.historialInventario.map(h => {
+        const p = getProductoByCodigo(h.codigo);
+        const img = p ? getImage(p.id) : '';
+        const thumb = img
+          ? `<img src="${img}" class="venta-thumb" alt="" loading="lazy" decoding="async">`
+          : `<div class="venta-thumb venta-thumb-empty">🖼️</div>`;
+        return `
         <tr>
+          <td class="venta-img-cell">${thumb}</td>
           <td><strong>${escapeHtml(h.codigo)}</strong></td>
           <td>${escapeHtml(h.nombre)}</td>
           <td>${h.cantidad > 0 ? '+' : ''}${h.cantidad}</td>
           <td>${h.stockResultante}</td>
           <td>${escapeHtml(h.tipo)}</td>
           <td>${fmtHistoryDate(h.fecha)}</td>
-        </tr>
-      `).join('');
+        </tr>`;
+      }).join('');
     }
   }
 
@@ -2400,6 +2440,26 @@ function setCambioBase(v, fechaKey){
   const val = Math.max(0, parseFloat(v) || 0);
   try{ localStorage.setItem(cambioStorageKey(fechaKey), String(val)); }catch(e){}
 }
+
+// "DINERO REAL": monto escrito manualmente para comparar con el efectivo ajustado.
+// Se guarda POR DÍA (igual que CAMBIO) para que al cambiar de día no se pierda.
+function dineroRealStorageKey(fechaKey){
+  const fecha = fechaKey || dateKeyOffset(0);
+  return 'stockferre_dinero_real_v1_' + currentModo + '_' + fecha;
+}
+function getDineroReal(fechaKey){
+  const key = dineroRealStorageKey(fechaKey);
+  try{
+    const v = localStorage.getItem(key);
+    if(v != null) return parseFloat(v);
+  }catch(e){}
+  return NaN;
+}
+function setDineroReal(v, fechaKey){
+  const val = parseFloat(v);
+  if(isNaN(val)) return;
+  try{ localStorage.setItem(dineroRealStorageKey(fechaKey), String(val)); }catch(e){}
+}
 // "Ajuste de cuentas": resume el dinero de las ventas que se están mostrando
 // (por defecto las de hoy) en Total Bs, Efectivo y QR, con el desglose de QR
 // por cada persona que cobra. En los pagos mixtos, cada parte va a su columna.
@@ -2460,6 +2520,11 @@ function renderAjusteCuentas(list){
   // Dinero real vs ajuste de cuentas
   const realInput = document.getElementById('ajusteDineroReal');
   const resultadoEl = document.getElementById('ajusteRealResultado');
+  // Restaura el valor guardado del día (sin pisar lo que se está escribiendo).
+  if(realInput && document.activeElement !== realInput){
+    const guardado = getDineroReal(dia);
+    realInput.value = isNaN(guardado) ? '' : guardado;
+  }
   if(realInput && resultadoEl){
     const realVal = parseFloat(realInput.value);
     if(!isNaN(realVal) && realVal >= 0){
@@ -2713,20 +2778,24 @@ function guestModoTotalesHTML(list){
 // y desglose QR por persona con enlace al historial.
 function openModoDetalle(modo){
   currentModoDetalleOpen = modo;
-  const list = ventasFiltradas().filter(v => v.modoOrigin === modo);
+  const esMan = modo === 'manual';
+  const dotCls = esMan ? 'man' : 'el';
+  const titulo = esMan ? '🛠️ Detalle Manuales' : '⚡ Detalle Eléctricas';
+  const dia = ventaFilterDateKey() || dateKeyOffset(0);
+  document.getElementById('modoDetalleTitle').textContent = titulo;
+  // Solo ventas del INVITADO para este modo en el día seleccionado
+  const ventasInvitado = (db.ventas || []).filter(v => v.modoOrigin === modo && ventaFechaKey(v.fecha) === dia);
+  const totalVentas = ventasInvitado.reduce((s,v)=> s + (parseFloat(v.total)||0), 0);
+  const efectivoVentas = ventasInvitado.reduce((s,v)=> s + efectivoMontoDeVenta(v), 0);
+  const qrVentas = ventasInvitado.reduce((s,v)=> s + qrMontoDeVenta(v), 0);
+  // Gastos ajustados del día para este modo
   const gastosAjustados = dedupeGastosById(gastosPrestamosDelDia()).filter(g => g.modo === modo && g.ajustar);
-  const totalVentas = list.reduce((s,v)=> s + (parseFloat(v.total)||0), 0);
-  const efectivoVentas = list.reduce((s,v)=> s + efectivoMontoDeVenta(v), 0);
-  const qrVentas = list.reduce((s,v)=> s + qrMontoDeVenta(v), 0);
   const gastosEfectivo = gastosAjustados.filter(g=> (g.tipoPago||'efectivo')==='efectivo').reduce((s,g)=> s + (parseFloat(g.bs)||0), 0);
   const gastosQr = gastosAjustados.filter(g=> g.tipoPago==='qr').reduce((s,g)=> s + (parseFloat(g.bs)||0), 0);
   const gastosTotal = gastosAjustados.reduce((s,g)=> s + (parseFloat(g.bs)||0), 0);
   const totalFinal = totalVentas - gastosTotal;
   const efectivoFinal = efectivoVentas - gastosEfectivo;
   const qrFinal = qrVentas - gastosQr;
-  const esMan = modo === 'manual';
-  const titulo = esMan ? '🛠️ Detalle Manuales' : '⚡ Detalle Eléctricas';
-  document.getElementById('modoDetalleTitle').textContent = titulo;
   const grid = document.getElementById('modoDetalleGrid');
   grid.innerHTML = `
     <div class="modo-detalle-card">
@@ -2746,12 +2815,30 @@ function openModoDetalle(modo){
       <div class="modo-detalle-value" style="color:#f87171">−${fmtMoney(gastosTotal)}</div>
     </div>
   `;
-  // Historial de gastos (solo lectura) — muestra TODOS los gastos del modo, no solo ajustados
-  const allGastos = dedupeGastosById(gastosPrestamosDelDia()).filter(g => g.modo === modo);
+  // Tabla de ventas del invitado
   const gastosContainer = document.getElementById('modoDetalleGastos');
   if(gastosContainer){
+    let html = '';
+    if(ventasInvitado.length){
+      html += `<div class="table-wrap"><table class="table"><thead><tr><th>#</th><th>Fecha</th><th>Código</th><th>Producto</th><th>Cant.</th><th>Total</th><th>Pago</th></tr></thead><tbody>`;
+      ventasInvitado.forEach((v, i) => {
+        html += `<tr>
+          <td>${i+1}</td>
+          <td>${fmtHistoryDate(v.fecha)}</td>
+          <td><strong>${escapeHtml(v.codigo)}</strong></td>
+          <td><span class="venta-modo-dot ${dotCls}"></span>${escapeHtml(v.nombre)}</td>
+          <td>${v.cantidad}</td>
+          <td><strong>${fmtMoney(v.total)}</strong></td>
+          <td>${pagoLabel(v)}</td>
+        </tr>`;
+      });
+      html += `</tbody></table></div>`;
+    }
+    // Gastos del modo
+    const allGastos = dedupeGastosById(gastosPrestamosDelDia()).filter(g => g.modo === modo);
     if(allGastos.length){
-      gastosContainer.innerHTML = allGastos.map(g => {
+      html += '<div style="margin-top:14px;"><strong>Gastos/préstamos:</strong></div>';
+      html += allGastos.map(g => {
         const tp = g.tipoPago || 'efectivo';
         const badge = tp === 'qr' ? '<span class="gp-tipo-badge gp-tipo-qr" style="cursor:default">📱 QR</span>' : '<span class="gp-tipo-badge gp-tipo-efectivo" style="cursor:default">💵 Efectivo</span>';
         return `
@@ -2763,12 +2850,118 @@ function openModoDetalle(modo){
         </div>`;
       }).join('');
       const totalG = allGastos.reduce((s,g)=> s + (parseFloat(g.bs)||0), 0);
-      gastosContainer.innerHTML += `<div class="gp-total">Total gastos <strong>${fmtMoney(totalG)}</strong></div>`;
-    }else{
-      gastosContainer.innerHTML = `<p class="hint" style="text-align:center;">No hay gastos/préstamos para ${esMan ? 'Manuales' : 'Eléctricas'}.</p>`;
+      html += `<div class="gp-total">Total gastos <strong>${fmtMoney(totalG)}</strong></div>`;
     }
+    if(!ventasInvitado.length && !allGastos.length){
+      html = `<p class="hint" style="text-align:center;">No hay ventas ni gastos para ${esMan ? 'Manuales' : 'Eléctricas'} en ${dia}.</p>`;
+    }
+    gastosContainer.innerHTML = html;
   }
   openModal('modalModoDetalle');
+}
+
+function exportModoDetallePDF(){
+  if(!currentModoDetalleOpen) return;
+  const modo = currentModoDetalleOpen;
+  const esMan = modo === 'manual';
+  const dia = ventaFilterDateKey() || dateKeyOffset(0);
+  const ventasInvitado = (db.ventas || []).filter(v => v.modoOrigin === modo && ventaFechaKey(v.fecha) === dia);
+  const gastosAjustados = dedupeGastosById(gastosPrestamosDelDia()).filter(g => g.modo === modo && g.ajustar);
+  const allGastos = dedupeGastosById(gastosPrestamosDelDia()).filter(g => g.modo === modo);
+  const totalVentas = ventasInvitado.reduce((s,v)=> s + (parseFloat(v.total)||0), 0);
+  const efectivoVentas = ventasInvitado.reduce((s,v)=> s + efectivoMontoDeVenta(v), 0);
+  const qrVentas = ventasInvitado.reduce((s,v)=> s + qrMontoDeVenta(v), 0);
+  const gastosTotal = gastosAjustados.reduce((s,g)=> s + (parseFloat(g.bs)||0), 0);
+  const totalFinal = totalVentas - gastosTotal;
+  const dotColor = esMan ? '#f26522' : '#f6c000';
+  const dotLabel = esMan ? 'Manuales' : 'Eléctricas';
+  const diaParts = dia.split('-');
+  const diaFmt = diaParts[2] + '/' + diaParts[1] + '/' + diaParts[0];
+
+  let rows = '';
+  ventasInvitado.forEach((v, i) => {
+    rows += `<tr>
+      <td style="padding:4px 6px; border-bottom:1px solid #ddd;">${i+1}</td>
+      <td style="padding:4px 6px; border-bottom:1px solid #ddd;">${fmtHistoryDate(v.fecha)}</td>
+      <td style="padding:4px 6px; border-bottom:1px solid #ddd; font-weight:bold;">${escapeHtml(v.codigo)}</td>
+      <td style="padding:4px 6px; border-bottom:1px solid #ddd;"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${dotColor};margin-right:4px;vertical-align:middle;"></span>${escapeHtml(v.nombre)}</td>
+      <td style="padding:4px 6px; border-bottom:1px solid #ddd; text-align:center;">${v.cantidad}</td>
+      <td style="padding:4px 6px; border-bottom:1px solid #ddd; text-align:right; font-weight:bold;">${fmtMoney(v.total)}</td>
+      <td style="padding:4px 6px; border-bottom:1px solid #ddd;">${pagoLabel(v)}</td>
+    </tr>`;
+  });
+
+  let gastosRows = '';
+  allGastos.forEach(g => {
+    const tp = g.tipoPago === 'qr' ? '📱 QR' : '💵 Efectivo';
+    gastosRows += `<tr>
+      <td style="padding:4px 6px; border-bottom:1px solid #ddd; font-weight:bold;">${fmtMoney(g.bs)}</td>
+      <td style="padding:4px 6px; border-bottom:1px solid #ddd;">${escapeHtml(g.observacion || '-')}</td>
+      <td style="padding:4px 6px; border-bottom:1px solid #ddd;">${tp}</td>
+      <td style="padding:4px 6px; border-bottom:1px solid #ddd;">${g.ajustar ? 'Si' : 'No'}</td>
+    </tr>`;
+  });
+
+  const html = `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Detalle ${dotLabel} - ${dia}</title>
+<style>
+  @page { size: letter portrait; margin: 15mm; }
+  body { font-family: Arial, Helvetica, sans-serif; font-size: 11px; color: #1a1a1a; margin: 0; padding: 15mm; display:flex; flex-direction:column; min-height:100vh; }
+  h1 { font-size: 18px; margin: 0 0 4px 0; color: ${dotColor}; }
+  h2 { font-size: 14px; margin: 18px 0 6px 0; color: #333; border-bottom: 2px solid ${dotColor}; padding-bottom: 3px; }
+  .meta { font-size: 10px; color: #666; margin-bottom: 10px; }
+  table { width: 100%; border-collapse: collapse; margin-top: 6px; }
+  th { background: ${dotColor}; color: #fff; padding: 5px 6px; text-align: left; font-size: 10px; }
+  th:nth-child(5) { text-align: center; }
+  th:nth-child(6) { text-align: right; }
+  .ventas-section { flex: 1; }
+  .resumen-footer { border-top: 2px solid #333; padding-top: 10px; margin-top: auto; }
+  .resumen-grid { display: flex; flex-direction: column; gap: 2px; max-width: 260px; margin-left: auto; }
+  .resumen-item { display: flex; justify-content: space-between; padding: 3px 0; }
+  .resumen-item.total { font-size: 14px; font-weight: bold; border-top: 2px solid #333; padding-top: 5px; margin-top: 3px; }
+  .resumen-label { color: #555; }
+  .resumen-val { font-weight: bold; }
+  .footer { margin-top: 12px; font-size: 9px; color: #999; text-align: center; border-top: 1px solid #ddd; padding-top: 6px; }
+  @media print {
+    body { padding: 0; min-height: auto; }
+    .no-print { display: none; }
+  }
+</style></head><body>
+  <h1>${esMan ? '🛠️ Detalle Manuales' : '⚡ Detalle Eléctricas'}</h1>
+  <div class="meta">Fecha: <strong>${diaFmt}</strong> &nbsp;|&nbsp; Modo: <strong>Invitado</strong></div>
+  <div class="ventas-section">
+  ${ventasInvitado.length ? `
+  <h2>Ventas (${ventasInvitado.length})</h2>
+  <table>
+    <thead><tr><th>#</th><th>Fecha</th><th>Código</th><th>Producto</th><th>Cant.</th><th>Total</th><th>Pago</th></tr></thead>
+    <tbody>${rows}</tbody>
+  </table>` : `<p style="color:#999; text-align:center;">No hay ventas registradas para este día.</p>`}
+  ${allGastos.length ? `
+  <h2>Gastos / Préstamos (${allGastos.length})</h2>
+  <table>
+    <thead><tr><th>Monto</th><th>Observación</th><th>Tipo pago</th><th>Ajustar</th></tr></thead>
+    <tbody>${gastosRows}</tbody>
+  </table>` : ''}
+  </div>
+  <div class="resumen-footer">
+    <div class="resumen-grid">
+      <div class="resumen-item"><span class="resumen-label">Total vendido</span><span class="resumen-val">${fmtMoney(totalVentas)}</span></div>
+      <div class="resumen-item"><span class="resumen-label">💵 Efectivo</span><span class="resumen-val" style="color:#16a34a">${fmtMoney(efectivoVentas)}</span></div>
+      <div class="resumen-item"><span class="resumen-label">📱 QR</span><span class="resumen-val" style="color:#2563eb">${fmtMoney(qrVentas)}</span></div>
+      <div class="resumen-item"><span class="resumen-label">Gastos ajustados</span><span class="resumen-val" style="color:#dc2626">−${fmtMoney(gastosTotal)}</span></div>
+      <div class="resumen-item total"><span class="resumen-label">TOTAL FINAL</span><span class="resumen-val">${fmtMoney(totalFinal)}</span></div>
+    </div>
+    <div class="footer">StockFerre — ${dotLabel} — ${dia}</div>
+  </div>
+  <div class="no-print" style="text-align:center; margin-top:20px;">
+    <button onclick="window.print(); window.close();" style="padding:10px 24px; font-size:14px; background:${dotColor}; color:#fff; border:none; border-radius:6px; cursor:pointer;">🖨️ Imprimir / Guardar como PDF</button>
+  </div>
+</body></html>`;
+
+  const win = window.open('', '_blank');
+  if(!win){ toast('No se pudo abrir la ventana. Permití pop-ups para esta página.', 'error'); return; }
+  win.document.write(html);
+  win.document.close();
 }
 
 // Detecta ventas repetidas: "repetido" = mismo código aparece 2+ veces;
@@ -2794,7 +2987,7 @@ function detectarRepetidosVentas(list){
 function renderVentas(){
   const tbody = document.querySelector('#ventasTable tbody');
   const summary = document.getElementById('ventasSummary');
-  const colspan = currentRole === 'guest' ? 9 : 10;
+  const colspan = currentRole === 'guest' ? 10 : 11;
 
   if(db.ventas.length === 0){
     tbody.innerHTML = `<tr class="empty-row"><td colspan="${colspan}">Todavía no registraste ninguna venta.</td></tr>`;
@@ -2828,10 +3021,16 @@ function renderVentas(){
     const modoDot = currentRole === 'guest' && v.modoOrigin
       ? `<span class="venta-modo-dot ${v.modoOrigin === 'manual' ? 'man' : 'el'}" title="${v.modoOrigin === 'manual' ? 'Manuales' : 'Eléctricas'}"></span>`
       : '';
+    const p = getProductoByCodigo(v.codigo);
+    const img = p ? getImage(p.id) : '';
+    const thumbCell = img
+      ? `<td class="venta-img-cell"><img src="${img}" class="venta-thumb" alt="" loading="lazy" decoding="async"></td>`
+      : `<td class="venta-img-cell"><div class="venta-thumb venta-thumb-empty">🖼️</div></td>`;
     return `
     <tr>
       <td class="venta-num">${idx + 1}</td>
       <td>${fmtHistoryDate(v.fecha)}</td>
+      ${thumbCell}
       <td><strong>${escapeHtml(v.codigo)}</strong></td>
       <td>${modoDot}${escapeHtml(v.nombre)}</td>
       <td>${v.cantidad}</td>
@@ -2918,17 +3117,30 @@ function purgeVentasAntiguas(){
 
 let topVentasMesFilter = '';
 
-// Ventas consideradas para el top: todas, o solo las de un mes ('YYYY-MM').
+// Carga las ventas del modo invitado desde su propio localStorage.
+function loadInvitadoVentas(){
+  if(currentModo === 'invitado') return [];
+  try{
+    const raw = localStorage.getItem('stockferre_catalogo_v1_invitado');
+    if(!raw) return [];
+    const data = JSON.parse(raw);
+    return data.ventas || [];
+  }catch(e){ return []; }
+}
+
+// Ventas consideradas para el top: todas las del modo actual + las del invitado.
 function ventasTopFiltradas(){
-  if(!topVentasMesFilter) return db.ventas || [];
-  return (db.ventas || []).filter(v => (v.fecha || '').slice(0,7) === topVentasMesFilter);
+  const todas = (db.ventas || []).concat(loadInvitadoVentas());
+  if(!topVentasMesFilter) return todas;
+  return todas.filter(v => (v.fecha || '').slice(0,7) === topVentasMesFilter);
 }
 
 // Llena el selector con los meses que tienen ventas + la opción "Todo el año".
 function syncTopVentasMesFilter(){
   const el = document.getElementById('topVentasMes');
   if(!el) return;
-  const meses = [...new Set((db.ventas || []).map(v => (v.fecha || '').slice(0,7)).filter(Boolean))].sort().reverse();
+  const todas = (db.ventas || []).concat(loadInvitadoVentas());
+  const meses = [...new Set(todas.map(v => (v.fecha || '').slice(0,7)).filter(Boolean))].sort().reverse();
   let html = '<option value="">Todo el año</option>';
   meses.forEach(m => {
     const [y, mo] = m.split('-').map(Number);
@@ -2967,7 +3179,7 @@ function renderTopVentas(){
   syncTopVentasMesFilter();
   const rows = productosMasVendidos();
   if(rows.length === 0){
-    tbody.innerHTML = `<tr class="empty-row"><td colspan="5">Todavía no hay productos en el inventario.</td></tr>`;
+    tbody.innerHTML = `<tr class="empty-row"><td colspan="6">Todavía no hay productos en el inventario.</td></tr>`;
     summary.textContent = '0 productos';
     return;
   }
@@ -2975,9 +3187,14 @@ function renderTopVentas(){
     const pos = i + 1;
     const top20 = pos <= 20;
     const bajo = (r.p.stockMin || 0) > 0 && r.p.stock <= r.p.stockMin;
+    const img = getImage(r.p.id);
+    const thumb = img
+      ? `<img src="${img}" class="venta-thumb" alt="" loading="lazy" decoding="async">`
+      : `<div class="venta-thumb venta-thumb-empty">🖼️</div>`;
     return `
     <tr class="${top20 ? 'top-row' : ''}">
       <td>${top20 ? `<span class="top-star" title="Top ${pos} más vendido">⭐ ${pos}</span>` : pos}</td>
+      <td class="venta-img-cell">${thumb}</td>
       <td><strong>${escapeHtml(r.p.nombre)}</strong><br><small class="hint">${escapeHtml(r.p.codigo)}</small></td>
       <td><strong>${r.vendidos}</strong></td>
       <td>${r.p.stock}${bajo ? ' <span class="badge badge-danger-soft">Bajo</span>' : ''}</td>
@@ -2996,6 +3213,46 @@ function exportTopVentasCSV(){
   const sufijo = topVentasMesFilter ? topVentasMesFilter : 'todo_el_ano';
   downloadCSV(`stockferre_mas_vendidos_${sufijo}.csv`, header, data);
   toast('Top de más vendidos exportado', 'success');
+}
+
+// Historial de ventas de un producto específico (del modo actual + invitado).
+function ventasProducto(codigo){
+  const c = normalize(codigo);
+  const todas = (db.ventas || []).concat(loadInvitadoVentas());
+  return todas.filter(v => normalize(v.codigo) === c);
+}
+
+function openHistorialVentaProducto(codigo){
+  const ventas = ventasProducto(codigo);
+  const producto = getProductoByCodigo(codigo);
+  const nombre = producto ? producto.nombre : codigo;
+  const title = document.getElementById('historialVentaProductoTitle');
+  const resumen = document.getElementById('historialVentaProductoResumen');
+  const tbody = document.querySelector('#historialVentaProductoTable tbody');
+  if(!tbody) return;
+  title.textContent = 'Historial de ventas — ' + nombre;
+  const totalUnidades = ventas.reduce((s,v) => s + (parseFloat(v.cantidad) || 0), 0);
+  const totalMonto = ventas.reduce((s,v) => s + (parseFloat(v.total) || 0), 0);
+  resumen.textContent = `${ventas.length} venta(s) · ${totalUnidades} unidades vendidas · Bs ${totalMonto.toFixed(2)}`;
+  if(ventas.length === 0){
+    tbody.innerHTML = '<tr class="empty-row"><td colspan="5">No hay ventas registradas para este producto.</td></tr>';
+  } else {
+    tbody.innerHTML = ventas.map(v => {
+      const fecha = v.fecha || '';
+      const cant = parseFloat(v.cantidad) || 0;
+      const pu = parseFloat(v.precioUnitario) || (cant > 0 ? (parseFloat(v.total) || 0) / cant : 0);
+      const total = parseFloat(v.total) || 0;
+      const metodo = v.metodoPago || '';
+      return `<tr>
+        <td>${escapeHtml(fecha)}</td>
+        <td>${cant}</td>
+        <td>Bs ${pu.toFixed(2)}</td>
+        <td><strong>Bs ${total.toFixed(2)}</strong></td>
+        <td>${escapeHtml(metodo)}</td>
+      </tr>`;
+    }).join('');
+  }
+  openModal('modalHistorialVentaProducto');
 }
 
 // Importa solo la columna STOCK_MINIMO (por CODIGO) de un CSV exportado,
@@ -3097,7 +3354,7 @@ function renderPedidos(){
   pedidoRows = list;
 
   if(list.length === 0){
-    tbody.innerHTML = `<tr class="empty-row"><td colspan="6">No hay productos${marcaSel.value ? ' de esa marca' : ''}.</td></tr>`;
+    tbody.innerHTML = `<tr class="empty-row"><td colspan="7">No hay productos${marcaSel.value ? ' de esa marca' : ''}.</td></tr>`;
     summary.textContent = '0 productos · 0 unidades · Bs 0.00';
     return;
   }
@@ -3105,9 +3362,14 @@ function renderPedidos(){
   tbody.innerHTML = list.map((p, i) => {
     const bajo = (p.stockMin || 0) > 0 && p.stock <= p.stockMin;
     const cant = pedidoCant(p);
+    const img = getImage(p.id);
+    const thumb = img
+      ? `<img src="${img}" class="venta-thumb" alt="" loading="lazy" decoding="async">`
+      : `<div class="venta-thumb venta-thumb-empty">🖼️</div>`;
     return `
     <tr class="${bajo ? 'pedido-bajo' : ''}">
       <td>${i + 1}</td>
+      <td class="venta-img-cell">${thumb}</td>
       <td>${p.marca ? escapeHtml(p.marca) : '-'}</td>
       <td><strong>${escapeHtml(p.nombre)}</strong><br><small class="hint">${escapeHtml(p.codigo)}</small></td>
       <td>${p.stock}${bajo ? ' <span class="badge badge-danger-soft">Bajo</span>' : ''}</td>
@@ -3245,7 +3507,7 @@ function renderCompras(){
   const summary = document.getElementById('comprasSummary');
   if(!tbody || !summary) return;
   syncComprasChips();
-  const colspan = 8;
+  const colspan = 9;
 
   if(db.compras.length === 0){
     tbody.innerHTML = `<tr class="empty-row"><td colspan="${colspan}">Todavía no registraste ningún ingreso. Usa "➕ Nuevo ingreso" para registrar tu primera compra.</td></tr>`;
@@ -3289,8 +3551,15 @@ function renderCompras(){
     return;
   }
 
-  tbody.innerHTML = entries.map(e => `
+  tbody.innerHTML = entries.map(e => {
+    const prod = getProductoByCodigo(e.codigo);
+    const img = prod ? getImage(prod.id) : '';
+    const thumb = img
+      ? `<img src="${img}" class="venta-thumb" alt="" loading="lazy" decoding="async">`
+      : `<div class="venta-thumb venta-thumb-empty">🖼️</div>`;
+    return `
     <tr data-compra-prod="${escapeHtml(e.codigo)}" style="cursor:pointer;" title="Ver historial de ingresos">
+      <td class="venta-img-cell">${thumb}</td>
       <td><strong>${escapeHtml(e.codigo)}</strong></td>
       <td>${escapeHtml(e.nombre)}</td>
       <td>${e.veces}</td>
@@ -3299,8 +3568,8 @@ function renderCompras(){
       <td>${fmtHistoryDate(e.ultimaFecha)}</td>
       <td><strong>${fmtMoney(e.total)}</strong></td>
       <td><button class="btn btn-secondary btn-sm" data-view-compra-history="${escapeHtml(e.codigo)}">📋 Ver historial</button></td>
-    </tr>
-  `).join('');
+    </tr>`;
+  }).join('');
 
   const totalGral = entries.reduce((s,e)=> s + e.total, 0);
   summary.textContent = `${entries.length} producto(s) · ${filtradas.length} ingreso(s) ${comprasFilterLabel()} · ${fmtMoney(totalGral)} invertido`;
@@ -4174,7 +4443,7 @@ function deleteGasto(id){
 function renderInventario(){
   const tbody = document.querySelector('#inventarioTable tbody');
   if(db.productos.length === 0){
-    tbody.innerHTML = `<tr class="empty-row"><td colspan="7">Todavía no hay productos.</td></tr>`;
+    tbody.innerHTML = `<tr class="empty-row"><td colspan="8">Todavía no hay productos.</td></tr>`;
     return;
   }
 
@@ -4198,15 +4467,20 @@ function renderInventario(){
   });
 
   if(list.length === 0){
-    tbody.innerHTML = `<tr class="empty-row"><td colspan="7">No hay productos que coincidan.</td></tr>`;
+    tbody.innerHTML = `<tr class="empty-row"><td colspan="8">No hay productos que coincidan.</td></tr>`;
     return;
   }
 
   tbody.innerHTML = list.map(p => {
     const stock = p.stock || 0;
     const ultima = invUpdates[p.id] ? fmtHistoryDate(invUpdates[p.id]) : '-';
+    const img = getImage(p.id);
+    const thumb = img
+      ? `<img src="${img}" class="venta-thumb" alt="" loading="lazy" decoding="async">`
+      : `<div class="venta-thumb venta-thumb-empty">🖼️</div>`;
     return `
     <tr>
+      <td class="venta-img-cell">${thumb}</td>
       <td><strong>${escapeHtml(p.codigo)}</strong></td>
       <td>${escapeHtml(p.codigoBarras || '-')}</td>
       <td>${escapeHtml(p.nombre)}</td>
@@ -4674,12 +4948,20 @@ function renderVentaSearchResults(){
     container.innerHTML = `<p class="hint" style="margin:0 0 8px;">No se encontró ningún producto. Usa "OTRO" para vender algo que no está en tu inventario.</p>`;
     return;
   }
-  container.innerHTML = list.map(p => `
+  container.innerHTML = list.map(p => {
+    const img = getImage(p.id);
+    const thumb = img
+      ? `<img src="${img}" class="vsi-thumb" alt="" loading="lazy" decoding="async">`
+      : `<div class="vsi-thumb vsi-thumb-empty">🖼️</div>`;
+    return `
     <button type="button" class="venta-search-item" data-venta-select="${p.id}">
-      <span class="vsi-nombre">${escapeHtml(p.nombre)}</span>
-      <span class="vsi-meta">${escapeHtml(p.codigo)} · ${fmtMoney(p.precioVenta)}</span>
-    </button>
-  `).join('');
+      ${thumb}
+      <span class="vsi-info">
+        <span class="vsi-nombre">${escapeHtml(p.nombre)}</span>
+        <span class="vsi-meta">${escapeHtml(p.codigo)} · ${fmtMoney(p.precioVenta)}</span>
+      </span>
+    </button>`;
+  }).join('');
 }
 
 // "Nuevo ingreso" abre la misma ventana de búsqueda que "Nueva venta", con su
@@ -4711,12 +4993,20 @@ function renderCompraSearchResults(){
     container.innerHTML = `<p class="hint" style="margin:0 0 8px;">No se encontró ningún producto. Escanea un código nuevo y el producto se creará al registrar el ingreso.</p>`;
     return;
   }
-  container.innerHTML = list.map(p => `
+  container.innerHTML = list.map(p => {
+    const img = getImage(p.id);
+    const thumb = img
+      ? `<img src="${img}" class="vsi-thumb" alt="" loading="lazy" decoding="async">`
+      : `<div class="vsi-thumb vsi-thumb-empty">🖼️</div>`;
+    return `
     <button type="button" class="venta-search-item" data-compra-select="${p.id}">
-      <span class="vsi-nombre">${escapeHtml(p.nombre)}</span>
-      <span class="vsi-meta">${escapeHtml(p.codigo)} · Compra ${fmtMoney(p.precioCompra)}</span>
-    </button>
-  `).join('');
+      ${thumb}
+      <span class="vsi-info">
+        <span class="vsi-nombre">${escapeHtml(p.nombre)}</span>
+        <span class="vsi-meta">${escapeHtml(p.codigo)} · Compra ${fmtMoney(p.precioCompra)}</span>
+      </span>
+    </button>`;
+  }).join('');
 }
 
 const csvEscapeField = v => {
@@ -4936,6 +5226,104 @@ function exportVentasCSV(){
   toast('Ventas exportadas', 'success');
 }
 
+function exportVentasPDF(){
+  const list = ventasFiltradas();
+  if(!list.length){ toast('No hay ventas para exportar', 'error'); return; }
+  const esMan = currentModo === 'manual';
+  const dotColor = esMan ? '#f26522' : '#f6c000';
+  const dotLabel = esMan ? 'Manuales' : 'Eléctricas';
+  const dia = ventaFilterDateKey() || 'todas';
+  const diaFmt = dia === 'todas' ? 'Todas las fechas' : dia;
+  const totalMonto = list.reduce((s,v)=> s + (parseFloat(v.total)||0), 0);
+  const efectivoTotal = list.reduce((s,v)=> s + efectivoMontoDeVenta(v), 0);
+  const qrTotal = list.reduce((s,v)=> s + qrMontoDeVenta(v), 0);
+  const gastosAjustados = dedupeGastosById(gastosPrestamosDelDia()).filter(g => g.ajustar);
+  const gastosTotal = gastosAjustados.reduce((s,g)=> s + (parseFloat(g.bs)||0), 0);
+  const totalFinal = totalMonto - gastosTotal;
+  const allGastos = dedupeGastosById(gastosPrestamosDelDia());
+
+  let rows = '';
+  list.forEach((v, i) => {
+    rows += `<tr>
+      <td style="padding:4px 6px; border-bottom:1px solid #ddd;">${i+1}</td>
+      <td style="padding:4px 6px; border-bottom:1px solid #ddd;">${fmtHistoryDate(v.fecha)}</td>
+      <td style="padding:4px 6px; border-bottom:1px solid #ddd; font-weight:bold;">${escapeHtml(v.codigo)}</td>
+      <td style="padding:4px 6px; border-bottom:1px solid #ddd;">${escapeHtml(v.nombre)}</td>
+      <td style="padding:4px 6px; border-bottom:1px solid #ddd; text-align:center;">${v.cantidad}</td>
+      <td style="padding:4px 6px; border-bottom:1px solid #ddd; text-align:right;">${fmtMoney(v.precioUnitario)}</td>
+      <td style="padding:4px 6px; border-bottom:1px solid #ddd; text-align:right; font-weight:bold;">${fmtMoney(v.total)}</td>
+      <td style="padding:4px 6px; border-bottom:1px solid #ddd;">${pagoLabel(v)}</td>
+    </tr>`;
+  });
+
+  let gastosRows = '';
+  allGastos.forEach(g => {
+    const tp = g.tipoPago === 'qr' ? '📱 QR' : '💵 Efectivo';
+    gastosRows += `<tr>
+      <td style="padding:4px 6px; border-bottom:1px solid #ddd; font-weight:bold;">${fmtMoney(g.bs)}</td>
+      <td style="padding:4px 6px; border-bottom:1px solid #ddd;">${escapeHtml(g.observacion || '-')}</td>
+      <td style="padding:4px 6px; border-bottom:1px solid #ddd;">${tp}</td>
+      <td style="padding:4px 6px; border-bottom:1px solid #ddd;">${g.ajustar ? 'Si' : 'No'}</td>
+    </tr>`;
+  });
+
+  const html = `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Ventas ${dotLabel} - ${diaFmt}</title>
+<style>
+  @page { size: letter portrait; margin: 15mm; }
+  body { font-family: Arial, Helvetica, sans-serif; font-size: 11px; color: #1a1a1a; margin: 0; padding: 15mm; display:flex; flex-direction:column; min-height:100vh; }
+  h1 { font-size: 18px; margin: 0 0 4px 0; color: ${dotColor}; }
+  h2 { font-size: 14px; margin: 18px 0 6px 0; color: #333; border-bottom: 2px solid ${dotColor}; padding-bottom: 3px; }
+  .meta { font-size: 10px; color: #666; margin-bottom: 10px; }
+  table { width: 100%; border-collapse: collapse; margin-top: 6px; }
+  th { background: ${dotColor}; color: #fff; padding: 5px 6px; text-align: left; font-size: 10px; }
+  th:nth-child(5) { text-align: center; }
+  th:nth-child(6), th:nth-child(7) { text-align: right; }
+  .ventas-section { flex: 1; }
+  .resumen-footer { border-top: 2px solid #333; padding-top: 10px; margin-top: auto; }
+  .resumen-grid { display: flex; flex-direction: column; gap: 2px; max-width: 260px; margin-left: auto; }
+  .resumen-item { display: flex; justify-content: space-between; padding: 3px 0; }
+  .resumen-item.total { font-size: 14px; font-weight: bold; border-top: 2px solid #333; padding-top: 5px; margin-top: 3px; }
+  .resumen-label { color: #555; }
+  .resumen-val { font-weight: bold; }
+  .footer { margin-top: 12px; font-size: 9px; color: #999; text-align: center; border-top: 1px solid #ddd; padding-top: 6px; }
+  @media print { body { padding: 0; min-height: auto; } .no-print { display: none; } }
+</style></head><body>
+  <h1>${esMan ? '🛠️ Ventas Manuales' : '⚡ Ventas Eléctricas'}</h1>
+  <div class="meta">Fecha: <strong>${diaFmt}</strong> &nbsp;|&nbsp; Total: <strong>${list.length} venta(s)</strong></div>
+  <div class="ventas-section">
+  <table>
+    <thead><tr><th>#</th><th>Fecha</th><th>Código</th><th>Producto</th><th>Cant.</th><th>Precio</th><th>Total</th><th>Pago</th></tr></thead>
+    <tbody>${rows}</tbody>
+  </table>
+  ${allGastos.length ? `
+  <h2>Gastos / Préstamos (${allGastos.length})</h2>
+  <table>
+    <thead><tr><th>Monto</th><th>Observación</th><th>Tipo pago</th><th>Ajustar</th></tr></thead>
+    <tbody>${gastosRows}</tbody>
+  </table>` : ''}
+  </div>
+  <div class="resumen-footer">
+    <div class="resumen-grid">
+      <div class="resumen-item"><span class="resumen-label">Total vendido</span><span class="resumen-val">${fmtMoney(totalMonto)}</span></div>
+      <div class="resumen-item"><span class="resumen-label">💵 Efectivo</span><span class="resumen-val" style="color:#16a34a">${fmtMoney(efectivoTotal)}</span></div>
+      <div class="resumen-item"><span class="resumen-label">📱 QR</span><span class="resumen-val" style="color:#2563eb">${fmtMoney(qrTotal)}</span></div>
+      <div class="resumen-item"><span class="resumen-label">Gastos ajustados</span><span class="resumen-val" style="color:#dc2626">−${fmtMoney(gastosTotal)}</span></div>
+      <div class="resumen-item total"><span class="resumen-label">TOTAL FINAL</span><span class="resumen-val">${fmtMoney(totalFinal)}</span></div>
+    </div>
+    <div class="footer">StockFerre — ${dotLabel} — ${diaFmt}</div>
+  </div>
+  <div class="no-print" style="text-align:center; margin-top:20px;">
+    <button onclick="window.print(); window.close();" style="padding:10px 24px; font-size:14px; background:${dotColor}; color:#fff; border:none; border-radius:6px; cursor:pointer;">🖨️ Imprimir / Guardar como PDF</button>
+  </div>
+</body></html>`;
+
+  const win = window.open('', '_blank');
+  if(!win){ toast('No se pudo abrir la ventana. Permití pop-ups para esta página.', 'error'); return; }
+  win.document.write(html);
+  win.document.close();
+}
+
 // Importa ventas desde un CSV (por ejemplo, un backup exportado antes). Se
 // agregan como nuevos registros al historial de ventas; NO vuelve a
 // descontar del stock (para evitar descontarlo dos veces si esas ventas ya
@@ -5081,17 +5469,15 @@ function renderProductos(){
       const countImg = getImageCount(p.id);
       const thumb = img
         ? (idx < IMG_LAZY_FIRST
-            ? `<img src="${img}" class="prod-thumb" alt="" data-img-product="${p.id}" decoding="async">`
+            ? `<img src="${img}" class="prod-thumb" alt="" data-img-product="${p.id}" decoding="async" loading="lazy">`
             : `<div class="prod-thumb-lazy" data-lazy-img="${p.id}"><div class="prod-thumb prod-thumb-empty">🖼️</div></div>`)
-        : `<div class="prod-thumb prod-thumb-empty">🖼️</div>`;
+        : `<div class="prod-thumb prod-thumb-empty" data-img-product="${p.id}">🖼️</div>`;
       return `
       <tr data-product-id="${p.id}">
         <td class="prod-img-cell">
           <div class="prod-img-wrap">
             ${thumb}
             ${countImg > 1 ? `<span class="prod-img-count" data-img-product="${p.id}">${countImg}</span>` : ''}
-            ${currentRole === 'guest' ? '' : `<button class="btn btn-sm btn-secondary prod-img-btn" data-img-product="${p.id}">Añadir foto</button>`}
-            ${currentRole === 'guest' || countImg >= MAX_IMGS ? '' : `<button class="btn btn-sm btn-primary prod-img-btn prod-img-btn-autofill" data-auto-img="${p.id}" title="Buscar imagen en la web">🖼️ Autollenar</button>`}
           </div>
         </td>
         <td><strong>${escapeHtml(p.codigo)}</strong></td>
@@ -5137,19 +5523,54 @@ function renderCategorias(){
 
   grid.innerHTML = cats.map(c => {
     const count = db.productos.filter(p => normalize(p.categoria) === normalize(c)).length;
+    const catProd = db.productos.find(p => normalize(p.categoria) === normalize(c));
+    const img = catProd ? getImage(catProd.id) : '';
+    const thumb = img
+      ? `<img src="${img}" class="cat-thumb" alt="" loading="lazy" decoding="async">`
+      : `<div class="cat-thumb cat-thumb-empty">📂</div>`;
     return `
-      <button class="stat-card" style="text-align:left; cursor:pointer; border:none;" data-filter-category="${escapeHtml(c)}">
-        <div class="stat-label">${escapeHtml(c)}</div>
-        <div class="stat-value">${count}</div>
-      </button>`;
+      <div class="stat-card cat-card" style="text-align:left; border:none; position:relative;">
+        <button class="btn-icon cat-del-btn" title="Eliminar categoría" data-delete-category="${escapeHtml(c)}">🗑️</button>
+        <div data-filter-category="${escapeHtml(c)}" style="cursor:pointer;">
+          ${thumb}
+          <div class="stat-label">${escapeHtml(c)}</div>
+          <div class="stat-value">${count}</div>
+        </div>
+      </div>`;
   }).join('');
 
-  grid.querySelectorAll('[data-filter-category]').forEach(btn=>{
-    btn.addEventListener('click', ()=>{
-      const cat = btn.dataset.filterCategory;
+  grid.querySelectorAll('[data-filter-category]').forEach(el=>{
+    el.addEventListener('click', ()=>{
+      const cat = el.dataset.filterCategory;
       showView('productos');
       document.getElementById('prodFilterCategoria').value = cat;
       renderProductos();
+    });
+  });
+
+  grid.querySelectorAll('[data-delete-category]').forEach(btn=>{
+    btn.addEventListener('click', (e)=>{
+      e.stopPropagation();
+      const cat = btn.dataset.deleteCategory;
+      const count = db.productos.filter(p => normalize(p.categoria) === normalize(cat)).length;
+      confirmDialog(
+        'Eliminar categoría',
+        `¿Eliminar la categoría "${cat}"?\n\nSe quitará de ${count} producto(s). Los productos no se borran, solo quedan sin categoría.`,
+        ()=>{
+          db.categorias = db.categorias.filter(c => normalize(c) !== normalize(cat));
+          db.productos.forEach(p => {
+            if(normalize(p.categoria) === normalize(cat)){
+              p.categoria = '';
+              touchProducto(p);
+            }
+          });
+          saveDB();
+          syncProductoDocs(db.productos, currentModo);
+          renderCategorias();
+          renderProductos();
+          toast('Categoría "' + cat + '" eliminada', 'success');
+        }
+      );
     });
   });
 }
@@ -5579,7 +6000,7 @@ async function fetchAndSaveImage(productId, url){
 
 // Autollenar todos: recorre los productos sin imagen y les busca una foto.
 async function autoFillAllProducts(){
-  const sinFoto = db.productos.filter(p => getImages(p.id).length < MAX_IMGS);
+  const sinFoto = db.productos.filter(p => getImages(p.id).length === 0);
   if(!sinFoto.length){ toast('Todos los productos ya tienen foto', 'info'); return; }
 
   // Verificar servidor local antes de empezar
@@ -7199,11 +7620,22 @@ function setupEventListeners(){
     renderAjusteCuentas(ventasFiltradas());
   });
 
-  // "Dinero real" en Ajuste de cuentas: al escribir, compara con el efectivo ajustado
+  // "Dinero real" en Ajuste de cuentas: al escribir, compara con el efectivo ajustado.
+  // Se guarda POR DÍA para que no se pierda al cambiar de fecha.
   const realInput = document.getElementById('ajusteDineroReal');
   if(realInput){
     realInput.addEventListener('input', ()=>{
       renderAjusteCuentas(ventasFiltradas());
+    });
+    realInput.addEventListener('change', ()=>{
+      const val = parseFloat(realInput.value);
+      const fecha = ventaFilterDateKey() || dateKeyOffset(0);
+      if(!isNaN(val)){
+        setDineroReal(val, fecha);
+      } else {
+        // Si borran el campo, eliminar el guardado para ese día
+        try{ localStorage.removeItem(dineroRealStorageKey(fecha)); }catch(e){}
+      }
     });
   }
 
@@ -7314,6 +7746,42 @@ function setupEventListeners(){
   });
   document.getElementById('modalBackdrop').addEventListener('click', closeAllModals);
 
+  // Lightbox: cerrar con clic en fondo, botón o tecla Escape
+  document.getElementById('imgLightbox').addEventListener('click', (e)=>{
+    if(e.target === e.currentTarget || e.target.id === 'imgLightboxClose' || e.target.closest('.img-lightbox-close')){
+      closeImageLightbox();
+    }
+  });
+  document.addEventListener('keydown', (e)=>{
+    if(e.key === 'Escape') closeImageLightbox();
+  });
+
+  // Lightbox global: clic en cualquier .venta-thumb o .cat-thumb con <img> abre el lightbox
+  document.addEventListener('click', (e)=>{
+    const thumb = e.target.closest('.venta-thumb, .cat-thumb');
+    if(thumb && thumb.tagName === 'IMG'){
+      openImageLightbox(thumb.src);
+    }
+  });
+
+  // Thumbnails del buscador de nueva venta: clic abre lightbox (no selecciona)
+  document.getElementById('ventaSearchResults').addEventListener('click', (e)=>{
+    const thumb = e.target.closest('.vsi-thumb');
+    if(thumb && thumb.tagName === 'IMG'){
+      e.stopImmediatePropagation();
+      openImageLightbox(thumb.src);
+    }
+  });
+
+  // Thumbnails del buscador de nueva compra: clic abre lightbox (no selecciona)
+  document.getElementById('compraSearchResults').addEventListener('click', (e)=>{
+    const thumb = e.target.closest('.vsi-thumb');
+    if(thumb && thumb.tagName === 'IMG'){
+      e.stopImmediatePropagation();
+      openImageLightbox(thumb.src);
+    }
+  });
+
   // Confirm modal
   document.getElementById('confirmAcceptBtn').addEventListener('click', ()=>{
     if(confirmCallback) confirmCallback();
@@ -7343,7 +7811,11 @@ function setupEventListeners(){
   document.getElementById('btnNewProduct').addEventListener('click', ()=> openProductModal());
   document.getElementById('btnExportProducts').addEventListener('click', exportProductosExcel);
   document.getElementById('formProducto').addEventListener('submit', handleProductSubmit);
-  document.getElementById('prodSearch').addEventListener('input', renderProductos);
+  let _prodSearchTimer = null;
+  document.getElementById('prodSearch').addEventListener('input', ()=>{
+    clearTimeout(_prodSearchTimer);
+    _prodSearchTimer = setTimeout(renderProductos, isMobile() ? 250 : 120);
+  });
   document.getElementById('prodSearch').addEventListener('change', (e)=>{
     logSearchHistory(e.target.value);
   });
@@ -7438,6 +7910,7 @@ function setupEventListeners(){
   });
   document.getElementById('btnCloseVentaScan').addEventListener('click', closeVentaScan);
   document.getElementById('btnExportVentas').addEventListener('click', exportVentasCSV);
+  document.getElementById('btnExportVentasPDF').addEventListener('click', exportVentasPDF);
   document.getElementById('btnImportVentas').addEventListener('click', ()=> document.getElementById('fileImportVentas').click());
   document.getElementById('fileImportVentas').addEventListener('change', (e)=>{
     if(e.target.files[0]) importVentasCSV(e.target.files[0]);
@@ -7462,13 +7935,22 @@ function setupEventListeners(){
     closeAllModals();
   });
   document.getElementById('ventasDates').addEventListener('click', (e)=>{
-    const chip = e.target.closest('.venta-date-chip');
+    const chip = e.target.closest('.venta-date-chip[data-venta-date]');
     if(!chip) return;
     ventaDateFilter = chip.dataset.ventaDate;
+    document.getElementById('ventaDateInput').value = '';
+    document.getElementById('ventaDateBtn').textContent = '📅 Calendario';
     renderVentas();
   });
   document.getElementById('ventaDateInput').addEventListener('change', (e)=>{
     ventaDateFilter = e.target.value || 'todas';
+    const btn = document.getElementById('ventaDateBtn');
+    if(e.target.value){
+      const d = new Date(e.target.value + 'T12:00:00');
+      btn.textContent = '📅 ' + d.toLocaleDateString('es-VE', {day:'2-digit', month:'short', year:'numeric'});
+    }else{
+      btn.textContent = '📅 Calendario';
+    }
     renderVentas();
   });
   document.getElementById('ventaSearch').addEventListener('input', ()=> renderVentas());
@@ -7476,6 +7958,7 @@ function setupEventListeners(){
     const modoBtn = e.target.closest('[data-modo-detalle]');
     if(modoBtn){ openModoDetalle(modoBtn.dataset.modoDetalle); return; }
   });
+  document.getElementById('btnExportModoDetallePDF').addEventListener('click', exportModoDetallePDF);
   document.getElementById('ajusteQrDetalle').addEventListener('click', (e)=>{
     const chip = e.target.closest('[data-qr-persona]');
     if(!chip) return;
@@ -7522,7 +8005,11 @@ function setupEventListeners(){
       maybeShowExportReminder();
     }
   });
-  document.getElementById('ventaSearchInput').addEventListener('input', renderVentaSearchResults);
+  let _ventaSearchTimer = null;
+  document.getElementById('ventaSearchInput').addEventListener('input', ()=>{
+    clearTimeout(_ventaSearchTimer);
+    _ventaSearchTimer = setTimeout(renderVentaSearchResults, isMobile() ? 250 : 120);
+  });
   document.getElementById('ventaSearchResults').addEventListener('click', (e)=>{
     const id = e.target.closest('[data-venta-select]')?.dataset.ventaSelect;
     if(!id) return;
@@ -7607,7 +8094,11 @@ function setupEventListeners(){
     closeAllModals();
     openCompraScan();
   });
-  document.getElementById('compraSearchInput').addEventListener('input', renderCompraSearchResults);
+  let _compraSearchTimer = null;
+  document.getElementById('compraSearchInput').addEventListener('input', ()=>{
+    clearTimeout(_compraSearchTimer);
+    _compraSearchTimer = setTimeout(renderCompraSearchResults, isMobile() ? 250 : 120);
+  });
   document.getElementById('compraSearchResults').addEventListener('click', (e)=>{
     const id = e.target.closest('[data-compra-select]')?.dataset.compraSelect;
     if(!id) return;
@@ -7629,13 +8120,22 @@ function setupEventListeners(){
   });
   document.getElementById('btnVaciarCompras').addEventListener('click', vaciarHistorialCompras);
   document.getElementById('comprasDates').addEventListener('click', (e)=>{
-    const chip = e.target.closest('.compra-date-chip');
+    const chip = e.target.closest('.compra-date-chip[data-compra-date]');
     if(!chip) return;
     compraDateFilter = chip.dataset.compraDate;
+    document.getElementById('compraDateInput').value = '';
+    document.getElementById('compraDateBtn').textContent = '📅 Calendario';
     renderCompras();
   });
   document.getElementById('compraDateInput').addEventListener('change', (e)=>{
     compraDateFilter = e.target.value || 'todas';
+    const btn = document.getElementById('compraDateBtn');
+    if(e.target.value){
+      const d = new Date(e.target.value + 'T12:00:00');
+      btn.textContent = '📅 ' + d.toLocaleDateString('es-VE', {day:'2-digit', month:'short', year:'numeric'});
+    }else{
+      btn.textContent = '📅 Calendario';
+    }
     renderCompras();
   });
   document.getElementById('compraSearch').addEventListener('input', (e)=>{
@@ -7667,6 +8167,7 @@ function setupEventListeners(){
   });
   // Lista de productos en la pestaña Ingresos: al hacer clic se abre el historial.
   document.querySelector('#comprasTable tbody').addEventListener('click', (e)=>{
+    if(e.target.closest('.venta-thumb')) return;
     const cod = e.target.closest('[data-view-compra-history]')?.dataset.viewCompraHistory;
     const row = e.target.closest('tr[data-compra-prod]');
     if(cod) openCompraHistorial(cod);
@@ -7768,6 +8269,13 @@ function setupEventListeners(){
     renderTopVentas();
     renderProductos();
     toast('Stock mínimo actualizado', 'success');
+  });
+  document.querySelector('#topVentasTable tbody').addEventListener('click', (e)=>{
+    if(e.target.closest('.venta-thumb') || e.target.closest('.stock-min-input')) return;
+    const row = e.target.closest('tr');
+    if(!row) return;
+    const codigo = row.querySelector('.hint')?.textContent?.trim();
+    if(codigo) openHistorialVentaProducto(codigo);
   });
 
   // Pedidos (reposición por stock / marca)

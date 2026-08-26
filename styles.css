@@ -192,21 +192,35 @@ body.modo-invitado .sidebar-logos{display:flex;}
 /* ---- Miniatura de imagen de producto (columna Imagen) ---- */
 .prod-img-cell{min-width:120px;}
 .prod-img-wrap{display:flex; flex-direction:column; align-items:flex-start; gap:6px; position:relative;}
-.prod-thumb{width:52px; height:52px; object-fit:cover; border-radius:8px; cursor:pointer; border:1px solid var(--border); box-shadow:var(--shadow); display:block;}
-.prod-thumb-empty{display:flex; align-items:center; justify-content:center; background:var(--bg); font-size:20px; color:var(--text-muted); cursor:default;}
-.prod-thumb-lazy{width:52px; height:52px; border-radius:8px; overflow:hidden;}
+.prod-thumb{width:72px; height:72px; object-fit:cover; border-radius:8px; cursor:pointer; border:1px solid var(--border); box-shadow:var(--shadow); display:block; transition:transform .15s;}
+.prod-thumb:hover{transform:scale(1.08);}
+.prod-thumb-empty{display:flex; align-items:center; justify-content:center; background:var(--bg); font-size:20px; color:var(--text-muted); cursor:pointer; width:72px; height:72px; border-radius:8px; border:1px solid var(--border); transition:background .15s;}
+.prod-thumb-empty:hover{background:var(--border);}
+.prod-thumb-lazy{width:72px; height:72px; border-radius:8px; overflow:hidden;}
 .ajuste-qr-detalle{display:flex; flex-wrap:wrap; gap:8px; margin-top:12px;}
 .ajuste-qr-chip{display:inline-flex; align-items:center; gap:4px; background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:4px 10px; font-size:13px; color:var(--text); font-family:inherit; cursor:pointer; transition:all .15s ease;}
 .ajuste-qr-chip:hover{border-color:var(--primary); color:var(--primary);}
 .ajuste-qr-chip.active{background:var(--primary); border-color:var(--primary); color:#fff;}
 .venta-num{color:var(--text-muted); font-size:12px;}
-.prod-img-btn{width:100%;}
-.prod-img-btn-autofill{font-size:11px; padding:3px 6px; margin-top:2px;}
+
 .prod-img-count{
   position:absolute; top:-6px; left:-6px; min-width:18px; height:18px; padding:0 5px;
   display:flex; align-items:center; justify-content:center;
   background:var(--primary); color:#fff; font-size:11px; font-weight:700;
   border-radius:9px; cursor:pointer; border:2px solid var(--bg);
+}
+
+#productsTable tbody tr,
+#ventasTable tbody tr,
+#topVentasTable tbody tr,
+#pedidosTable tbody tr,
+#comprasTable tbody tr,
+#inventarioTable tbody tr,
+#scanHistoryTable tbody tr,
+#inventarioHistoryTable tbody tr{
+  content-visibility: auto;
+  contain-intrinsic-size: auto 44px;
+  contain: layout style;
 }
 
 /* ---- Carrusel de fotos (modal de imagen y de detalles) ---- */
@@ -369,13 +383,33 @@ body.modo-invitado .sidebar-logos{display:flex;}
 /* ---------- NUEVA VENTA: lista de búsqueda ---------- */
 .venta-search-list{display:flex; flex-direction:column; gap:6px; max-height:340px; overflow-y:auto;}
 .venta-search-item{
-  display:flex; align-items:center; justify-content:space-between; gap:10px;
+  display:flex; align-items:center; gap:10px;
   width:100%; text-align:left; background:var(--bg); border:1px solid var(--border);
-  border-radius:8px; padding:10px 12px; cursor:pointer; font-size:13.5px; color:var(--text);
+  border-radius:8px; padding:8px 12px; cursor:pointer; font-size:13.5px; color:var(--text);
 }
 .venta-search-item:hover{background:var(--primary-light); border-color:var(--primary);}
-.venta-search-item .vsi-nombre{font-weight:600;}
+.vsi-thumb{width:40px; height:40px; min-width:40px; object-fit:cover; border-radius:6px; border:1px solid var(--border);}
+.vsi-thumb-empty{display:flex; align-items:center; justify-content:center; background:var(--bg); font-size:16px; color:var(--text-muted);}
+.vsi-info{display:flex; flex-direction:column; gap:1px; min-width:0;}
+.venta-search-item .vsi-nombre{font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
 .venta-search-item .vsi-meta{color:var(--text-muted); font-size:12px; white-space:nowrap;}
+
+.venta-img-cell{width:40px; padding:4px 6px !important;}
+.venta-thumb{width:36px; height:36px; object-fit:cover; border-radius:6px; border:1px solid var(--border); display:block;}
+.venta-thumb-empty{display:flex; align-items:center; justify-content:center; background:var(--bg); font-size:14px; color:var(--text-muted);}
+
+/* ---------- LIGHTBOX DE IMAGEN ---------- */
+.img-lightbox{position:fixed; inset:0; z-index:9999; display:none; align-items:center; justify-content:center; background:rgba(0,0,0,.85); cursor:zoom-out; animation:lbFadeIn .2s;}
+.img-lightbox.open{display:flex;}
+.img-lightbox img{max-width:92vw; max-height:88vh; border-radius:10px; box-shadow:0 8px 40px rgba(0,0,0,.6); object-fit:contain; cursor:default;}
+.cat-thumb{width:44px; height:44px; min-width:44px; object-fit:cover; border-radius:8px; border:1px solid var(--border); display:block; margin-bottom:4px;}
+.cat-thumb-empty{display:flex; align-items:center; justify-content:center; background:var(--bg); font-size:20px; color:var(--text-muted);}
+.cat-card{position:relative; padding-right:32px !important;}
+.cat-del-btn{position:absolute; top:6px; right:6px; font-size:14px; opacity:.4; transition:opacity .15s; z-index:1;}
+.cat-del-btn:hover{opacity:1;}
+.img-lightbox-close{position:absolute; top:16px; right:20px; font-size:28px; color:#fff; background:rgba(0,0,0,.5); border:none; border-radius:50%; width:40px; height:40px; cursor:pointer; display:flex; align-items:center; justify-content:center; transition:background .15s;}
+.img-lightbox-close:hover{background:rgba(255,255,255,.25);}
+@keyframes lbFadeIn{from{opacity:0;} to{opacity:1;}}
 
 /* ---------- STOCK NEGATIVO ---------- */
 .stock-negative{color:var(--danger);}
@@ -407,6 +441,8 @@ body.role-guest .admin-only{display:none !important;}
 /* Productos más vendidos */
 .top-row td{background:rgba(255,215,0,0.08);}
 .top-star{color:#d4a017; font-weight:700; white-space:nowrap;}
+#topVentasTable tbody tr:not(.empty-row){cursor:pointer;}
+#topVentasTable tbody tr:not(.empty-row):hover td{background:rgba(37,99,235,0.08);}
 .stock-min-input{width:90px; padding:4px 8px; font-size:13px;}
 
 /* Pedidos / reposición */
@@ -634,7 +670,7 @@ body.modo-invitado .sidebar-footer small{color:#86efac;}
 .compra-date-chip:hover{border-color:var(--primary); color:var(--primary);}
 .venta-date-chip.active,
 .compra-date-chip.active{background:var(--primary); border-color:var(--primary); color:#fff;}
-.venta-date-picker{width:auto; padding:6px 10px;}
+.venta-date-picker{position:absolute; width:1px; height:1px; opacity:0; pointer-events:none;}
 .export-reminder{
   display:flex; flex-wrap:wrap; align-items:center; gap:10px;
   background:var(--warning-light); border:1px solid var(--warning);

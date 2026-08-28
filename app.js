@@ -81,7 +81,8 @@ function defaultDB(){
     compras: [],
     gastos: [],
     gastosPrestamos: [],
-    finanzas: { caja: 0, retiros: [], deudas: [] }
+    finanzas: { caja: 0, retiros: [], deudas: [] },
+    ajustes: {}
   };
 }
 
@@ -103,6 +104,7 @@ function normalizeDB(obj){
   obj.finanzas.caja = typeof obj.finanzas.caja === 'number' ? obj.finanzas.caja : 0;
   obj.finanzas.retiros = obj.finanzas.retiros || [];
   obj.finanzas.deudas = obj.finanzas.deudas || [];
+  obj.ajustes = obj.ajustes || {};
   obj.productos.forEach(p=>{
     p.codigoBarras = p.codigoBarras || '';
     p.stock = typeof p.stock === 'number' ? p.stock : 0;
@@ -343,6 +345,12 @@ function mergeRemoteIntoLocal(local, remote){
     producto: Math.max((local.contador||{}).producto || 1, (remote.contador||{}).producto || 1),
     venta: Math.max((local.contador||{}).venta || 1, (remote.contador||{}).venta || 1)
   };
+  // Ajustes de cuenta (cambio y dinero real por día): se toman las entradas
+  // del remoto y se completan con las locales que el remoto no conozca.
+  merged.ajustes = Object.assign({},
+    (local.ajustes || {}),
+    (remote.ajustes || {})
+  );
   return normalizeDB(merged);
 }
 
@@ -2426,6 +2434,13 @@ function cambioStorageKey(fechaKey){
   return 'stockferre_cambio_v1_' + currentModo + '_' + fecha;
 }
 function getCambioBase(fechaKey){
+  const fecha = fechaKey || dateKeyOffset(0);
+  // Prioridad: db.ajustes (sincronizado con Firebase)
+  if(db.ajustes && db.ajustes[fecha]){
+    const v = db.ajustes[fecha].cambio;
+    if(v != null) return parseFloat(v) || 0;
+  }
+  // Retrocompatibilidad: localStorage local
   const key = cambioStorageKey(fechaKey);
   try{
     const v = localStorage.getItem(key);
@@ -2438,7 +2453,13 @@ function getCambioBase(fechaKey){
 }
 function setCambioBase(v, fechaKey){
   const val = Math.max(0, parseFloat(v) || 0);
+  const fecha = fechaKey || dateKeyOffset(0);
   try{ localStorage.setItem(cambioStorageKey(fechaKey), String(val)); }catch(e){}
+  if(db.ajustes){
+    if(!db.ajustes[fecha]) db.ajustes[fecha] = {};
+    db.ajustes[fecha].cambio = val;
+    saveDB();
+  }
 }
 
 // "DINERO REAL": monto escrito manualmente para comparar con el efectivo ajustado.
@@ -2448,6 +2469,12 @@ function dineroRealStorageKey(fechaKey){
   return 'stockferre_dinero_real_v1_' + currentModo + '_' + fecha;
 }
 function getDineroReal(fechaKey){
+  const fecha = fechaKey || dateKeyOffset(0);
+  // Prioridad: db.ajustes (sincronizado con Firebase)
+  if(db.ajustes && db.ajustes[fecha]){
+    const v = db.ajustes[fecha].dineroReal;
+    if(v != null) return parseFloat(v);
+  }
   const key = dineroRealStorageKey(fechaKey);
   try{
     const v = localStorage.getItem(key);
@@ -2458,7 +2485,21 @@ function getDineroReal(fechaKey){
 function setDineroReal(v, fechaKey){
   const val = parseFloat(v);
   if(isNaN(val)) return;
+  const fecha = fechaKey || dateKeyOffset(0);
   try{ localStorage.setItem(dineroRealStorageKey(fechaKey), String(val)); }catch(e){}
+  if(db.ajustes){
+    if(!db.ajustes[fecha]) db.ajustes[fecha] = {};
+    db.ajustes[fecha].dineroReal = val;
+    saveDB();
+  }
+}
+function clearDineroReal(fechaKey){
+  const fecha = fechaKey || dateKeyOffset(0);
+  try{ localStorage.removeItem(dineroRealStorageKey(fecha)); }catch(e){}
+  if(db.ajustes && db.ajustes[fecha]){
+    delete db.ajustes[fecha].dineroReal;
+    saveDB();
+  }
 }
 // "Ajuste de cuentas": resume el dinero de las ventas que se están mostrando
 // (por defecto las de hoy) en Total Bs, Efectivo y QR, con el desglose de QR
@@ -5018,6 +5059,324 @@ const csvEscapeField = v => {
   return /[",\n]/.test(v) ? '"' + v.replace(/"/g,'""') + '"' : v;
 };
 
+/* -------------------------------------------------------------------------
+   OCR DE FACTURAS: toma foto → Tesseract.js → parseo → vista previa
+   ------------------------------------------------------------------------- */
+let ocrParsedItems = [];
+
+function openFacturaOCRModal(){
+  ocrParsedItems = [];
+  document.getElementById('ocrStep1').style.display = '';
+  document.getElementById('ocrStep2').style.display = 'none';
+  document.getElementById('ocrPreview').style.display = 'none';
+  document.getElementById('ocrProgress').style.display = 'none';
+  document.getElementById('btnOCRProcesar').style.display = 'none';
+  document.getElementById('fileFacturaOCR').value = '';
+  document.getElementById('fileFacturaOCRGal').value = '';
+  document.getElementById('fileFacturaPDF').value = '';
+  openModal('modalFacturaOCR');
+}
+
+function ocrPreviewImage(file){
+  return new Promise((resolve)=>{
+    const reader = new FileReader();
+    reader.onload = (e)=>{
+      document.getElementById('ocrPreviewImg').src = e.target.result;
+      document.getElementById('ocrPreview').style.display = '';
+      document.getElementById('btnOCRProcesar').style.display = '';
+      resolve(e.target.result);
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+function ocrParseLines(text){
+  const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 5);
+  const items = [];
+
+  for(const line of lines){
+    // Buscar código: patrón alfanumérico típico de facturas
+    const codeMatch = line.match(/\b([A-Z]{2,6}\d{3,6}[A-Z0-9]*)\b/);
+    if(!codeMatch) continue;
+    const code = codeMatch[1];
+    const codeIdx = line.indexOf(code);
+
+    // Buscar separador pipe después del código
+    const afterCode = line.slice(codeIdx + code.length);
+    const pipeIdx = afterCode.indexOf('|');
+    const afterPipe = pipeIdx >= 0 ? afterCode.slice(pipeIdx + 1) : afterCode;
+
+    // Cantidad: primer número después del pipe o después del código
+    let qty = 1;
+    const qtyStr = afterPipe.trim();
+    const qtyMatch = qtyStr.match(/^(\d{1,3})\b/);
+    if(qtyMatch) qty = parseInt(qtyMatch[1]) || 1;
+
+    // Buscar todos los números con decimales (precios)
+    const allDecimals = [...line.matchAll(/\b(\d{1,5}\.\d{2})\b/g)];
+    const prices = allDecimals.map(m => parseFloat(m[1])).filter(p => p > 0 && p < 50000);
+
+    // Descripción: buscar texto largo entre pipes
+    let desc = '';
+    const allPipes = [];
+    for(let i = codeIdx + code.length; i < line.length; i++){
+      if(line[i] === '|') allPipes.push(i);
+    }
+    if(allPipes.length >= 1){
+      const descStart = allPipes[0] + 1;
+      const descEnd = allPipes.length > 1 ? allPipes[1] : line.length;
+      desc = line.slice(descStart, descEnd);
+    }else{
+      // Sin pipe: buscar después del código+cantidad hasta el primer precio
+      const firstPriceMatch = afterPipe.search(/\d{1,5}\.\d{2}/);
+      desc = firstPriceMatch >= 0 ? afterPipe.slice(0, firstPriceMatch) : afterPipe;
+    }
+    desc = desc.replace(/[|\-–—]/g, ' ').replace(/\s+/g, ' ').trim();
+    desc = desc.replace(/[^A-Za-z0-9áéíóúñÁÉÍÓÚÑ°"'"'"'/.,;:() ]/g, '').trim();
+    if(desc.length < 3) desc = code;
+
+    // Precio unitario: primer decimal razonable
+    const unitPrice = prices.find(p => p >= 0.01 && p < 50000) || 0;
+    const total = unitPrice * qty;
+
+    const exists = db.productos.some(p => normalize(p.codigo) === normalize(code));
+
+    items.push({
+      id: 'ocr_' + Date.now() + '_' + Math.random().toString(36).slice(2,6),
+      codigo: code,
+      cantidad: qty,
+      descripcion: desc,
+      precio: unitPrice,
+      total: total,
+      existe: exists,
+      activo: true
+    });
+  }
+  return items;
+}
+
+function ocrRenderTable(){
+  const tbody = document.querySelector('#ocrTable tbody');
+  const active = ocrParsedItems.filter(it => it.activo);
+  document.getElementById('ocrResultCount').textContent = active.length + ' producto(s) detectado(s)';
+  if(active.length === 0){
+    tbody.innerHTML = '<tr class="empty-row"><td colspan="7">No se detectaron productos. Probá con otra foto.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = active.map((it, i) => {
+    const cls = it.existe ? 'ocr-exists' : 'ocr-new';
+    return `
+    <tr class="${cls}" data-ocr-id="${it.id}">
+      <td>${i + 1}</td>
+      <td contenteditable="true" data-field="codigo">${escapeHtml(it.codigo)}</td>
+      <td contenteditable="true" data-field="cantidad" style="width:50px; text-align:center;">${it.cantidad}</td>
+      <td contenteditable="true" data-field="descripcion" style="min-width:180px;">${escapeHtml(it.descripcion)}</td>
+      <td contenteditable="true" data-field="precio" style="width:70px; text-align:right;">${it.precio.toFixed(2)}</td>
+      <td style="text-align:right; font-weight:600;">${fmtMoney(it.total)}</td>
+      <td><span class="ocr-del-btn" data-ocr-del="${it.id}">🗑️</span></td>
+    </tr>`;
+  }).join('');
+
+  // Editable: actualizar datos al cambiar
+  tbody.querySelectorAll('[contenteditable]').forEach(td=>{
+    td.addEventListener('blur', ()=>{
+      const row = td.closest('tr');
+      const id = row.dataset.ocrId;
+      const item = ocrParsedItems.find(it => it.id === id);
+      if(!item) return;
+      const field = td.dataset.field;
+      const val = td.textContent.trim();
+      if(field === 'codigo') item.codigo = val;
+      else if(field === 'cantidad') item.cantidad = Math.max(1, parseInt(val) || 1);
+      else if(field === 'descripcion') item.descripcion = val;
+      else if(field === 'precio') item.precio = parseFloat(val) || 0;
+      item.total = item.precio * item.cantidad;
+      // Actualizar columna total
+      row.children[5].textContent = fmtMoney(item.total);
+    });
+  });
+
+  // Eliminar fila
+  tbody.querySelectorAll('[data-ocr-del]').forEach(btn=>{
+    btn.addEventListener('click', ()=>{
+      const id = btn.dataset.ocrDel;
+      const item = ocrParsedItems.find(it => it.id === id);
+      if(item) item.activo = false;
+      ocrRenderTable();
+    });
+  });
+}
+
+async function ocrProcessImage(imgSrc){
+  document.getElementById('ocrStep1').style.display = 'none';
+  document.getElementById('ocrStep2').style.display = '';
+  const progress = document.getElementById('ocrProgressBar');
+  const status = document.getElementById('ocrStatus');
+  progress.style.width = '10%';
+  status.textContent = 'Cargando Tesseract.js...';
+
+  try{
+    const result = await Tesseract.recognize(imgSrc, 'spa+eng', {
+      logger: m => {
+        if(m.status === 'recognizing text'){
+          const pct = Math.round(m.progress * 100);
+          progress.style.width = (10 + pct * 0.85) + '%';
+          status.textContent = 'Leyendo factura... ' + pct + '%';
+        }
+      }
+    });
+    progress.style.width = '100%';
+    status.textContent = 'Parseando productos...';
+
+    const text = result.data.text;
+    ocrParsedItems = ocrParseLines(text);
+
+    if(ocrParsedItems.length === 0){
+      toast('No se detectaron productos. Probá con otra foto o mejor calidad.', 'error');
+      document.getElementById('ocrStep1').style.display = '';
+      document.getElementById('ocrStep2').style.display = 'none';
+      return;
+    }
+
+    ocrRenderTable();
+    toast(ocrParsedItems.length + ' producto(s) detectado(s)', 'success');
+  }catch(err){
+    console.error('OCR error:', err);
+    toast('Error al procesar la imagen: ' + err.message, 'error');
+    document.getElementById('ocrStep1').style.display = '';
+    document.getElementById('ocrStep2').style.display = 'none';
+  }
+}
+
+async function ocrProcessPDF(file){
+  document.getElementById('ocrStep1').style.display = 'none';
+  document.getElementById('ocrStep2').style.display = '';
+  const progress = document.getElementById('ocrProgressBar');
+  const status = document.getElementById('ocrStatus');
+  progress.style.width = '5%';
+  status.textContent = 'Cargando PDF...';
+
+  try{
+    const arrayBuffer = await file.arrayBuffer();
+    const pdf = await pdfjsLib.getDocument({data: arrayBuffer}).promise;
+    const numPages = pdf.numPages;
+    let allText = '';
+
+    for(let i = 1; i <= numPages; i++){
+      status.textContent = 'Leyendo página ' + i + '/' + numPages + '...';
+      progress.style.width = (5 + (i / numPages) * 30) + '%';
+
+      const page = await pdf.getPage(i);
+      const viewport = page.getViewport({scale: 2.0});
+      const canvas = document.createElement('canvas');
+      canvas.width = viewport.width;
+      canvas.height = viewport.height;
+      const ctx = canvas.getContext('2d');
+      await page.render({canvasContext: ctx, viewport}).promise;
+
+      // Intentar extraer texto del PDF directamente (si tiene texto seleccionable)
+      const textContent = await page.getTextContent();
+      const pageText = textContent.items.map(item => item.str).join(' ');
+      if(pageText.trim().length > 20){
+        allText += pageText + '\n';
+      }else{
+        // PDF escaneado: usar OCR en el canvas
+        status.textContent = 'OCR página ' + i + '/' + numPages + '...';
+        progress.style.width = (35 + (i / numPages) * 60) + '%';
+        const result = await Tesseract.recognize(canvas.toDataURL('image/png'), 'spa+eng');
+        allText += result.data.text + '\n';
+      }
+    }
+
+    progress.style.width = '100%';
+    status.textContent = 'Parseando productos...';
+
+    ocrParsedItems = ocrParseLines(allText);
+    if(ocrParsedItems.length === 0){
+      toast('No se detectaron productos en el PDF. Probá con otro archivo.', 'error');
+      document.getElementById('ocrStep1').style.display = '';
+      document.getElementById('ocrStep2').style.display = 'none';
+      return;
+    }
+    ocrRenderTable();
+    toast(ocrParsedItems.length + ' producto(s) detectado(s) en el PDF', 'success');
+  }catch(err){
+    console.error('PDF error:', err);
+    toast('Error al procesar el PDF: ' + err.message, 'error');
+    document.getElementById('ocrStep1').style.display = '';
+    document.getElementById('ocrStep2').style.display = 'none';
+  }
+}
+
+function ocrConfirmarIngresos(){
+  const activos = ocrParsedItems.filter(it => it.activo && it.codigo && it.precio > 0);
+  if(activos.length === 0){
+    toast('No hay productos válidos para registrar', 'error');
+    return;
+  }
+
+  const fecha = new Date().toISOString();
+  let added = 0;
+
+  activos.forEach(it => {
+    const prod = db.productos.find(p => normalize(p.codigo) === normalize(it.codigo));
+    if(prod){
+      // Producto existe: registrar ingreso
+      db.compras.push({
+        id: 'ocr_' + Date.now() + '_' + Math.random().toString(36).slice(2,6),
+        codigo: prod.codigo,
+        nombre: prod.nombre,
+        cantidad: it.cantidad,
+        precioUnitario: it.precio,
+        total: it.total,
+        fecha: fecha,
+        metodoPago: 'efectivo'
+      });
+      prod.stock = (parseFloat(prod.stock) || 0) + it.cantidad;
+      prod.precioCompra = it.precio;
+      touchProducto(prod);
+      syncProductoDoc(prod);
+      added++;
+    }else{
+      // Producto nuevo: crearlo primero
+      const newProd = {
+        id: 'ocr_' + Date.now() + '_' + Math.random().toString(36).slice(2,6),
+        codigo: it.codigo,
+        codigoBarras: '',
+        nombre: it.descripcion || it.codigo,
+        marca: '',
+        categoria: '',
+        precioCompra: it.precio,
+        precioMarca: 0,
+        precioVenta: it.precio,
+        stock: it.cantidad,
+        stockMin: 0,
+        caracteristicas: ''
+      };
+      db.productos.push(newProd);
+      db.compras.push({
+        id: 'ocr_' + Date.now() + '_' + Math.random().toString(36).slice(2,8),
+        codigo: newProd.codigo,
+        nombre: newProd.nombre,
+        cantidad: it.cantidad,
+        precioUnitario: it.precio,
+        total: it.total,
+        fecha: fecha,
+        metodoPago: 'efectivo'
+      });
+      touchProducto(newProd);
+      syncProductoDoc(newProd);
+      added++;
+    }
+  });
+
+  saveDB();
+  renderCompras();
+  renderProductos();
+  closeModalById('modalFacturaOCR');
+  toast(added + ' ingreso(s) registrado(s) correctamente', 'success');
+}
+
 // Fuerza a Excel a tratar un campo como TEXTO anteponiendo un apóstrofo.
 // Sin esto, una columna con códigos mezclados (números como 12399 y
 // alfanuméricos como ABG031.1) hace que Excel detecte la columna como número
@@ -5239,7 +5598,26 @@ function exportVentasPDF(){
   const qrTotal = list.reduce((s,v)=> s + qrMontoDeVenta(v), 0);
   const gastosAjustados = dedupeGastosById(gastosPrestamosDelDia()).filter(g => g.ajustar);
   const gastosTotal = gastosAjustados.reduce((s,g)=> s + (parseFloat(g.bs)||0), 0);
-  const totalFinal = totalMonto - gastosTotal;
+  const gastosEfectivo = gastosAjustados.filter(g=> (g.tipoPago||'efectivo') === 'efectivo').reduce((s,g)=> s + (parseFloat(g.bs)||0), 0);
+  const gastosQr = gastosAjustados.filter(g=> g.tipoPago === 'qr').reduce((s,g)=> s + (parseFloat(g.bs)||0), 0);
+  // CAMBIO y DINERO REAL del día (igual que en la pestaña de Ventas)
+  const ajusteDia = dia === 'todas' ? dateKeyOffset(0) : dia;
+  const cambioBase = getCambioBase(ajusteDia);
+  const totalFinal = cambioBase + totalMonto - gastosTotal;
+  const efectivoFinal = cambioBase + efectivoTotal - gastosEfectivo;
+  const qrFinal = qrTotal - gastosQr;
+  const dineroReal = getDineroReal(ajusteDia);
+  let resultadoHtml = '';
+  if(!isNaN(dineroReal) && dineroReal >= 0){
+    const diferencia = dineroReal - efectivoFinal;
+    if(Math.abs(diferencia) < 0.005){
+      resultadoHtml = `<div class="resumen-item total" style="color:#16a34a;"><span class="resumen-label">✅ Cuadra exacto</span></div>`;
+    }else if(diferencia > 0){
+      resultadoHtml = `<div class="resumen-item" style="color:#d97706;"><span class="resumen-label">💰 Sobran</span><span class="resumen-val">${fmtMoney(diferencia)}</span></div>`;
+    }else{
+      resultadoHtml = `<div class="resumen-item" style="color:#dc2626;"><span class="resumen-label">⚠️ Faltan</span><span class="resumen-val">${fmtMoney(Math.abs(diferencia))}</span></div>`;
+    }
+  }
   const allGastos = dedupeGastosById(gastosPrestamosDelDia());
 
   let rows = '';
@@ -5306,10 +5684,13 @@ function exportVentasPDF(){
   <div class="resumen-footer">
     <div class="resumen-grid">
       <div class="resumen-item"><span class="resumen-label">Total vendido</span><span class="resumen-val">${fmtMoney(totalMonto)}</span></div>
-      <div class="resumen-item"><span class="resumen-label">💵 Efectivo</span><span class="resumen-val" style="color:#16a34a">${fmtMoney(efectivoTotal)}</span></div>
-      <div class="resumen-item"><span class="resumen-label">📱 QR</span><span class="resumen-val" style="color:#2563eb">${fmtMoney(qrTotal)}</span></div>
+      <div class="resumen-item"><span class="resumen-label">💵 Efectivo</span><span class="resumen-val" style="color:#16a34a">${fmtMoney(efectivoFinal)}</span></div>
+      <div class="resumen-item"><span class="resumen-label">📱 QR</span><span class="resumen-val" style="color:#2563eb">${fmtMoney(qrFinal)}</span></div>
+      <div class="resumen-item"><span class="resumen-label">💰 Cambio / Fondo</span><span class="resumen-val">${fmtMoney(cambioBase)}</span></div>
       <div class="resumen-item"><span class="resumen-label">Gastos ajustados</span><span class="resumen-val" style="color:#dc2626">−${fmtMoney(gastosTotal)}</span></div>
       <div class="resumen-item total"><span class="resumen-label">TOTAL FINAL</span><span class="resumen-val">${fmtMoney(totalFinal)}</span></div>
+      ${!isNaN(dineroReal) && dineroReal >= 0 ? `<div class="resumen-item" style="border-top:1px dashed #999; margin-top:4px; padding-top:5px;"><span class="resumen-label">💵 Dinero real en caja</span><span class="resumen-val">${fmtMoney(dineroReal)}</span></div>` : ''}
+      ${resultadoHtml}
     </div>
     <div class="footer">StockFerre — ${dotLabel} — ${diaFmt}</div>
   </div>
@@ -7634,7 +8015,7 @@ function setupEventListeners(){
         setDineroReal(val, fecha);
       } else {
         // Si borran el campo, eliminar el guardado para ese día
-        try{ localStorage.removeItem(dineroRealStorageKey(fecha)); }catch(e){}
+        clearDineroReal(fecha);
       }
     });
   }
@@ -8094,6 +8475,37 @@ function setupEventListeners(){
     closeAllModals();
     openCompraScan();
   });
+
+  // OCR Factura
+  document.getElementById('btnFacturaOCR').addEventListener('click', openFacturaOCRModal);
+  document.getElementById('btnOCRCamara').addEventListener('click', ()=>{
+    document.getElementById('fileFacturaOCR').click();
+  });
+  document.getElementById('btnOCRGaleria').addEventListener('click', ()=>{
+    document.getElementById('fileFacturaOCRGal').click();
+  });
+  document.getElementById('btnOCRPDF').addEventListener('click', ()=>{
+    document.getElementById('fileFacturaPDF').click();
+  });
+  document.getElementById('fileFacturaOCR').addEventListener('change', (e)=>{
+    if(e.target.files[0]) ocrPreviewImage(e.target.files[0]);
+  });
+  document.getElementById('fileFacturaOCRGal').addEventListener('change', (e)=>{
+    if(e.target.files[0]) ocrPreviewImage(e.target.files[0]);
+  });
+  document.getElementById('fileFacturaPDF').addEventListener('change', (e)=>{
+    if(e.target.files[0]) ocrProcessPDF(e.target.files[0]);
+  });
+  document.getElementById('btnOCRProcesar').addEventListener('click', ()=>{
+    const img = document.getElementById('ocrPreviewImg').src;
+    if(img) ocrProcessImage(img);
+  });
+  document.getElementById('btnOCRBack').addEventListener('click', ()=>{
+    document.getElementById('ocrStep1').style.display = '';
+    document.getElementById('ocrStep2').style.display = 'none';
+  });
+  document.getElementById('btnOCRRefrescar').addEventListener('click', ocrRenderTable);
+  document.getElementById('btnOCRConfirmar').addEventListener('click', ocrConfirmarIngresos);
   let _compraSearchTimer = null;
   document.getElementById('compraSearchInput').addEventListener('input', ()=>{
     clearTimeout(_compraSearchTimer);

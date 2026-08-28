@@ -278,6 +278,7 @@
     <section class="view" id="view-compras">
       <div class="toolbar">
         <button class="btn btn-primary" id="btnNuevaCompra">➕ Nuevo ingreso</button>
+        <button class="btn btn-secondary" id="btnFacturaOCR">📷 Subir factura</button>
         <button class="btn btn-secondary" id="btnExportCompras">📤 Exportar CSV</button>
         <button class="btn btn-secondary" id="btnImportCompras">📥 Importar CSV</button>
         <button class="btn btn-secondary" id="btnPurgeCompras">🧹 Borrar antiguas</button>
@@ -765,6 +766,57 @@
 </div>
 
 <!-- Modal: Escáner de Ventas (reutiliza el mismo bloque de escáner) -->
+<div class="modal modal-lg" id="modalFacturaOCR">
+  <div class="modal-header">
+    <h3>📷 Subir factura — OCR</h3>
+    <button class="modal-close" data-close-modal>✕</button>
+  </div>
+  <div class="modal-body">
+      <div id="ocrStep1">
+      <p class="hint">Subí una foto de la factura o un PDF para leer los productos automáticamente.</p>
+      <div style="display:flex; gap:8px; margin:12px 0;">
+        <button class="btn btn-primary" id="btnOCRCamara" style="flex:1;">📷 Tomar foto</button>
+        <button class="btn btn-secondary" id="btnOCRGaleria" style="flex:1;">🖼️ Galería</button>
+        <button class="btn btn-secondary" id="btnOCRPDF" style="flex:1;">📄 PDF</button>
+      </div>
+      <input type="file" id="fileFacturaOCR" accept="image/*" capture="environment" hidden>
+      <input type="file" id="fileFacturaOCRGal" accept="image/*" hidden>
+      <input type="file" id="fileFacturaPDF" accept=".pdf,application/pdf" hidden>
+      <div id="ocrPreview" style="display:none; text-align:center; margin:12px 0;">
+        <img id="ocrPreviewImg" style="max-width:100%; max-height:300px; border-radius:8px; border:1px solid var(--border);">
+      </div>
+      <div id="ocrProgress" style="display:none; margin:12px 0;">
+        <div style="background:var(--border); border-radius:8px; height:8px; overflow:hidden;">
+          <div id="ocrProgressBar" style="width:0%; height:100%; background:var(--primary); transition:width .3s;"></div>
+        </div>
+        <p class="hint" id="ocrStatus" style="margin:8px 0 0; text-align:center;">Procesando OCR...</p>
+      </div>
+      <button class="btn btn-primary" id="btnOCRProcesar" style="width:100%; display:none;">🔍 Procesar factura</button>
+    </div>
+    <div id="ocrStep2" style="display:none;">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+        <p class="hint" id="ocrResultCount" style="margin:0;"></p>
+        <button class="btn btn-sm btn-secondary" id="btnOCRRefrescar">🔄 Recalcular</button>
+      </div>
+      <div class="table-wrap" style="max-height:400px; overflow-y:auto;">
+        <table class="table" id="ocrTable">
+          <thead>
+            <tr>
+              <th>#</th><th>Código</th><th>Cant.</th><th>Descripción</th><th>Precio</th><th>Total</th><th></th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div style="display:flex; gap:8px; margin-top:12px;">
+        <button class="btn btn-secondary" id="btnOCRBack" style="flex:1;">⬅️ Volver</button>
+        <button class="btn btn-primary" id="btnOCRConfirmar" style="flex:2;">✅ Registrar ingresos</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Modal: Escáner de Ventas (reutiliza el mismo bloque de escáner) -->
 <div class="modal" id="modalVentaScan">
   <div class="modal-header">
     <h3>🛒 Nueva venta · Escanear</h3>
@@ -1209,6 +1261,8 @@
 </div>
 
 <script src='https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js'></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script>if(window.pdfjsLib) pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';</script>
 <!-- ZXing: lector de códigos de barras (solo se usa en el botón 📷 de Código de barras) -->
 <script src='https://unpkg.com/@zxing/library@0.20.0'></script>
 <!-- Firebase (opcional): si firebase-config.js está vacío, la app funciona 100% local -->

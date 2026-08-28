@@ -407,6 +407,16 @@ body.modo-invitado .sidebar-logos{display:flex;}
 .cat-card{position:relative; padding-right:32px !important;}
 .cat-del-btn{position:absolute; top:6px; right:6px; font-size:14px; opacity:.4; transition:opacity .15s; z-index:1;}
 .cat-del-btn:hover{opacity:1;}
+
+/* ---------- OCR FACTURA ---------- */
+#ocrTable td{padding:4px 6px; font-size:12.5px;}
+#ocrTable td[contenteditable="true"]{background:var(--primary-light); border-radius:4px; cursor:text;}
+#ocrTable td[contenteditable="true"]:focus{outline:2px solid var(--primary); outline-offset:-2px;}
+#ocrTable .ocr-del-btn{cursor:pointer; opacity:.4; transition:opacity .15s;}
+#ocrTable .ocr-del-btn:hover{opacity:1;}
+#ocrTable tr.ocr-new{background:rgba(34,197,94,0.06);}
+#ocrTable tr.ocr-exists{background:rgba(251,191,36,0.06);}
+#ocrTable tr.ocr-error{background:rgba(239,68,68,0.06);}
 .img-lightbox-close{position:absolute; top:16px; right:20px; font-size:28px; color:#fff; background:rgba(0,0,0,.5); border:none; border-radius:50%; width:40px; height:40px; cursor:pointer; display:flex; align-items:center; justify-content:center; transition:background .15s;}
 .img-lightbox-close:hover{background:rgba(255,255,255,.25);}
 @keyframes lbFadeIn{from{opacity:0;} to{opacity:1;}}

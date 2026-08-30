@@ -227,15 +227,31 @@
           <tbody></tbody>
         </table>
       </div>
+      <div class="panel total-ventas-panel" id="totalVentasDia">
+        <div class="panel-body-total">
+          <span class="total-ventas-label">TOTAL DE VENTAS <span id="totalVentasDiaFecha">de hoy</span></span>
+          <strong class="total-ventas-valor" id="totalVentasDiaValor">Bs 0.00</strong>
+        </div>
+      </div>
       <div class="panel ajuste-cuentas-panel" id="ajusteCuentas">
         <div class="panel-header">
           <h3>🧾 Ajuste de cuentas</h3>
           <div class="panel-header-right">
             <span class="hint" id="ajusteFecha">de hoy</span>
-            <label class="ajuste-cambio" title="Monto inicial (fondo de cambio) con el que empieza la cuenta del día: la suma total parte desde este monto.">
+            <label class="ajuste-cambio ajuste-cambio-admin" title="Monto inicial (fondo de cambio) con el que empieza la cuenta del día: la suma total parte desde este monto.">
               <span>CAMBIO</span>
               <input type="number" id="ajusteCambio" class="input" step="0.01" min="0" value="0">
             </label>
+            <div class="ajuste-cambio-guest" id="ajusteCambioGuest">
+              <label class="ajuste-cambio" title="CAMBIO de Manuales (naranja): arranca la cuenta de Manuales desde este monto.">
+                <span class="adjust-legend"><span class="gp-modo-dot man"></span>CAMBIO Manuales</span>
+                <input type="number" id="ajusteCambioMan" class="input" step="0.01" min="0" value="0">
+              </label>
+              <label class="ajuste-cambio" title="CAMBIO de Eléctricas (amarillo): arranca la cuenta de Eléctricas desde este monto.">
+                <span class="adjust-legend"><span class="gp-modo-dot el"></span>CAMBIO Eléctricas</span>
+                <input type="number" id="ajusteCambioEl" class="input" step="0.01" min="0" value="0">
+              </label>
+            </div>
           </div>
         </div>
         <div class="panel-body">
@@ -669,6 +685,7 @@
     <div class="form-actions" style="margin-top:16px; display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap;">
       <button type="button" class="btn btn-primary" id="btnDetSaveCaract">💾 Guardar</button>
       <div style="display:flex; gap:8px; align-items:center;">
+        <button type="button" class="btn btn-success" id="btnDetVender">💰 Vender</button>
         <button type="button" class="btn btn-secondary" id="btnDetVerIngresos">📊 Ver ingresos</button>
         <button type="button" class="btn btn-secondary" data-close-modal>Cerrar</button>
       </div>

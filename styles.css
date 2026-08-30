@@ -701,6 +701,23 @@ body.modo-invitado .sidebar-footer small{color:#86efac;}
 .fin-card:nth-child(3) .fin-value{color:var(--primary);}
 .fin-sub{font-size:11.5px; color:var(--text-muted);}
 
+/* TOTAL DE VENTAS del día (arriba del Ajuste de cuentas) */
+.total-ventas-panel{
+  margin-top:14px; border:2px solid var(--primary); background:var(--surface);
+  box-shadow:var(--shadow);
+}
+.total-ventas-panel .panel-body-total{
+  display:flex; align-items:center; justify-content:space-between; gap:12px;
+  flex-wrap:wrap; padding:14px 18px;
+}
+.total-ventas-label{
+  font-size:13px; font-weight:700; color:var(--text-muted);
+  text-transform:uppercase; letter-spacing:.05em;
+}
+.total-ventas-label span{font-weight:600; text-transform:none; letter-spacing:0;}
+.total-ventas-valor{font-size:30px; font-weight:800; color:var(--primary); line-height:1.1;}
+
+
 /* CAMBIO (Ajuste de cuentas): va alineado horizontalmente con el título, al
    lado del encabezado. La casilla mide unos 3 cm (113px) de largo. */
 .panel-header-right{display:flex; align-items:center; gap:10px; flex-wrap:wrap; justify-content:flex-end;}
@@ -710,6 +727,20 @@ body.modo-invitado .sidebar-footer small{color:#86efac;}
   color:var(--text-muted); text-transform:uppercase;
 }
 .ajuste-cambio .input{width:113px; text-align:right; font-weight:700; text-transform:none; padding:4px 8px;}
+
+/* CAMBIO por modo del invitado: dos campos (Manuales naranja / Eléctricas amarillo) */
+.ajuste-cambio-guest{display:flex; align-items:center; justify-content:flex-end; gap:10px; flex-wrap:wrap;}
+.ajuste-cambio-guest .ajuste-cambio{flex-direction:column; align-items:flex-end; gap:3px; padding:6px 10px; border:1px solid var(--border); border-radius:8px; background:var(--bg);}
+.ajuste-cambio-guest .ajuste-cambio .input{width:100px;}
+.ajuste-cambio-guest .adjust-legend{display:flex; align-items:center; gap:6px; font-size:10.5px; letter-spacing:.02em; text-transform:none; color:var(--text-muted);}
+.ajuste-cambio-guest .gp-modo-dot{width:11px; height:11px; border-radius:50%; display:inline-block; flex-shrink:0;}
+.ajuste-cambio-guest .gp-modo-dot.man{background:#f26522;}
+.ajuste-cambio-guest .gp-modo-dot.el{background:#f6c000;}
+@media (max-width:640px){
+  .ajuste-cambio-guest{flex-direction:column; align-items:stretch;}
+  .ajuste-cambio-guest .ajuste-cambio{align-items:stretch;}
+  .ajuste-cambio-guest .ajuste-cambio .input{width:100%;}
+}
 
 /* ---------- DEUDAS: agrupadas por marca ---------- */
 .deuda-group{background:var(--surface); border-radius:var(--radius); box-shadow:var(--shadow); margin-bottom:16px; overflow:hidden;}

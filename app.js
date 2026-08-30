@@ -911,6 +911,24 @@ function normalize(str){
   return String(str||'').toUpperCase().trim();
 }
 
+// Busca un producto por NOMBRE (descripción), MARCA, CÓDIGO o CÓDIGO DE
+// BARRAS. La búsqueda se divide en palabras y cada palabra debe aparecer en
+// (nombre O marca O código O código de barras). Así:
+//   • "alicate truper" muestra los alicates CUYA MARCA ES Truper.
+//   • "pretul" muestra TODOS los productos de la marca Pretul.
+//   • "alicate" muestra todos los alicates de cualquier marca.
+function productMatchesSearch(p, search){
+  const tokens = normalize(search).split(/\s+/).filter(Boolean);
+  if(tokens.length === 0) return true;
+  const haystack = [
+    normalize(p.nombre),
+    normalize(p.marca),
+    normalize(p.codigo),
+    normalize(p.codigoBarras)
+  ].join(' ');
+  return tokens.every(tok => haystack.includes(tok));
+}
+
 function todayISO(){
   return new Date().toISOString();
 }
@@ -1425,7 +1443,10 @@ function saveVenta(data){
     qrPersona: data.qrPersona || '',
     efectivoMonto: parseFloat(data.efectivoMonto) || 0,
     qrMonto: parseFloat(data.qrMonto) || 0,
-    fecha: todayISO()
+    // Se guarda en el día que se está viendo en Ventas (si es "Todas", hoy).
+    // Así no se mezclan fechas: si estás viendo Ayer o cualquier fecha del
+    // calendario, la venta nueva se registra en ESA fecha.
+    fecha: ventaFilterDateKey() || todayISO()
   };
 
   // En modo invitado la venta se guarda en su propia base (aislada).
@@ -1470,6 +1491,12 @@ function guestCommitVenta(venta, data, cantidad){
     applyStockDelta(p, -cantidad, modo); // descuenta stock en la nube del modo
     persistModoDB(modo, modoDB);
   }
+  // El catálogo combinado del invitado (lo que muestra la pestaña Productos)
+  // debe reflejar el stock al instante, o se vería desactualizado al vender.
+  const mainProd = db.productos.find(x => normalize(x.codigo) === normalize(data.codigo));
+  if(mainProd){
+    mainProd.stock = (parseFloat(mainProd.stock) || 0) - cantidad;
+  }
   // La venta se escribe en la base PROPIA del invitado (no en la del modo)
   db.ventas.unshift(venta);
   db.finanzas = db.finanzas || {};
@@ -1502,6 +1529,13 @@ function deleteVenta(id, mantenerInventario){
         persistModoDB(modo, modoDB);
       }
     }
+    // Devuelve el stock también al catálogo en memoria que muestra la pestaña
+    // Productos, para que se vea al instante al eliminar la venta (tanto en
+    // modo dueño como invitado).
+    const live = db.productos.find(x => normalize(x.codigo) === normalize(venta.codigo));
+    if(live){
+      live.stock = (parseFloat(live.stock) || 0) + venta.cantidad;
+    }
   }
   db.ventas = db.ventas.filter(v => v.id !== id);
   db.finanzas = db.finanzas || {};
@@ -1525,6 +1559,8 @@ function vaciarVentasConStock(restaurarStock){
   if(restaurarStock){
     db.ventas.forEach(v => {
       const modo = v.modoOrigin || currentModo;
+      // Devuelve el stock también al catálogo en memoria que muestra Productos.
+      const live = db.productos.find(x => normalize(x.codigo) === normalize(v.codigo));
       if(currentModo === 'invitado' && modo !== 'invitado'){
         const modoDB = loadModoDB(modo);
         const p = findProductoInDB(modoDB, v.codigo);
@@ -1534,6 +1570,7 @@ function vaciarVentasConStock(restaurarStock){
           applyStockDelta(p, v.cantidad, modo);
           persistModoDB(modo, modoDB);
         }
+        if(live){ live.stock = (parseFloat(live.stock) || 0) + v.cantidad; }
       }else{
         const p = getProductoByCodigo(v.codigo);
         if(p){
@@ -2462,6 +2499,36 @@ function setCambioBase(v, fechaKey){
   }
 }
 
+// CAMBIO por modo del INVITADO: cada modo (Manuales / Eléctricas) puede tener su
+// propio fondo de cambio, que se muestra con su dot de color y se usa en el
+// ajuste de cuentas y en el PDF de ese modo.
+function cambioModoField(modo){
+  return modo === 'manual' ? 'cambioManual' : 'cambioElectrico';
+}
+function getCambioForModo(fechaKey, modo){
+  const fecha = fechaKey || dateKeyOffset(0);
+  if(currentModo === 'invitado'){
+    const v = db.ajustes && db.ajustes[fecha] ? db.ajustes[fecha][cambioModoField(modo)] : null;
+    if(v != null) return parseFloat(v) || 0;
+    return 0;
+  }
+  return getCambioBase(fechaKey);
+}
+function setCambioForModo(v, fechaKey, modo){
+  const val = Math.max(0, parseFloat(v) || 0);
+  const fecha = fechaKey || dateKeyOffset(0);
+  if(currentModo === 'invitado'){
+    try{ localStorage.setItem('stockferre_cambio_' + cambioModoField(modo) + '_v1_' + fecha, String(val)); }catch(e){}
+    if(db.ajustes){
+      if(!db.ajustes[fecha]) db.ajustes[fecha] = {};
+      db.ajustes[fecha][cambioModoField(modo)] = val;
+      saveDB();
+    }
+    return;
+  }
+  setCambioBase(v, fechaKey);
+}
+
 // "DINERO REAL": monto escrito manualmente para comparar con el efectivo ajustado.
 // Se guarda POR DÍA (igual que CAMBIO) para que al cambiar de día no se pierda.
 function dineroRealStorageKey(fechaKey){
@@ -2518,7 +2585,21 @@ function renderAjusteCuentas(list){
   const gastosAjustados = gastosDelDia.reduce((s,g)=> s + (parseFloat(g.bs)||0), 0);
   const gastosEfectivo = gastosDelDia.filter(g=> (g.tipoPago||'efectivo') === 'efectivo').reduce((s,g)=> s + (parseFloat(g.bs)||0), 0);
   const gastosQr = gastosDelDia.filter(g=> g.tipoPago === 'qr').reduce((s,g)=> s + (parseFloat(g.bs)||0), 0);
-  const cambioBase = getCambioBase(dia);
+  const esInvitado = currentModo === 'invitado';
+  const ajusteAdminEl = document.querySelector('.ajuste-cambio-admin');
+  const guestEl = document.getElementById('ajusteCambioGuest');
+  if(ajusteAdminEl) ajusteAdminEl.style.display = esInvitado ? 'none' : '';
+  if(guestEl) guestEl.style.display = esInvitado ? 'flex' : 'none';
+  let cambioBase = getCambioBase(dia);
+  if(esInvitado){
+    const cm = getCambioForModo(dia, 'manual');
+    const ce = getCambioForModo(dia, 'electrico');
+    cambioBase = cm + ce;
+    const cambioManEl = document.getElementById('ajusteCambioMan');
+    const cambioElEl = document.getElementById('ajusteCambioEl');
+    if(cambioManEl && document.activeElement !== cambioManEl) cambioManEl.value = cm;
+    if(cambioElEl && document.activeElement !== cambioElEl) cambioElEl.value = ce;
+  }
   const totalFinal = cambioBase + total - gastosAjustados;
   const efectivoFinal = cambioBase + efectivo - gastosEfectivo;
   const qrFinal = qr - gastosQr;
@@ -2527,7 +2608,7 @@ function renderAjusteCuentas(list){
   document.getElementById('ajusteQr').textContent = fmtMoney(qrFinal);
   // Refleja el monto de CAMBIO guardado (sin pisar lo que se está escribiendo).
   const cambioEl = document.getElementById('ajusteCambio');
-  if(cambioEl && document.activeElement !== cambioEl) cambioEl.value = cambioBase;
+  if(!esInvitado && cambioEl && document.activeElement !== cambioEl) cambioEl.value = cambioBase;
   const notaG = document.getElementById('ajusteGastosNota');
   if(notaG){
     if(gastosAjustados > 0){
@@ -2913,9 +2994,28 @@ function exportModoDetallePDF(){
   const efectivoVentas = ventasInvitado.reduce((s,v)=> s + efectivoMontoDeVenta(v), 0);
   const qrVentas = ventasInvitado.reduce((s,v)=> s + qrMontoDeVenta(v), 0);
   const gastosTotal = gastosAjustados.reduce((s,g)=> s + (parseFloat(g.bs)||0), 0);
-  const totalFinal = totalVentas - gastosTotal;
+  const gastosEfectivo = gastosAjustados.filter(g=> (g.tipoPago||'efectivo') === 'efectivo').reduce((s,g)=> s + (parseFloat(g.bs)||0), 0);
+  const gastosQr = gastosAjustados.filter(g=> g.tipoPago === 'qr').reduce((s,g)=> s + (parseFloat(g.bs)||0), 0);
+  const aj = ajustesFromDB(db, dia);
+  const cambioBase = getCambioForModo(dia, modo);
+  const efectivoFinal = cambioBase + efectivoVentas - gastosEfectivo;
+  const qrFinal = qrVentas - gastosQr;
+  const totalFinal = cambioBase + totalVentas - gastosTotal;
+  const dineroReal = aj.dineroReal;
+  let resultadoHtml = '';
+  if(!isNaN(dineroReal) && dineroReal >= 0){
+    const diferencia = dineroReal - efectivoFinal;
+    if(Math.abs(diferencia) < 0.005) resultadoHtml = `<div class="resumen-item total" style="color:#16a34a;"><span class="resumen-label">✅ Cuadra exacto</span></div>`;
+    else if(diferencia > 0) resultadoHtml = `<div class="resumen-item" style="color:#d97706;"><span class="resumen-label">💰 Sobran</span><span class="resumen-val">${fmtMoney(diferencia)}</span></div>`;
+    else resultadoHtml = `<div class="resumen-item" style="color:#dc2626;"><span class="resumen-label">⚠️ Faltan</span><span class="resumen-val">${fmtMoney(Math.abs(diferencia))}</span></div>`;
+  }
+  const secResumen = {
+    totalMonto: totalVentas, cambioBase, gastosTotal, totalFinal,
+    efectivoFinal, qrFinal, dineroReal, resultadoHtml
+  };
   const dotColor = esMan ? '#f26522' : '#f6c000';
   const dotLabel = esMan ? 'Manuales' : 'Eléctricas';
+  const puntoColor = esMan ? '#f26522' : '#f6c000';
   const diaParts = dia.split('-');
   const diaFmt = diaParts[2] + '/' + diaParts[1] + '/' + diaParts[0];
 
@@ -2925,7 +3025,7 @@ function exportModoDetallePDF(){
       <td style="padding:4px 6px; border-bottom:1px solid #ddd;">${i+1}</td>
       <td style="padding:4px 6px; border-bottom:1px solid #ddd;">${fmtHistoryDate(v.fecha)}</td>
       <td style="padding:4px 6px; border-bottom:1px solid #ddd; font-weight:bold;">${escapeHtml(v.codigo)}</td>
-      <td style="padding:4px 6px; border-bottom:1px solid #ddd;"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${dotColor};margin-right:4px;vertical-align:middle;"></span>${escapeHtml(v.nombre)}</td>
+      <td style="padding:4px 6px; border-bottom:1px solid #ddd;"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${puntoColor};margin-right:4px;vertical-align:middle;"></span>${escapeHtml(v.nombre)}</td>
       <td style="padding:4px 6px; border-bottom:1px solid #ddd; text-align:center;">${v.cantidad}</td>
       <td style="padding:4px 6px; border-bottom:1px solid #ddd; text-align:right; font-weight:bold;">${fmtMoney(v.total)}</td>
       <td style="padding:4px 6px; border-bottom:1px solid #ddd;">${pagoLabel(v)}</td>
@@ -2946,6 +3046,7 @@ function exportModoDetallePDF(){
   const html = `<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>Detalle ${dotLabel} - ${dia}</title>
 <style>
+  * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
   @page { size: letter portrait; margin: 15mm; }
   body { font-family: Arial, Helvetica, sans-serif; font-size: 11px; color: #1a1a1a; margin: 0; padding: 15mm; display:flex; flex-direction:column; min-height:100vh; }
   h1 { font-size: 18px; margin: 0 0 4px 0; color: ${dotColor}; }
@@ -2960,6 +3061,11 @@ function exportModoDetallePDF(){
   .resumen-grid { display: flex; flex-direction: column; gap: 2px; max-width: 260px; margin-left: auto; }
   .resumen-item { display: flex; justify-content: space-between; padding: 3px 0; }
   .resumen-item.total { font-size: 14px; font-weight: bold; border-top: 2px solid #333; padding-top: 5px; margin-top: 3px; }
+  .resumen-total-row { display: flex; align-items: flex-end; justify-content: space-between; gap: 18px; flex-wrap: wrap; border-top: 2px solid #333; padding-top: 5px; margin-top: 3px; }
+  .resumen-total-row .resumen-item { padding: 0; border: none; }
+  .resumen-total-row .resumen-item.total { font-size: 14px; }
+  .resumen-items-inline { display: flex; gap: 26px; font-size: 12px; }
+  .resumen-items-inline .resumen-label { font-size: 11.5px; }
   .resumen-label { color: #555; }
   .resumen-val { font-weight: bold; }
   .footer { margin-top: 12px; font-size: 9px; color: #999; text-align: center; border-top: 1px solid #ddd; padding-top: 6px; }
@@ -2986,11 +3092,7 @@ function exportModoDetallePDF(){
   </div>
   <div class="resumen-footer">
     <div class="resumen-grid">
-      <div class="resumen-item"><span class="resumen-label">Total vendido</span><span class="resumen-val">${fmtMoney(totalVentas)}</span></div>
-      <div class="resumen-item"><span class="resumen-label">💵 Efectivo</span><span class="resumen-val" style="color:#16a34a">${fmtMoney(efectivoVentas)}</span></div>
-      <div class="resumen-item"><span class="resumen-label">📱 QR</span><span class="resumen-val" style="color:#2563eb">${fmtMoney(qrVentas)}</span></div>
-      <div class="resumen-item"><span class="resumen-label">Gastos ajustados</span><span class="resumen-val" style="color:#dc2626">−${fmtMoney(gastosTotal)}</span></div>
-      <div class="resumen-item total"><span class="resumen-label">TOTAL FINAL</span><span class="resumen-val">${fmtMoney(totalFinal)}</span></div>
+      ${resumenItemsHtml(secResumen, 'TOTAL FINAL', true, false, true, true)}
     </div>
     <div class="footer">StockFerre — ${dotLabel} — ${dia}</div>
   </div>
@@ -3025,6 +3127,18 @@ function detectarRepetidosVentas(list){
   return { repetidos, duplicadas };
 }
 
+function renderTotalVentasDia(list){
+  const el = document.getElementById('totalVentasDiaValor');
+  const fe = document.getElementById('totalVentasDiaFecha');
+  if(!el) return;
+  list = list || [];
+  // Se muestra la suma de TODAS las ventas que se están viendo en la pestaña
+  // (las del día seleccionado: Hoy, Ayer, o la fecha del calendario).
+  const total = list.reduce((s,v)=> s + (parseFloat(v.total) || 0), 0);
+  el.textContent = fmtMoney(total);
+  if(fe) fe.textContent = ventasFilterLabel();
+}
+
 function renderVentas(){
   const tbody = document.querySelector('#ventasTable tbody');
   const summary = document.getElementById('ventasSummary');
@@ -3033,6 +3147,7 @@ function renderVentas(){
   if(db.ventas.length === 0){
     tbody.innerHTML = `<tr class="empty-row"><td colspan="${colspan}">Todavía no registraste ninguna venta.</td></tr>`;
     summary.innerHTML = currentRole === 'guest' ? `0 ventas<br>${guestModoTotalesHTML([])}` : '0 ventas';
+    renderTotalVentasDia([]);
     renderAjusteCuentas([]);
     renderGastosPrestamos();
     syncVentasChips();
@@ -3048,6 +3163,7 @@ function renderVentas(){
     summary.innerHTML = currentRole === 'guest'
       ? `0 ventas ${escapeHtml(ventasFilterLabel())}<br>${guestModoTotalesHTML([])}`
       : `0 ventas ${escapeHtml(ventasFilterLabel())}`;
+    renderTotalVentasDia([]);
     renderAjusteCuentas([]);
     renderGastosPrestamos();
     syncVentasChips();
@@ -3126,6 +3242,7 @@ function renderVentas(){
       summary.textContent = `${filtered.length} venta${filtered.length === 1 ? '' : 's'} ${ventasFilterLabel()} · Total ${fmtMoney(totalMonto)} · Ganancia neta ${fmtMoney(gananciaNeta)}`;
     }
   }
+  renderTotalVentasDia(filtered);
   renderAjusteCuentas(filtered);
   renderGastosPrestamos();
   syncVentasChips();
@@ -3279,7 +3396,7 @@ function openHistorialVentaProducto(codigo){
     tbody.innerHTML = '<tr class="empty-row"><td colspan="5">No hay ventas registradas para este producto.</td></tr>';
   } else {
     tbody.innerHTML = ventas.map(v => {
-      const fecha = v.fecha || '';
+      const fecha = fmtHistoryDate(v.fecha);
       const cant = parseFloat(v.cantidad) || 0;
       const pu = parseFloat(v.precioUnitario) || (cant > 0 ? (parseFloat(v.total) || 0) / cant : 0);
       const total = parseFloat(v.total) || 0;
@@ -4491,11 +4608,7 @@ function renderInventario(){
   const search = normalize(document.getElementById('invSearch').value);
   let list = db.productos.slice();
   if(search){
-    list = list.filter(p =>
-      normalize(p.nombre).includes(search) ||
-      normalize(p.codigo).includes(search) ||
-      normalize(p.codigoBarras).includes(search)
-    );
+    list = list.filter(p => productMatchesSearch(p, search));
   }
   list.sort((a,b)=>{
     // Los productos registrados en inventario en ESTE dispositivo aparecen
@@ -4977,10 +5090,7 @@ function renderVentaSearchResults(){
 
   let list = db.productos.slice();
   if(search){
-    list = list.filter(p =>
-      normalize(p.nombre).includes(search) ||
-      normalize(p.codigo).includes(search)
-    );
+    list = list.filter(p => productMatchesSearch(p, search));
   }
   list.sort((a,b)=> a.nombre.localeCompare(b.nombre, 'es'));
   list = list.slice(0, 30); // límite razonable para no saturar la lista
@@ -5022,10 +5132,7 @@ function renderCompraSearchResults(){
 
   let list = db.productos.slice();
   if(search){
-    list = list.filter(p =>
-      normalize(p.nombre).includes(search) ||
-      normalize(p.codigo).includes(search)
-    );
+    list = list.filter(p => productMatchesSearch(p, search));
   }
   list.sort((a,b)=> a.nombre.localeCompare(b.nombre, 'es'));
   list = list.slice(0, 30);
@@ -5585,28 +5692,47 @@ function exportVentasCSV(){
   toast('Ventas exportadas', 'success');
 }
 
-function exportVentasPDF(){
-  const list = ventasFiltradas();
-  if(!list.length){ toast('No hay ventas para exportar', 'error'); return; }
-  const esMan = currentModo === 'manual';
-  const dotColor = esMan ? '#f26522' : '#f6c000';
-  const dotLabel = esMan ? 'Manuales' : 'Eléctricas';
-  const dia = ventaFilterDateKey() || 'todas';
-  const diaFmt = dia === 'todas' ? 'Todas las fechas' : dia;
+// Devuelve las ventas de un arreglo que corresponden al día/filtro visible en
+// la pestaña de Ventas (Hoy, Ayer, Anteayer, fecha del calendario o Todas).
+function ventasDeDia(ventasArr){
+  const diaKey = ventaFilterDateKey();
+  if(!diaKey) return (ventasArr || []).slice();
+  return (ventasArr || []).filter(v => ventaFechaKey(v.fecha) === diaKey);
+}
+
+// Gastos/préstamos del día dentro de la base de UN modo concreto.
+function gastosDelDiaFromDB(dbObj, dia){
+  const list = (dbObj.gastosPrestamos || []).filter(g => {
+    if(dia && ventaFechaKey(g.fecha) !== dia) return false;
+    if(g.modo === 'ninguno') return false;
+    return true;
+  });
+  return dedupeGastosById(list);
+}
+
+// CAMBIO y DINERO REAL de un día dentro de la base de UN modo concreto.
+function ajustesFromDB(dbObj, dia){
+  const a = (dbObj.ajustes && dbObj.ajustes[dia]) || {};
+  return {
+    cambio: typeof a.cambio === 'number' ? a.cambio : 0,
+    dineroReal: (typeof a.dineroReal === 'number') ? a.dineroReal : NaN
+  };
+}
+
+// Calcula TODA la información de una sección de ventas (listado + gastos +
+// ajuste: cambio, dinero real, sobra/falta/cuadra) y devuelve los datos y el
+// HTML de la tabla. Sirve para exportar un modo en el PDF.
+function computeVentasSectionData(list, allGastos, cambioBase, dineroReal, puntoColor){
   const totalMonto = list.reduce((s,v)=> s + (parseFloat(v.total)||0), 0);
   const efectivoTotal = list.reduce((s,v)=> s + efectivoMontoDeVenta(v), 0);
   const qrTotal = list.reduce((s,v)=> s + qrMontoDeVenta(v), 0);
-  const gastosAjustados = dedupeGastosById(gastosPrestamosDelDia()).filter(g => g.ajustar);
+  const gastosAjustados = allGastos.filter(g => g.ajustar);
   const gastosTotal = gastosAjustados.reduce((s,g)=> s + (parseFloat(g.bs)||0), 0);
   const gastosEfectivo = gastosAjustados.filter(g=> (g.tipoPago||'efectivo') === 'efectivo').reduce((s,g)=> s + (parseFloat(g.bs)||0), 0);
   const gastosQr = gastosAjustados.filter(g=> g.tipoPago === 'qr').reduce((s,g)=> s + (parseFloat(g.bs)||0), 0);
-  // CAMBIO y DINERO REAL del día (igual que en la pestaña de Ventas)
-  const ajusteDia = dia === 'todas' ? dateKeyOffset(0) : dia;
-  const cambioBase = getCambioBase(ajusteDia);
   const totalFinal = cambioBase + totalMonto - gastosTotal;
   const efectivoFinal = cambioBase + efectivoTotal - gastosEfectivo;
   const qrFinal = qrTotal - gastosQr;
-  const dineroReal = getDineroReal(ajusteDia);
   let resultadoHtml = '';
   if(!isNaN(dineroReal) && dineroReal >= 0){
     const diferencia = dineroReal - efectivoFinal;
@@ -5618,36 +5744,303 @@ function exportVentasPDF(){
       resultadoHtml = `<div class="resumen-item" style="color:#dc2626;"><span class="resumen-label">⚠️ Faltan</span><span class="resumen-val">${fmtMoney(Math.abs(diferencia))}</span></div>`;
     }
   }
-  const allGastos = dedupeGastosById(gastosPrestamosDelDia());
-
   let rows = '';
   list.forEach((v, i) => {
+    // Punto de identificación por modo: naranja para Manuales, amarillo para
+    // Eléctricas. Si la venta no trae modo, se busca en el producto y como
+    // última opción se usa el color de la sección.
+    const punto = (v.modoOrigin || (function(){ try{ const p = getProductoByCodigo(v.codigo); return p && p.modoOrigin; }catch(e){ return ''; } })()) === 'electrico' ? '#f6c000' : '#f26522';
     rows += `<tr>
       <td style="padding:4px 6px; border-bottom:1px solid #ddd;">${i+1}</td>
       <td style="padding:4px 6px; border-bottom:1px solid #ddd;">${fmtHistoryDate(v.fecha)}</td>
       <td style="padding:4px 6px; border-bottom:1px solid #ddd; font-weight:bold;">${escapeHtml(v.codigo)}</td>
-      <td style="padding:4px 6px; border-bottom:1px solid #ddd;">${escapeHtml(v.nombre)}</td>
+      <td style="padding:4px 6px; border-bottom:1px solid #ddd;"><span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${punto};margin-right:4px;vertical-align:middle;border:1px solid rgba(0,0,0,.2);"></span>${escapeHtml(v.nombre)}</td>
       <td style="padding:4px 6px; border-bottom:1px solid #ddd; text-align:center;">${v.cantidad}</td>
       <td style="padding:4px 6px; border-bottom:1px solid #ddd; text-align:right;">${fmtMoney(v.precioUnitario)}</td>
       <td style="padding:4px 6px; border-bottom:1px solid #ddd; text-align:right; font-weight:bold;">${fmtMoney(v.total)}</td>
       <td style="padding:4px 6px; border-bottom:1px solid #ddd;">${pagoLabel(v)}</td>
     </tr>`;
   });
-
   let gastosRows = '';
   allGastos.forEach(g => {
     const tp = g.tipoPago === 'qr' ? '📱 QR' : '💵 Efectivo';
+    const punto = g.modo === 'electrico' ? '#f6c000' : '#f26522';
     gastosRows += `<tr>
       <td style="padding:4px 6px; border-bottom:1px solid #ddd; font-weight:bold;">${fmtMoney(g.bs)}</td>
-      <td style="padding:4px 6px; border-bottom:1px solid #ddd;">${escapeHtml(g.observacion || '-')}</td>
+      <td style="padding:4px 6px; border-bottom:1px solid #ddd;"><span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${punto};margin-right:4px;vertical-align:middle;border:1px solid rgba(0,0,0,.2);"></span>${escapeHtml(g.observacion || '-')}</td>
       <td style="padding:4px 6px; border-bottom:1px solid #ddd;">${tp}</td>
       <td style="padding:4px 6px; border-bottom:1px solid #ddd;">${g.ajustar ? 'Si' : 'No'}</td>
     </tr>`;
   });
+  return {
+    list, allGastos, rows, gastosRows,
+    totalMonto, efectivoTotal, qrTotal,
+    gastosTotal, gastosEfectivo, gastosQr,
+    cambioBase, totalFinal, efectivoFinal, qrFinal,
+    dineroReal, resultadoHtml
+  };
+}
+
+// HTML de las filas del resumen de ventas, con el orden pedido:
+// 1) Total vendido, 2) Cambio, 3) Gastos totales, 4) TOTAL FINAL (con Efectivo
+// y QR al lado), 5) Dinero real en caja, 6) ¿Sobra o falta?.
+function resumenItemsHtml(o, totalLabel, conResultado, basico, apilado, sinReal){
+  const cambio = basico ? '' : `<div class="resumen-item"><span class="resumen-label">💰 Cambio / Fondo</span><span class="resumen-val">${fmtMoney(o.cambioBase)}</span></div>`;
+  const dineroReal = (basico || sinReal || isNaN(o.dineroReal) || o.dineroReal < 0) ? '' : `<div class="resumen-item" style="border-top:1px dashed #999; margin-top:6px; padding-top:6px;"><span class="resumen-label">💵 Dinero real en caja</span><span class="resumen-val">${fmtMoney(o.dineroReal)}</span></div>`;
+  const efQR = apilado
+    ? `<div class="resumen-item"><span class="resumen-label">💵 Efectivo</span><span class="resumen-val" style="color:#16a34a">${fmtMoney(o.efectivoFinal)}</span></div>
+       <div class="resumen-item"><span class="resumen-label">📱 QR</span><span class="resumen-val" style="color:#2563eb">${fmtMoney(o.qrFinal)}</span></div>`
+    : `<div class="resumen-total-row">
+        <div class="resumen-item total" style="flex:1;"><span class="resumen-label">${totalLabel}</span><span class="resumen-val">${fmtMoney(o.totalFinal)}</span></div>
+        <div class="resumen-items-inline">
+          <div class="resumen-item"><span class="resumen-label">💵 Efectivo</span><span class="resumen-val" style="color:#16a34a">${fmtMoney(o.efectivoFinal)}</span></div>
+          <div class="resumen-item"><span class="resumen-label">📱 QR</span><span class="resumen-val" style="color:#2563eb">${fmtMoney(o.qrFinal)}</span></div>
+        </div>
+      </div>`;
+  const totalRow = apilado ? `<div class="resumen-item total"><span class="resumen-label">${totalLabel}</span><span class="resumen-val">${fmtMoney(o.totalFinal)}</span></div>` : '';
+  return `
+    <div class="resumen-item"><span class="resumen-label">Total vendido</span><span class="resumen-val">${fmtMoney(o.totalMonto)}</span></div>
+    ${cambio}
+    <div class="resumen-item"><span class="resumen-label">Gastos totales</span><span class="resumen-val" style="color:#dc2626">−${fmtMoney(o.gastosTotal)}</span></div>
+    ${apilado ? totalRow : ''}
+    ${apilado ? '' : efQR}
+    ${apilado ? efQR : ''}
+    ${dineroReal}
+    ${!basico && !sinReal && conResultado ? (o.resultadoHtml || '') : ''}
+  `;
+}
+
+// Convierte la sección computada de un modo en su bloque HTML (ventas +
+// gastos + resumen del ajuste de cuentas).
+function buildVentasSectionHtml(sec, titulo, dotColor){
+  return `
+  <div class="modo-section">
+    <h2 style="color:${dotColor};">${titulo}</h2>
+    <div class="meta">Total: <strong>${sec.list.length} venta(s)</strong></div>
+    <table>
+      <thead><tr><th>#</th><th>Fecha</th><th>Código</th><th>Producto</th><th>Cant.</th><th>Precio</th><th>Total</th><th>Pago</th></tr></thead>
+      <tbody>${sec.rows}</tbody>
+    </table>
+    ${sec.allGastos.length ? `
+    <h3 style="margin:14px 0 4px; font-size:12px; color:#333;">Gastos / Préstamos (${sec.allGastos.length})</h3>
+    <table>
+      <thead><tr><th>Monto</th><th>Observación</th><th>Tipo pago</th><th>Ajustar</th></tr></thead>
+      <tbody>${sec.gastosRows}</tbody>
+    </table>` : ''}
+    <div class="resumen">
+      <div class="resumen-grid">
+        ${resumenItemsHtml(sec, 'TOTAL FINAL', true)}
+      </div>
+    </div>
+  </div>`;
+}
+
+// HTML del resumen general (top del PDF), combinando Manuales + Eléctricas.
+function buildGeneralResumenHtml(gen, dineroReal, resultadoHtml){
+  const o = {
+    totalMonto: gen.totalMonto,
+    cambioBase: gen.cambioBase,
+    gastosTotal: gen.gastosTotal,
+    totalFinal: gen.totalFinal,
+    efectivoFinal: gen.efectivoFinal,
+    qrFinal: gen.qrFinal,
+    dineroReal,
+    resultadoHtml
+  };
+  return `
+  <div class="general-box">
+    <div class="general-title">RESUMEN GENERAL — Manuales + Eléctricas</div>
+    <div class="resumen-grid">
+      ${resumenItemsHtml(o, 'TOTAL GENERAL', true)}
+    </div>
+  </div>`;
+}
+
+function exportVentasPDF(){
+  const dia = ventaFilterDateKey() || 'todas';
+  const diaFmt = dia === 'todas' ? 'Todas las fechas' : dia;
+
+  // -------------------- DUEÑO: PDF GENERAL (Manuales + Eléctricas) ---------
+  if(currentRole === 'admin'){
+    // Si el dueño está viendo un modo concreto (Manuales o Eléctricas), exporta
+    // SOLO ese modo (sin mezclar ni caja general), con su color y su resumen.
+    if(currentModo === 'manual' || currentModo === 'electrico'){
+      const modoSn = currentModo;
+      const esManSn = modoSn === 'manual';
+      const dotColorSn = esManSn ? '#f26522' : '#f6c000';
+      const dotLabelSn = esManSn ? 'Manuales' : 'Eléctricas';
+      const emojiSn = esManSn ? '🛠️' : '⚡';
+      const diaKeySn = ventaFilterDateKey() || dateKeyOffset(0);
+      // Usamos el `db` en memoria (que, al estar el dueño en este modo, es la
+      // base de ese modo) y los getters en vivo para que el PDF refleje al
+      // instante el CAMBIO / DINERO REAL que se acaba de escribir en pantalla.
+      const listSn = ventasDeDia(db.ventas);
+      const allGastosSn = gastosPrestamosDelDia();
+      const cambioSn = getCambioBase(diaKeySn);
+      const dineroRealSn = getDineroReal(diaKeySn);
+      const secSn = computeVentasSectionData(listSn, allGastosSn, cambioSn, dineroRealSn, dotColorSn);
+      const htmlSn = `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Ventas ${dotLabelSn} - ${diaFmt}</title>
+<style>
+  * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  @page { size: letter portrait; margin: 15mm; }
+  body { font-family: Arial, Helvetica, sans-serif; font-size: 11px; color: #1a1a1a; margin: 0; padding: 15mm; display:flex; flex-direction:column; min-height:100vh; }
+  h1 { font-size: 18px; margin: 0 0 4px 0; color: ${dotColorSn}; }
+  h2 { font-size: 14px; margin: 18px 0 6px 0; color: #333; border-bottom: 2px solid ${dotColorSn}; padding-bottom: 3px; }
+  .meta { font-size: 10px; color: #666; margin-bottom: 10px; }
+  table { width: 100%; border-collapse: collapse; margin-top: 6px; }
+  th { background: ${dotColorSn}; color: #fff; padding: 5px 6px; text-align: left; font-size: 10px; }
+  th:nth-child(5) { text-align: center; }
+  th:nth-child(6), th:nth-child(7) { text-align: right; }
+  .ventas-section { flex: 1; }
+  .resumen-footer { border-top: 2px solid #333; padding-top: 10px; margin-top: auto; }
+  .resumen-grid { display: flex; flex-direction: column; gap: 2px; max-width: 260px; margin-left: auto; }
+  .resumen-item { display: flex; justify-content: space-between; padding: 3px 0; }
+  .resumen-item.total { font-size: 14px; font-weight: bold; border-top: 2px solid #333; padding-top: 5px; margin-top: 3px; }
+  .resumen-label { color: #555; }
+  .resumen-val { font-weight: bold; }
+  .resumen-total-row { display: flex; align-items: flex-end; justify-content: space-between; gap: 18px; flex-wrap: wrap; border-top: 2px solid #333; padding-top: 5px; margin-top: 3px; }
+  .resumen-total-row .resumen-item { padding: 0; border: none; }
+  .resumen-total-row .resumen-item.total { font-size: 14px; }
+  .resumen-items-inline { display: flex; gap: 26px; font-size: 12px; }
+  .resumen-items-inline .resumen-label { font-size: 11.5px; }
+  .footer { margin-top: 12px; font-size: 9px; color: #999; text-align: center; border-top: 1px solid #ddd; padding-top: 6px; }
+  @media print { body { padding: 0; min-height: auto; } .no-print { display: none; } }
+</style></head><body>
+  <h1>${emojiSn} Ventas ${dotLabelSn}</h1>
+  <div class="meta">Fecha: <strong>${diaFmt}</strong> &nbsp;|&nbsp; Total: <strong>${listSn.length} venta(s)</strong></div>
+  <div class="ventas-section">
+  <table>
+    <thead><tr><th>#</th><th>Fecha</th><th>Código</th><th>Producto</th><th>Cant.</th><th>Precio</th><th>Total</th><th>Pago</th></tr></thead>
+    <tbody>${secSn.rows}</tbody>
+  </table>
+  ${secSn.allGastos.length ? `
+  <h2>Gastos / Préstamos (${secSn.allGastos.length})</h2>
+  <table>
+    <thead><tr><th>Monto</th><th>Observación</th><th>Tipo pago</th><th>Ajustar</th></tr></thead>
+    <tbody>${secSn.gastosRows}</tbody>
+  </table>` : ''}
+  </div>
+  <div class="resumen-footer">
+    <div class="resumen-grid">
+      ${resumenItemsHtml(secSn, 'TOTAL FINAL', true, false, true)}
+    </div>
+    <div class="footer">StockFerre — ${dotLabelSn} — ${diaFmt}</div>
+  </div>
+  <div class="no-print" style="text-align:center; margin-top:20px;">
+    <button onclick="window.print(); window.close();" style="padding:10px 24px; font-size:14px; background:${dotColorSn}; color:#fff; border:none; border-radius:6px; cursor:pointer;">🖨️ Imprimir / Guardar como PDF</button>
+  </div>
+</body></html>`;
+      const winSn = window.open('', '_blank');
+      if(!winSn){ toast('No se pudo abrir la ventana. Permití pop-ups para esta página.', 'error'); return; }
+      winSn.document.write(htmlSn);
+      winSn.document.close();
+      return;
+    }
+    const diaKey = ventaFilterDateKey() || dateKeyOffset(0);
+    const modos = [
+      { dbObj: loadModoDB('manual'), dotColor:'#f26522', dotLabel:'Manuales', emoji:'🛠️' },
+      { dbObj: loadModoDB('electrico'), dotColor:'#f6c000', dotLabel:'Eléctricas', emoji:'⚡' }
+    ];
+    const secciones = modos.map(m => {
+      const list = ventasDeDia(m.dbObj.ventas);
+      const allGastos = gastosDelDiaFromDB(m.dbObj, ventaFilterDateKey());
+      const aj = ajustesFromDB(m.dbObj, diaKey);
+      // Puntos de identificación: 🟠 naranja para Manuales, 🟡 amarillo para Eléctricas.
+      const punto = m.dotLabel === 'Manuales' ? '#f26522' : '#f6c000';
+      const sec = computeVentasSectionData(list, allGastos, aj.cambio, aj.dineroReal, punto);
+      sec.dotColor = m.dotColor; sec.dotLabel = m.dotLabel; sec.emoji = m.emoji;
+      return sec;
+    });
+
+    const gen = {
+      totalMonto: secciones.reduce((s,x)=> s + x.totalMonto, 0),
+      efectivoFinal: secciones.reduce((s,x)=> s + x.efectivoFinal, 0),
+      qrFinal: secciones.reduce((s,x)=> s + x.qrFinal, 0),
+      cambioBase: secciones.reduce((s,x)=> s + x.cambioBase, 0),
+      gastosTotal: secciones.reduce((s,x)=> s + x.gastosTotal, 0),
+      totalFinal: secciones.reduce((s,x)=> s + x.totalFinal, 0)
+    };
+    let dineroRealGen = NaN;
+    if(secciones.every(x => !isNaN(x.dineroReal) && x.dineroReal >= 0)){
+      dineroRealGen = secciones.reduce((s,x)=> s + x.dineroReal, 0);
+    }
+    let resultadoGen = '';
+    if(!isNaN(dineroRealGen)){
+      const dif = dineroRealGen - gen.efectivoFinal;
+      if(Math.abs(dif) < 0.005) resultadoGen = `<div class="resumen-item total" style="color:#16a34a;"><span class="resumen-label">✅ Cuadra exacto</span></div>`;
+      else if(dif > 0) resultadoGen = `<div class="resumen-item" style="color:#d97706;"><span class="resumen-label">💰 Sobran</span><span class="resumen-val">${fmtMoney(dif)}</span></div>`;
+      else resultadoGen = `<div class="resumen-item" style="color:#dc2626;"><span class="resumen-label">⚠️ Faltan</span><span class="resumen-val">${fmtMoney(Math.abs(dif))}</span></div>`;
+    }
+
+    const seccionesHtml = secciones.map(sec => buildVentasSectionHtml(sec, `${sec.emoji} ${sec.dotLabel}`, sec.dotColor)).join('');
+
+    const html = `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Ventas General - ${diaFmt}</title>
+<style>
+  * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  @page { size: letter portrait; margin: 15mm; }
+  body { font-family: Arial, Helvetica, sans-serif; font-size: 11px; color: #1a1a1a; margin: 0; padding: 15mm; }
+  h1 { font-size: 19px; margin: 0 0 4px 0; color: #333; }
+  h2 { font-size: 15px; margin: 18px 0 2px 0; color: #333; border-bottom: 2px solid #333; padding-bottom: 3px; }
+  h3 { margin: 14px 0 4px; font-size: 12px; color: #333; }
+  .meta { font-size: 10px; color: #666; margin-bottom: 8px; }
+  table { width: 100%; border-collapse: collapse; margin-top: 6px; }
+  th { background: #333; color: #fff; padding: 5px 6px; text-align: left; font-size: 10px; }
+  th:nth-child(5) { text-align: center; }
+  th:nth-child(6), th:nth-child(7) { text-align: right; }
+  .modo-section { page-break-before: always; }
+  .resumen { border-top: 2px solid #333; padding-top: 10px; margin-top: 14px; }
+  .resumen-grid { display: flex; flex-direction: column; gap: 2px; max-width: 280px; }
+  .resumen-item { display: flex; justify-content: space-between; padding: 3px 0; }
+  .resumen-item.total { font-size: 14px; font-weight: bold; border-top: 2px solid #333; padding-top: 5px; margin-top: 3px; }
+  .resumen-label { color: #555; }
+  .resumen-val { font-weight: bold; }
+  .resumen-total-row { display: flex; align-items: flex-end; justify-content: space-between; gap: 18px; flex-wrap: wrap; border-top: 2px solid #333; padding-top: 5px; margin-top: 3px; }
+  .resumen-total-row .resumen-item { padding: 0; border: none; }
+  .resumen-total-row .resumen-item.total { font-size: 14px; }
+  .resumen-items-inline { display: flex; gap: 26px; font-size: 12px; }
+  .resumen-items-inline .resumen-label { font-size: 11.5px; }
+  .general-box { border: 3px solid #333; border-radius: 10px; padding: 14px 18px; margin-top: 16px; background:#fff; }
+  .general-title { font-size: 13px; font-weight: 800; color: #333; margin-bottom: 8px; letter-spacing:.03em; }
+  .footer { margin-top: 16px; font-size: 9px; color: #999; text-align: center; border-top: 1px solid #ddd; padding-top: 6px; }
+  @media print { body { padding: 0; } .no-print { display: none; } }
+</style></head><body>
+  <h1>🧾 VENTAS GENERAL</h1>
+  <div class="meta">Fecha: <strong>${diaFmt}</strong> &nbsp;|&nbsp; Manuales: <strong>${secciones[0].list.length} venta(s)</strong> &nbsp;|&nbsp; Eléctricas: <strong>${secciones[1].list.length} venta(s)</strong></div>
+  ${buildGeneralResumenHtml(gen, dineroRealGen, resultadoGen)}
+  ${seccionesHtml}
+  <div class="footer">StockFerre — Ventas General — ${diaFmt}</div>
+  <div class="no-print" style="text-align:center; margin-top:20px;">
+    <button onclick="window.print(); window.close();" style="padding:10px 24px; font-size:14px; background:#333; color:#fff; border:none; border-radius:6px; cursor:pointer;">🖨️ Imprimir / Guardar como PDF</button>
+  </div>
+</body></html>`;
+
+    const win = window.open('', '_blank');
+    if(!win){ toast('No se pudo abrir la ventana. Permití pop-ups para esta página.', 'error'); return; }
+    win.document.write(html);
+    win.document.close();
+    return;
+  }
+
+  // -------------------- INVITADO: PDF de su propio día (modo único) --------
+  const list = ventasFiltradas();
+  if(!list.length){ toast('No hay ventas para exportar', 'error'); return; }
+  const esMan = currentModo !== 'invitado' && currentModo === 'manual';
+  const dotColor = currentModo === 'invitado' ? '#22c55e' : (esMan ? '#f26522' : '#f6c000');
+  const dotLabel = currentModo === 'invitado' ? 'Ventas' : (esMan ? 'Manuales' : 'Eléctricas');
+  const ajusteDia = dia === 'todas' ? dateKeyOffset(0) : dia;
+  const allGastos = dedupeGastosById(gastosPrestamosDelDia());
+  const aj = ajustesFromDB(db, ajusteDia);
+  const comboCambio = currentModo === 'invitado'
+    ? (getCambioForModo(ajusteDia, 'manual') + getCambioForModo(ajusteDia, 'electrico'))
+    : aj.cambio;
+  const sec = computeVentasSectionData(list, allGastos, comboCambio, aj.dineroReal, dotColor);
 
   const html = `<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>Ventas ${dotLabel} - ${diaFmt}</title>
 <style>
+  * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
   @page { size: letter portrait; margin: 15mm; }
   body { font-family: Arial, Helvetica, sans-serif; font-size: 11px; color: #1a1a1a; margin: 0; padding: 15mm; display:flex; flex-direction:column; min-height:100vh; }
   h1 { font-size: 18px; margin: 0 0 4px 0; color: ${dotColor}; }
@@ -5664,33 +6057,31 @@ function exportVentasPDF(){
   .resumen-item.total { font-size: 14px; font-weight: bold; border-top: 2px solid #333; padding-top: 5px; margin-top: 3px; }
   .resumen-label { color: #555; }
   .resumen-val { font-weight: bold; }
+  .resumen-total-row { display: flex; align-items: flex-end; justify-content: space-between; gap: 18px; flex-wrap: wrap; border-top: 2px solid #333; padding-top: 5px; margin-top: 3px; }
+  .resumen-total-row .resumen-item { padding: 0; border: none; }
+  .resumen-total-row .resumen-item.total { font-size: 14px; }
+  .resumen-items-inline { display: flex; gap: 26px; font-size: 12px; }
+  .resumen-items-inline .resumen-label { font-size: 11.5px; }
   .footer { margin-top: 12px; font-size: 9px; color: #999; text-align: center; border-top: 1px solid #ddd; padding-top: 6px; }
   @media print { body { padding: 0; min-height: auto; } .no-print { display: none; } }
 </style></head><body>
-  <h1>${esMan ? '🛠️ Ventas Manuales' : '⚡ Ventas Eléctricas'}</h1>
+  <h1>${currentModo === 'invitado' ? '🧾 Ventas del Invitado' : (esMan ? '🛠️ Ventas Manuales' : '⚡ Ventas Eléctricas')}</h1>
   <div class="meta">Fecha: <strong>${diaFmt}</strong> &nbsp;|&nbsp; Total: <strong>${list.length} venta(s)</strong></div>
   <div class="ventas-section">
   <table>
     <thead><tr><th>#</th><th>Fecha</th><th>Código</th><th>Producto</th><th>Cant.</th><th>Precio</th><th>Total</th><th>Pago</th></tr></thead>
-    <tbody>${rows}</tbody>
+    <tbody>${sec.rows}</tbody>
   </table>
-  ${allGastos.length ? `
-  <h2>Gastos / Préstamos (${allGastos.length})</h2>
+  ${sec.allGastos.length ? `
+  <h2>Gastos / Préstamos (${sec.allGastos.length})</h2>
   <table>
     <thead><tr><th>Monto</th><th>Observación</th><th>Tipo pago</th><th>Ajustar</th></tr></thead>
-    <tbody>${gastosRows}</tbody>
+    <tbody>${sec.gastosRows}</tbody>
   </table>` : ''}
   </div>
   <div class="resumen-footer">
     <div class="resumen-grid">
-      <div class="resumen-item"><span class="resumen-label">Total vendido</span><span class="resumen-val">${fmtMoney(totalMonto)}</span></div>
-      <div class="resumen-item"><span class="resumen-label">💵 Efectivo</span><span class="resumen-val" style="color:#16a34a">${fmtMoney(efectivoFinal)}</span></div>
-      <div class="resumen-item"><span class="resumen-label">📱 QR</span><span class="resumen-val" style="color:#2563eb">${fmtMoney(qrFinal)}</span></div>
-      <div class="resumen-item"><span class="resumen-label">💰 Cambio / Fondo</span><span class="resumen-val">${fmtMoney(cambioBase)}</span></div>
-      <div class="resumen-item"><span class="resumen-label">Gastos ajustados</span><span class="resumen-val" style="color:#dc2626">−${fmtMoney(gastosTotal)}</span></div>
-      <div class="resumen-item total"><span class="resumen-label">TOTAL FINAL</span><span class="resumen-val">${fmtMoney(totalFinal)}</span></div>
-      ${!isNaN(dineroReal) && dineroReal >= 0 ? `<div class="resumen-item" style="border-top:1px dashed #999; margin-top:4px; padding-top:5px;"><span class="resumen-label">💵 Dinero real en caja</span><span class="resumen-val">${fmtMoney(dineroReal)}</span></div>` : ''}
-      ${resultadoHtml}
+      ${resumenItemsHtml(sec, 'TOTAL FINAL', true, false, true)}
     </div>
     <div class="footer">StockFerre — ${dotLabel} — ${diaFmt}</div>
   </div>
@@ -5832,11 +6223,7 @@ function renderProductos(){
     list = list.filter(p => normalize(p.categoria) === normalize(catFilter));
   }
   if(search){
-    list = list.filter(p =>
-      normalize(p.nombre).includes(search) ||
-      normalize(p.codigo).includes(search) ||
-      normalize(p.marca).includes(search)
-    );
+    list = list.filter(p => productMatchesSearch(p, search));
   }
   list.sort((a,b)=> a.nombre.localeCompare(b.nombre, 'es'));
 
@@ -6063,6 +6450,15 @@ function openProductDetails(productId){
   // Los invitados no tienen acceso a Ingresos, así que se les oculta el botón.
   const detVerIngresos = document.getElementById('btnDetVerIngresos');
   if(detVerIngresos) detVerIngresos.style.display = currentRole === 'guest' ? 'none' : '';
+  // Botón "Vender": abre el modal de venta con este producto (en la fecha del
+  // día que se está viendo).
+  const detVender = document.getElementById('btnDetVender');
+  if(detVender){
+    detVender.onclick = ()=>{
+      closeModalById('modalProductoDetalle');
+      openVentaModal(p);
+    };
+  }
   openModal('modalProductoDetalle');
 }
 
@@ -7376,10 +7772,20 @@ function confirmDialog(title, message, onAccept){
 //   onKeep    → Sí (el inventario NO se modifica).
 //   onRestore → No (el inventario sí se modifica).
 let ventaBorrarCallbacks = null;
-function ventaBorrarDialog(title, message, onKeep, onRestore){
+function ventaBorrarDialog(title, message, onKeep, onRestore, soloRestore){
   if(title) document.getElementById('ventaBorrarTitle').textContent = title;
   document.getElementById('ventaBorrarMessage').textContent = message;
   ventaBorrarCallbacks = { onKeep, onRestore };
+  const keepBtn = document.getElementById('ventaBorrarKeepBtn');
+  if(keepBtn){
+    // En modo "solo restaurar" (eliminar una venta) se oculta la opción de
+    // mantener inventario: se confirma y el stock se devuelve automáticamente.
+    keepBtn.style.display = soloRestore ? 'none' : '';
+  }
+  const restoreBtn = document.getElementById('ventaBorrarRestoreBtn');
+  if(restoreBtn){
+    restoreBtn.textContent = soloRestore ? 'Eliminar' : 'No, modificar inventario';
+  }
   openModal('modalVentaBorrar');
 }
 
@@ -8001,6 +8407,18 @@ function setupEventListeners(){
     renderAjusteCuentas(ventasFiltradas());
   });
 
+  // "CAMBIO" por modo del invitado (Manuales naranja / Eléctricas amarillo).
+  const ajusteCambioMan = document.getElementById('ajusteCambioMan');
+  const ajusteCambioEl = document.getElementById('ajusteCambioEl');
+  if(ajusteCambioMan) ajusteCambioMan.addEventListener('change', (e)=>{
+    setCambioForModo(parseFloat(e.target.value) || 0, ventaFilterDateKey() || dateKeyOffset(0), 'manual');
+    renderAjusteCuentas(ventasFiltradas());
+  });
+  if(ajusteCambioEl) ajusteCambioEl.addEventListener('change', (e)=>{
+    setCambioForModo(parseFloat(e.target.value) || 0, ventaFilterDateKey() || dateKeyOffset(0), 'electrico');
+    renderAjusteCuentas(ventasFiltradas());
+  });
+
   // "Dinero real" en Ajuste de cuentas: al escribir, compara con el efectivo ajustado.
   // Se guarda POR DÍA para que no se pierda al cambiar de fecha.
   const realInput = document.getElementById('ajusteDineroReal');
@@ -8464,9 +8882,10 @@ function setupEventListeners(){
     if(!delId) return;
     const v = db.ventas.find(x => x.id === delId);
     const nombre = v ? (v.nombre || v.codigo) : 'esta venta';
-    ventaBorrarDialog('Eliminar venta', `¿Eliminar "${nombre}"?\n\n¿Mantener el inventario?\n• Sí = el inventario NO se modifica.\n• No = la cantidad vuelve al stock.`,
-      ()=> deleteVenta(delId, true),
-      ()=> deleteVenta(delId, false));
+    ventaBorrarDialog('Eliminar venta', `¿Eliminar "${nombre}"?`,
+      null,
+      ()=> deleteVenta(delId, false),
+      true);
   });
 
   // Compras

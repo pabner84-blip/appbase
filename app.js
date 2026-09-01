@@ -5594,6 +5594,34 @@ function isExcelXMLFile(file, text){
   return String(text || '').trim().startsWith('<?xml');
 }
 
+// Convierte el contenido de un archivo importado en filas (arreglo de arreglos)
+// sin importar su formato: .xlsx / .xls reales (con SheetJS) o CSV / Excel XML
+// 2003 (parser manual). Devuelve null si no se pudo interpretar.
+function fileRowsFromBuffer(file, buf){
+  // 1) Con SheetJS: lee .xlsx, .xls o CSV reales (incluye los guardados por
+  //    Excel después de editarlos, que es justo donde fallaba el .xls XML).
+  if(typeof XLSX !== 'undefined'){
+    try{
+      const wb = XLSX.read(buf, { type: 'array' });
+      if(wb && wb.SheetNames && wb.SheetNames.length){
+        const sheet = wb.Sheets[wb.SheetNames[0]];
+        if(sheet) return XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' });
+      }
+    }catch(e){ console.error('Error leyendo con SheetJS', e); }
+  }
+  // 2) Respaldo sin SheetJS: decodifica a texto y detecta Excel XML 2003 o CSV.
+  try{
+    let text = '';
+    if(buf instanceof ArrayBuffer){
+      text = new TextDecoder('utf-8').decode(buf);
+    }else{
+      text = String(buf);
+    }
+    text = text.replace(/^\uFEFF/, '');
+    return isExcelXMLFile(file, text) ? parseExcelXML(text) : parseCSV(text);
+  }catch(e){ console.error('Error leyendo archivo como texto', e); return null; }
+}
+
 // Exporta los productos a un archivo Excel (.xls) que abre directo sin errores
 // ni apóstrofos. El CSV no podía hacerlo: Excel detecta la columna de códigos
 // como número (por la mayoría de códigos numéricos) y marca como "errores" los
@@ -5607,7 +5635,6 @@ function exportProductosExcel(){
     return;
   }
   const header = ['CODIGO','CODIGO DE BARRAS','DESCRIPCION','MARCA','CATEGORIA','PRECIO COMPRA','PRECIO MARCA','PRECIO VENTA','STOCK','STOCK MIN','CARACTERISTICAS','IMAGEN'];
-  const types = ['text','text','text','text','text','number','number','number','number','number','text','text'];
   const rows = db.productos.map(p => [
     p.codigo || '', p.codigoBarras || '', p.nombre, p.marca || '', p.categoria || '',
     p.precioCompra, p.precioMarca, p.precioVenta, p.stock,
@@ -5615,6 +5642,24 @@ function exportProductosExcel(){
     p.caracteristicas || '',
     getImage(p.id) ? '[foto local]' : ''
   ]);
+  // Con SheetJS generamos un .xlsx REAL: Excel lo abre sin el aviso de "formato
+  // y extensión no coinciden" y, al editarlo y guardarlo, se re-importa bien.
+  if(typeof XLSX !== 'undefined'){
+    try{
+      const aoa = [header, ...rows];
+      const ws = XLSX.utils.aoa_to_sheet(aoa);
+      ws['!cols'] = [12,15,30,14,14,12,12,12,9,10,32,10].map(w => ({ wch: w }));
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'Productos');
+      XLSX.writeFile(wb, `stockferre_productos_${todayISO().slice(0,10)}.xlsx`);
+      toast('Productos exportados a Excel (.xlsx)', 'success');
+      return;
+    }catch(err){
+      console.error('Error generando .xlsx', err);
+      // se cae al .xls XML 2003 como respaldo
+    }
+  }
+  const types = ['text','text','text','text','text','number','number','number','number','number','text','text'];
   downloadXLS(`stockferre_productos_${todayISO().slice(0,10)}.xls`, [{ name: 'Productos', header, rows, types }]);
   toast('Productos exportados a Excel (las fotos se respaldan con "Exportar backup")', 'success');
 }
@@ -5651,7 +5696,7 @@ function importInventarioCSV(file){
         const p = getProductoByCodigo(codigo);
         if(!p){ noEncontrados++; continue; }
         const stockAnterior = p.stock || 0;
-        const nuevoStock = parseFloat(String(r[idx.stock] ?? '').replace(',','.'));
+        const nuevoStock = parsePrecio(r[idx.stock]);
         if(!isNaN(nuevoStock)) p.stock = nuevoStock;
         if(idx.codigoBarras > -1){
           const cb = String(r[idx.codigoBarras] || '').trim();
@@ -6924,15 +6969,31 @@ function normalizeHeader(h){
     .replace(/\s+/g,' ');
 }
 
+// Convierte un número a su valor numérico soportando el formato de Bolivia /
+// Latinoamérica, donde la COMA es el separador decimal y el PUNTO separa miles.
+// Ejemplos manejados correctamente:
+//   "0"      → 0         "1234,56"  → 1234.56
+//   "1.234,56" → 1234.56  "10"       → 10
+//   "1.234,00" → 1234
 function parsePrecio(raw){
   if(raw === undefined || raw === null) return 0;
-  const cleaned = String(raw).trim().replace(/[^\d.,-]/g,'');
-  if(!cleaned) return 0;
-  // Si usa coma como decimal y no hay punto, conviértela
-  const normalized = (cleaned.includes(',') && !cleaned.includes('.'))
-    ? cleaned.replace(',', '.')
-    : cleaned.replace(/,/g,'');
-  const n = parseFloat(normalized);
+  if(typeof raw === 'number') return isNaN(raw) ? 0 : raw;
+  let s = String(raw).trim().replace(/\s/g,'');
+  if(!s) return 0;
+  const hasComma = s.includes(',');
+  const hasDot = s.includes('.');
+  if(hasComma){
+    // Formato Español/LatAm: la coma es el decimal.
+    if(hasDot){
+      // "1.234,56" → el punto es separador de miles → se elimina.
+      s = s.replace(/\./g,'').replace(',', '.');
+    }else{
+      // "1234,56" → la coma pasa a punto decimal.
+      s = s.replace(',', '.');
+    }
+  }
+  // Si solo hay punto, se toma como decimal ("1234.56").
+  const n = parseFloat(s);
   return isNaN(n) ? 0 : n;
 }
 
@@ -6940,11 +7001,11 @@ function importProductsCSV(file){
   const reader = new FileReader();
   reader.onload = (e)=>{
     try{
-      // Acepta CSV (coma, punto y coma o tabulador) o .xls exportado por la app
-      // (Excel XML 2003) para que lo que se exporta también se pueda importar.
-      const text = e.target.result;
-      const rows = isExcelXMLFile(file, text) ? parseExcelXML(text) : parseCSV(text);
-      if(rows.length < 2){
+      // Acepta .xlsx / .xls (con SheetJS) o CSV / Excel XML 2003 (con el parser
+      // manual), para que lo que se exporta también se pueda importar, incluso
+      // después de editarlo y guardarlo con Excel.
+      const rows = fileRowsFromBuffer(file, e.target.result);
+      if(!rows || rows.length < 2){
         toast('El archivo CSV no tiene datos', 'error');
         return;
       }
@@ -7002,6 +7063,10 @@ function importProductsCSV(file){
           existing.precioMarca = precioMarca || existing.precioMarca;
           existing.precioVenta = precioVenta || existing.precioVenta;
           if(stockMinVal !== null) existing.stockMin = stockMinVal;
+          // Si el archivo trae la columna STOCK, se aplica el valor EXACTO
+          // (así "poner 0 en Excel" realmente deja el stock en 0). Usa >= 0
+          // para que el 0 y los negativos también se apliquen.
+          if(stockVal !== null && !isNaN(stockVal) && stockVal >= 0) existing.stock = stockVal;
           if(caracteristicas) existing.caracteristicas = caracteristicas;
           touchProducto(existing);
           productoId = existing.id;
@@ -7013,7 +7078,7 @@ function importProductsCSV(file){
             codigo, codigoBarras, nombre, marca, categoria,
             precioCompra, precioMarca, precioVenta,
             caracteristicas,
-            stock: 0,
+            stock: (stockVal !== null && !isNaN(stockVal) && stockVal >= 0) ? stockVal : 0,
             stockMin: stockMinVal !== null ? stockMinVal : 0,
             fechaCreacion: todayISO(),
             _updatedAt: Date.now()
@@ -7046,7 +7111,9 @@ function importProductsCSV(file){
     }
   };
   reader.onerror = ()=> toast('Error al leer el archivo', 'error');
-  reader.readAsText(file, 'UTF-8');
+  // Se lee como ArrayBuffer para poder interpretar .xlsx/.xls binarios con
+  // SheetJS y, si no está disponible, decodificarlo a texto (CSV / XML).
+  reader.readAsArrayBuffer(file);
 }
 
 /* -------------------------------------------------------------------------

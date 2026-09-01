@@ -170,7 +170,7 @@
         <select id="prodFilterCategoria" class="input select"><option value="">Todas las categorías</option></select>
         <button class="btn btn-primary admin-only" id="btnNewProduct">+ Nuevo producto</button>
         <button class="btn btn-secondary admin-only" id="btnExportProducts">📤 Exportar Excel</button>
-        <button class="btn btn-secondary admin-only" id="btnImportProducts">📥 Importar CSV</button>
+        <button class="btn btn-secondary admin-only" id="btnImportProducts">📥 Importar CSV/Excel</button>
         <button class="btn btn-primary admin-only" id="btnAutoFillAll">🖼️ Autollenar todos</button>
       </div>
       <div class="table-wrap">
@@ -552,7 +552,7 @@
         <div class="panel">
           <div class="panel-header"><h3>📂 Importar productos (CSV)</h3></div>
           <div class="panel-body">
-            <p class="hint">Acepta un CSV exportado antes (coma, punto y coma o tabulador) o el archivo .xls que genera "Exportar Excel". Formato: <code>CODIGO,DESCRIPCION,MARCA,CATEGORIA,CODIGO DE BARRAS,PRECIO COMPRA,PRECIO VENTA</code> (código de barras es opcional).</p>
+            <p class="hint">Acepta un CSV exportado antes (coma, punto y coma o tabulador) o el archivo .xlsx / .xls que genera "Exportar Excel". Formato: <code>CODIGO,DESCRIPCION,MARCA,CATEGORIA,CODIGO DE BARRAS,PRECIO COMPRA,PRECIO VENTA</code> (código de barras es opcional).</p>
             <button class="btn btn-secondary" id="btnImportProductsConfig">📥 Elegir archivo CSV o Excel</button>
           </div>
         </div>
@@ -1262,7 +1262,7 @@
 <div class="toast-container" id="toastContainer"></div>
 
 <!-- Hidden file inputs -->
-<input type="file" id="fileImportProducts" accept=".csv,.xls" hidden>
+<input type="file" id="fileImportProducts" accept=".csv,.xls,.xlsx,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" hidden>
 <input type="file" id="fileImportInventario" accept=".csv" hidden>
 <input type="file" id="fileImportVentas" accept=".csv" hidden>
 <input type="file" id="fileImportCompras" accept=".csv" hidden>
@@ -1286,6 +1286,9 @@
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js"></script>
 <script src="firebase-config.js"></script>
+<!-- SheetJS: genera/lee archivos .xlsx REALES (Excel los abre sin el aviso de
+     "formato y extensión no coinciden" y se re-importan de forma confiable). -->
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

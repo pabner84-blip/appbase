@@ -374,7 +374,17 @@ function applyRemoteClears(local, remote){
   const rc = Number(remote.comprasClearedAt) || 0;
   const lc = Number(local.comprasClearedAt) || 0;
   if(rc > lc){
-    local.compras = [];
+    // Solo se borran los ingresos ANTERIORES a esta marca de vaciado. Los que
+    // se crearon DESPUÉS (por ejemplo, compras recién importadas o registradas
+    // en este dispositivo después de que otro vació el historial) se conservan:
+    // si no, un "vaciar" hecho en un celular borraría también lo recién cargado
+    // desde Excel en este. Los registros viejos sin marca de creación (_createdAt,
+    // anteriores a este arreglo) tienen 0 y quedan por debajo de la marca: se
+    // limpian como antes.
+    local.compras = (local.compras || []).filter(c => {
+      const creada = Number(c && c._createdAt) || 0;
+      return creada > rc;
+    });
     local.comprasClearedAt = rc;
   }
   return local;
@@ -4058,6 +4068,10 @@ function importComprasCSV(file){
           fecha: idx.fecha > -1 ? (r[idx.fecha] || todayISO()) : todayISO(),
           proveedor,
           observaciones,
+          // Momento exacto en que se importó este registro: protege las compras
+          // recién importadas de borrarse cuando otro dispositivo vacía el
+          // historial (ver applyRemoteClears).
+          _createdAt: Date.now(),
           productoId: p ? p.id : null
         });
         importadas++;
@@ -5036,6 +5050,9 @@ function handleCompraSubmit(e){
     fecha: compraFechaFromInput(fechaElegida),
     proveedor,
     observaciones,
+    // Momento exacto en que se registró esta compra: evita que un "vaciar
+    // historial" hecho en otro dispositivo borre lo que se acaba de cargar aquí.
+    _createdAt: Date.now(),
     productoId: p.id
   });
   db.compras.sort((a,b)=> new Date(b.fecha) - new Date(a.fecha));

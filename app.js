@@ -100,6 +100,7 @@ function normalizeDB(obj){
   obj.compras = obj.compras || [];
   obj.gastos = obj.gastos || [];
   obj.gastosPrestamos = obj.gastosPrestamos || [];
+  obj.comprasClearedAt = typeof obj.comprasClearedAt === 'number' ? obj.comprasClearedAt : 0;
   obj.finanzas = obj.finanzas || {};
   obj.finanzas.caja = typeof obj.finanzas.caja === 'number' ? obj.finanzas.caja : 0;
   obj.finanzas.retiros = obj.finanzas.retiros || [];
@@ -351,7 +352,32 @@ function mergeRemoteIntoLocal(local, remote){
     (local.ajustes || {}),
     (remote.ajustes || {})
   );
+  // La marca de vaciado del historial de ingresos: nunca retrocede. El máximo
+  // de las dos evita que una copia vieja "deshaga" un vaciado ya propagado.
+  merged.comprasClearedAt = Math.max(
+    Number(local.comprasClearedAt) || 0,
+    Number(remote.comprasClearedAt) || 0
+  );
   return normalizeDB(merged);
+}
+
+// Propaga un "Vaciar historial de ingresos" hecho en OTRO dispositivo.
+// Cuando alguien vacía el historial deja en la nube una marca (comprasClearedAt).
+// Si la copia remota trae una marca MÁS NUEVA que la local, este dispositivo
+// borra también sus ingresos locales para que el vaciado quede en todos lados.
+// Se llama ANTES de mergeRemoteIntoLocal, porque la fusión por id conserva los
+// registros que solo existen localmente y eso volvería a "resucitar" los
+// ingresos borrados.
+function applyRemoteClears(local, remote){
+  local = local || {};
+  remote = remote || {};
+  const rc = Number(remote.comprasClearedAt) || 0;
+  const lc = Number(local.comprasClearedAt) || 0;
+  if(rc > lc){
+    local.compras = [];
+    local.comprasClearedAt = rc;
+  }
+  return local;
 }
 
 let guestUnsubs = [];
@@ -380,6 +406,7 @@ function connectGuestFirebase(){
         if(snap.exists){
           const prev = loadModoDB(modo);
           const remote = normalizeDB(snap.data());
+          applyRemoteClears(prev, remote);
           const merged = mergeRemoteIntoLocal(prev, remote);
           merged.historialEscaneos = prev.historialEscaneos;
           merged.historialBusquedas = prev.historialBusquedas;
@@ -393,6 +420,7 @@ function connectGuestFirebase(){
         if(!snap.exists) return;
         const prev = loadModoDB(modo);
         const remote = normalizeDB(snap.data());
+        applyRemoteClears(prev, remote);
         const merged = mergeRemoteIntoLocal(prev, remote);
         merged.historialEscaneos = prev.historialEscaneos;
         merged.historialBusquedas = prev.historialBusquedas;
@@ -414,6 +442,7 @@ function connectGuestFirebase(){
         const prevRaw = localStorage.getItem(storageKey());
         const prev = prevRaw ? normalizeDB(JSON.parse(prevRaw)) : defaultDB();
         const remote = normalizeDB(snap.data());
+        applyRemoteClears(prev, remote);
         const merged = mergeRemoteIntoLocal(prev, remote);
         merged.historialEscaneos = guestSessionScans;
         merged.historialBusquedas = guestSessionSearches;
@@ -429,6 +458,7 @@ function connectGuestFirebase(){
       const prevRaw = localStorage.getItem(storageKey());
       const prev = prevRaw ? normalizeDB(JSON.parse(prevRaw)) : defaultDB();
       const remote = normalizeDB(snap.data());
+      applyRemoteClears(prev, remote);
       const merged = mergeRemoteIntoLocal(prev, remote);
       merged.historialEscaneos = guestSessionScans;
       merged.historialBusquedas = guestSessionSearches;
@@ -520,6 +550,7 @@ async function connectFirebase(){
       // (por si este dispositivo tenía cambios que la nube todavía no vio),
       // manteniendo siempre el historial local.
       const remote = normalizeDB(snap.data());
+      applyRemoteClears(db, remote);
       const merged = mergeRemoteIntoLocal(db, remote);
       merged.historialEscaneos = db.historialEscaneos;
       merged.historialBusquedas = db.historialBusquedas;
@@ -538,6 +569,7 @@ async function connectFirebase(){
       if(!snap.exists) return;
       const prevVentas = (db.ventas || []).map(v => v.id);
       const remote = normalizeDB(snap.data());
+      applyRemoteClears(db, remote);
       const merged = mergeRemoteIntoLocal(db, remote);
       merged.historialEscaneos = db.historialEscaneos;
       merged.historialBusquedas = db.historialBusquedas;
@@ -588,6 +620,7 @@ function cacheRemoteModo(data, modo){
   try{
     const prev = loadModoDB(modo);
     const remote = normalizeDB(data);
+    applyRemoteClears(prev, remote);
     const merged = mergeRemoteIntoLocal(prev, remote);
     merged.historialEscaneos = prev.historialEscaneos;
     merged.historialBusquedas = prev.historialBusquedas;
@@ -902,9 +935,21 @@ function escapeHtml(str){
     .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
 
+// Redondea cualquier valor de dinero a UN decimal (la app trabaja con 1 decimal).
+// Si llega "12.345" devuelve 12.3; si llega "12.350" devuelve 12.3 (el tercer
+// decimal simplemente se descarta redondeando al segundo).
+function round1(n){
+  return Math.round((Number(n) || 0) * 10) / 10;
+}
+
 function fmtMoney(n){
   n = Number(n) || 0;
-  return 'Bs ' + n.toFixed(2);
+  return 'Bs ' + n.toFixed(1);
+}
+
+function fmtNum1(n){
+  n = Number(n) || 0;
+  return n.toFixed(1);
 }
 
 function normalize(str){
@@ -1357,6 +1402,10 @@ function upsertCategoria(nombre){
 
 function saveProducto(data){
   upsertCategoria(data.categoria);
+  // La app maneja los precios con UN decimal: se redondean al guardar.
+  data.precioCompra = round1(parseFloat(data.precioCompra)) || 0;
+  data.precioMarca = round1(parseFloat(data.precioMarca)) || 0;
+  data.precioVenta = round1(parseFloat(data.precioVenta)) || 0;
 
   if(data.id){
     const p = getProductoById(data.id);
@@ -1431,7 +1480,7 @@ function deleteProducto(id){
 function saveVenta(data){
   const cantidad = parseFloat(data.cantidad) || 0;
   const total = parseFloat(data.total) || 0;
-  const precioUnitario = cantidad > 0 ? total / cantidad : 0;
+  const precioUnitario = round1(cantidad > 0 ? total / cantidad : 0);
   const venta = {
     id: uid('venta'),
     codigo: data.codigo,
@@ -1681,7 +1730,7 @@ function openVentaEditModal(id){
 function updateVenta(id, oldModo, data){
   const cantidad = parseFloat(data.cantidad) || 0;
   const total = parseFloat(data.total) || 0;
-  const precioUnitario = cantidad > 0 ? total / cantidad : 0;
+  const precioUnitario = round1(cantidad > 0 ? total / cantidad : 0);
   const v = db.ventas.find(x => x.id === id);
   if(!v) return false;
 
@@ -1797,8 +1846,8 @@ function syncSplitPago(){
   const efVal = parseFloat(ef.value);
   const qrVal = parseFloat(qr.value);
   if((isNaN(efVal) && isNaN(qrVal)) || (total > 0 && efVal === 0 && qrVal === 0)){
-    ef.value = total.toFixed(2);
-    qr.value = '0.00';
+    ef.value = total.toFixed(1);
+    qr.value = '0.0';
   }
 }
 function resetSplitPagoUI(){
@@ -1813,7 +1862,8 @@ function handleVentaSubmit(e){
   e.preventDefault();
   const esOtro = document.getElementById('vEsOtro').value === '1';
   const cantidad = parseFloat(document.getElementById('vCantidad').value);
-  const total = parseFloat(document.getElementById('vPrecioTotal').value);
+  // La app maneja los precios con UN decimal: se redondea al registrar.
+  const total = round1(parseFloat(document.getElementById('vPrecioTotal').value));
   const metodoPago = document.getElementById('vMetodoPago').value;
 
   if(!cantidad || cantidad <= 0){
@@ -1831,8 +1881,8 @@ function handleVentaSubmit(e){
 
   let efectivoMonto = 0, qrMonto = 0;
   if(metodoPago === 'mixto'){
-    efectivoMonto = parseFloat(document.getElementById('vEfectivoMonto').value) || 0;
-    qrMonto = parseFloat(document.getElementById('vQrMonto').value) || 0;
+    efectivoMonto = round1(parseFloat(document.getElementById('vEfectivoMonto').value) || 0);
+    qrMonto = round1(parseFloat(document.getElementById('vQrMonto').value) || 0);
     if(Math.abs((efectivoMonto + qrMonto) - total) > 0.01){
       toast('Efectivo + QR deben sumar el total', 'error');
       return;
@@ -1955,12 +2005,18 @@ function renderScanResultInto(elementId, codigo, context){
       <div class="sr-row"><span>Categoría</span><strong>${escapeHtml(p.categoria || '-')}</strong></div>
       ${stockRowHtml}
       ${currentRole === 'guest' ? '' : `
-      <div class="sr-row"><span>Precio de compra</span><strong>${fmtMoney(p.precioCompra)}</strong></div>
-      <div class="sr-row"><span>Precio de marca</span><strong>${fmtMoney(p.precioMarca)}</strong></div>`}
+      <div class="sr-row"><span>Precio ${escapeHtml((p.marca || 'según marca').trim())}</span><strong>${fmtMoney(p.precioMarca)}</strong></div>
+      <div class="sr-row"><span>Precio con descuento</span><strong>${fmtMoney(p.precioCompra)}</strong></div>`}
       <div class="sr-row"><span>Precio de venta</span><strong>${fmtMoney(p.precioVenta)}</strong></div>`;
+
+  const srImgSrc = getImage(p.id);
+  const srImgHtml = srImgSrc
+    ? `<div class="sr-img-wrap"><img src="${srImgSrc}" class="sr-thumb" alt="${escapeHtml(p.nombre)}" decoding="async" loading="lazy"></div>`
+    : '';
 
   resultDiv.innerHTML = `
     <div class="scan-result-card">
+      ${srImgHtml}
       <h4>📦 ${escapeHtml(p.nombre)}</h4>
       <div class="sr-row"><span>Código</span><strong>${escapeHtml(p.codigo)}</strong></div>
       ${detailRowsHtml}
@@ -3391,7 +3447,7 @@ function openHistorialVentaProducto(codigo){
   title.textContent = 'Historial de ventas — ' + nombre;
   const totalUnidades = ventas.reduce((s,v) => s + (parseFloat(v.cantidad) || 0), 0);
   const totalMonto = ventas.reduce((s,v) => s + (parseFloat(v.total) || 0), 0);
-  resumen.textContent = `${ventas.length} venta(s) · ${totalUnidades} unidades vendidas · Bs ${totalMonto.toFixed(2)}`;
+  resumen.textContent = `${ventas.length} venta(s) · ${totalUnidades} unidades vendidas · Bs ${totalMonto.toFixed(1)}`;
   if(ventas.length === 0){
     tbody.innerHTML = '<tr class="empty-row"><td colspan="5">No hay ventas registradas para este producto.</td></tr>';
   } else {
@@ -3404,8 +3460,8 @@ function openHistorialVentaProducto(codigo){
       return `<tr>
         <td>${escapeHtml(fecha)}</td>
         <td>${cant}</td>
-        <td>Bs ${pu.toFixed(2)}</td>
-        <td><strong>Bs ${total.toFixed(2)}</strong></td>
+        <td>Bs ${pu.toFixed(1)}</td>
+        <td><strong>Bs ${total.toFixed(1)}</strong></td>
         <td>${escapeHtml(metodo)}</td>
       </tr>`;
     }).join('');
@@ -3513,7 +3569,7 @@ function renderPedidos(){
 
   if(list.length === 0){
     tbody.innerHTML = `<tr class="empty-row"><td colspan="7">No hay productos${marcaSel.value ? ' de esa marca' : ''}.</td></tr>`;
-    summary.textContent = '0 productos · 0 unidades · Bs 0.00';
+    summary.textContent = '0 productos · 0 unidades · Bs 0.0';
     return;
   }
 
@@ -3869,11 +3925,14 @@ function vaciarComprasConStock(quitarStock){
     });
   }
   db.compras = [];
+  // Marca el vaciado para que se propague a los demás dispositivos: cualquier
+  // copia remota con esta marca más nueva borrará también sus ingresos.
+  db.comprasClearedAt = Date.now();
   saveDB();
   renderCompras();
   renderInventario();
   renderProductos();
-  toast('Historial de ingresos vaciado', 'success');
+  toast('Historial de ingresos vaciado (en todos los dispositivos)', 'success');
 }
 
 // Borra ingresos de hace más de 3 meses (el stock no se modifica).
@@ -3921,22 +3980,43 @@ function exportComprasCSV(){
   }
   const header = ['FECHA','CODIGO','PRODUCTO','PROVEEDOR','CANTIDAD','PRECIO UNITARIO','TOTAL','METODO DE PAGO','OBSERVACIONES'];
   const rows = db.compras.map(c => [
-    c.fecha, csvText(c.codigo), c.nombre, c.proveedor || '', csvNumber(c.cantidad), csvNumber(c.precioUnitario, 2), csvNumber(c.total, 2), c.metodoPago, c.observaciones || ''
+    c.fecha, c.codigo || '', c.nombre, c.proveedor || '', Number(c.cantidad) || 0, Number(c.precioUnitario) || 0, Number(c.total) || 0, c.metodoPago || '', c.observaciones || ''
   ]);
-  downloadCSV(`stockferre_ingresos_${todayISO().slice(0,10)}.csv`, header, rows);
-  toast('Ingresos exportados', 'success');
+  // Igual que en Productos: con SheetJS generamos un .xlsx REAL que Excel abre
+  // sin el aviso de "formato y extensión no coinciden" y, al editarlo y
+  // guardarlo, se re-importa bien.
+  if(typeof XLSX !== 'undefined'){
+    try{
+      const aoa = [header, ...rows];
+      const ws = XLSX.utils.aoa_to_sheet(aoa);
+      ws['!cols'] = [12,15,30,16,10,16,12,14,32].map(w => ({ wch: w }));
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'Ingresos');
+      XLSX.writeFile(wb, `stockferre_ingresos_${todayISO().slice(0,10)}.xlsx`);
+      toast('Ingresos exportados a Excel (.xlsx)', 'success');
+      return;
+    }catch(err){
+      console.error('Error generando .xlsx', err);
+      // se cae al .xls XML 2003 como respaldo
+    }
+  }
+  const types = ['text','text','text','text','number','number','number','text','text'];
+  downloadXLS(`stockferre_ingresos_${todayISO().slice(0,10)}.xls`, [{ name: 'Ingresos', header, rows, types }]);
+  toast('Ingresos exportados a Excel', 'success');
 }
 
-// Importa compras desde un CSV (un respaldo exportado antes). Se agregan como
-// registros al historial de compras; NO modifica el stock (para no sumarlo
-// dos veces si esa compra ya afectó el inventario al registrarse).
+// Importa compras desde Excel (.xlsx/.xls) o CSV (un respaldo exportado antes).
+// Igual que en Productos, acepta los archivos que se exportan, incluso después
+// de editarlos y guardarlos con Excel. Se agregan como registros al historial
+// de compras; NO modifica el stock (para no sumarlo dos veces si esa compra ya
+// afectó el inventario al registrarse).
 function importComprasCSV(file){
   const reader = new FileReader();
   reader.onload = (e)=>{
     try{
-      const rows = parseCSV(e.target.result);
-      if(rows.length < 2){
-        toast('El archivo CSV no tiene datos', 'error');
+      const rows = fileRowsFromBuffer(file, e.target.result);
+      if(!rows || rows.length < 2){
+        toast('El archivo no tiene datos', 'error');
         return;
       }
       const headers = rows[0].map(normalizeHeader);
@@ -3952,7 +4032,7 @@ function importComprasCSV(file){
         observaciones: headers.findIndex(h => h.includes('OBSERVACION') || h.includes('NOTA'))
       };
       if(idx.codigo === -1 || idx.nombre === -1 || idx.total === -1){
-        toast('El CSV debe tener al menos columnas CODIGO, PRODUCTO y TOTAL', 'error');
+        toast('El archivo debe tener al menos columnas CODIGO, PRODUCTO y TOTAL', 'error');
         return;
       }
       let importadas = 0;
@@ -3962,7 +4042,7 @@ function importComprasCSV(file){
         if(!nombre) continue;
         const cantidad = idx.cantidad > -1 ? (parseFloat(String(r[idx.cantidad]).replace(',','.')) || 1) : 1;
         const total = parsePrecio(r[idx.total]);
-        const precioUnitario = idx.precioUnitario > -1 ? parsePrecio(r[idx.precioUnitario]) : (cantidad > 0 ? total / cantidad : 0);
+        const precioUnitario = idx.precioUnitario > -1 ? parsePrecio(r[idx.precioUnitario]) : round1(cantidad > 0 ? total / cantidad : 0);
         const codigo = String(r[idx.codigo] || '').trim() || 'OTRO';
         const proveedor = idx.proveedor > -1 ? String(r[idx.proveedor] || '').trim() : '';
         const observaciones = idx.observaciones > -1 ? String(r[idx.observaciones] || '').trim() : '';
@@ -3988,11 +4068,11 @@ function importComprasCSV(file){
       toast(`Ingresos importados: ${importadas} (no se modificó el stock)`, 'success');
     }catch(err){
       console.error(err);
-      toast('No se pudo leer el archivo CSV. Verifica el formato.', 'error');
+      toast('No se pudo leer el archivo. Verifica el formato.', 'error');
     }
   };
   reader.onerror = ()=> toast('Error al leer el archivo', 'error');
-  reader.readAsText(file, 'UTF-8');
+  reader.readAsArrayBuffer(file);
 }
 
 /* -------------------------------------------------------------------------
@@ -4040,10 +4120,9 @@ function exportFinanzasCSV(){
   const caja = Number(db.finanzas.caja) || 0;
   const header = ['FECHA','CONCEPTO','MONTO'];
   const rows = [
-    [todayISO(), 'Capital en productos (stock x precio de compra)', csvNumber(capital, 2)],
-    [todayISO(), 'Efectivo actual', csvNumber(caja, 2)],
-    [todayISO(), 'Deuda pendiente (deudas - pagos)', csvNumber(deudaPendienteTotal(), 2)],
-    [todayISO(), 'Patrimonio total (productos + efectivo)', csvNumber(capital + caja, 2)]
+    [todayISO(), 'Capital en productos (stock x precio de compra)', csvNumber(capital, 1)],
+    [todayISO(), 'Efectivo actual', csvNumber(caja, 1)],
+    [todayISO(), 'Patrimonio total (productos + efectivo)', csvNumber(capital + caja, 1)]
   ];
   downloadCSV(`stockferre_finanzas_${todayISO().slice(0,10)}.csv`, header, rows);
   toast('Estado financiero exportado', 'success');
@@ -4213,7 +4292,7 @@ function exportRetirosCSV(){
   const list = db.finanzas.retiros || [];
   if(list.length === 0){ toast('No hay pagos para exportar', 'error'); return; }
   const header = ['FECHA','MONTO','MARCA','OBSERVACION'];
-  const rows = list.map(r => [r.fecha, csvNumber(r.monto, 2), retiroMarca(r), r.obs || '']);
+  const rows = list.map(r => [r.fecha, csvNumber(r.monto, 1), retiroMarca(r), r.obs || '']);
   downloadCSV(`stockferre_pagos_${todayISO().slice(0,10)}.csv`, header, rows);
   toast('Pagos exportados', 'success');
 }
@@ -4438,7 +4517,7 @@ function exportDeudasCSV(){
   const list = db.finanzas.deudas || [];
   if(list.length === 0){ toast('No hay deudas para exportar', 'error'); return; }
   const header = ['FECHA','MARCA','MONTO','VENCIMIENTO','OBSERVACION'];
-  const rows = list.map(d => [d.fecha, d.marca || '', csvNumber(d.monto, 2), d.vencimiento || '', d.obs || '']);
+  const rows = list.map(d => [d.fecha, d.marca || '', csvNumber(d.monto, 1), d.vencimiento || '', d.obs || '']);
   downloadCSV(`stockferre_deudas_${todayISO().slice(0,10)}.csv`, header, rows);
   toast('Deudas exportadas', 'success');
 }
@@ -4737,6 +4816,19 @@ function openInventarioCantidadBox(producto, codigo){
   document.getElementById('invCodigoDisplay').textContent = codigo;
   document.getElementById('invNombreDisplay').textContent = producto.nombre;
   document.getElementById('invStockActualDisplay').textContent = `Stock actual: ${producto.stock || 0}`;
+
+  const invImgWrap = document.getElementById('invImgThumb');
+  const invImgSrc = getImage(producto.id);
+  if(invImgWrap){
+    if(invImgSrc){
+      invImgWrap.style.display = 'block';
+      invImgWrap.innerHTML = `<img src="${invImgSrc}" class="sr-thumb" alt="${escapeHtml(producto.nombre)}" decoding="async">`;
+    }else{
+      invImgWrap.style.display = 'none';
+      invImgWrap.innerHTML = '';
+    }
+  }
+
   document.getElementById('invCantidad').value = 1;
   document.getElementById('invMasBox').style.display = 'none';
   openModal('modalInventarioDetalle');
@@ -4829,7 +4921,7 @@ function openCompraDetalleForm(producto, codigo){
 function recalcCompraTotal(){
   const cant = parseFloat(document.getElementById('cCantidad').value) || 0;
   const pre = parseFloat(document.getElementById('cPrecioCompra').value) || 0;
-  document.getElementById('cTotalDisplay').value = (cant * pre).toFixed(2);
+  document.getElementById('cTotalDisplay').value = (cant * pre).toFixed(1);
 }
 
 // Convierte la fecha elegida en el recuadro ("YYYY-MM-DD", por defecto hoy)
@@ -4875,7 +4967,8 @@ function handleCompraSubmit(e){
   const codigo = document.getElementById('cCodigo').value.trim();
   const nombre = document.getElementById('cNombreInput').value.trim();
   const cantidad = parseFloat(document.getElementById('cCantidad').value);
-  const precioCompra = parseFloat(document.getElementById('cPrecioCompra').value);
+  // La app maneja los precios con UN decimal: se redondean al registrar.
+  const precioCompra = round1(parseFloat(document.getElementById('cPrecioCompra').value));
 
   if(!codigo || !nombre){
     toast('Ingresa el código y la descripción', 'error');
@@ -4892,7 +4985,7 @@ function handleCompraSubmit(e){
 
   const actualizar = document.getElementById('cActualizarDatos').checked;
   const marca = document.getElementById('cMarca').value.trim();
-  const precioVenta = parseFloat(document.getElementById('cPrecioVenta').value);
+  const precioVenta = !isNaN(parseFloat(document.getElementById('cPrecioVenta').value)) ? round1(parseFloat(document.getElementById('cPrecioVenta').value)) : NaN;
 
   let p = getProductoByCodigo(codigo);
   const esNuevo = !p;
@@ -4938,7 +5031,7 @@ function handleCompraSubmit(e){
     nombre,
     cantidad,
     precioUnitario: precioCompra,
-    total: precioCompra * cantidad,
+    total: round1(precioCompra * cantidad),
     metodoPago: document.getElementById('cMetodoPago').value,
     fecha: compraFechaFromInput(fechaElegida),
     proveedor,
@@ -5151,7 +5244,7 @@ function renderCompraSearchResults(){
       ${thumb}
       <span class="vsi-info">
         <span class="vsi-nombre">${escapeHtml(p.nombre)}</span>
-        <span class="vsi-meta">${escapeHtml(p.codigo)} · Compra ${fmtMoney(p.precioCompra)}</span>
+        <span class="vsi-meta">${escapeHtml(p.codigo)} · Descuento ${fmtMoney(p.precioCompra)}</span>
       </span>
     </button>`;
   }).join('');
@@ -5278,7 +5371,7 @@ function ocrRenderTable(){
       <td contenteditable="true" data-field="codigo">${escapeHtml(it.codigo)}</td>
       <td contenteditable="true" data-field="cantidad" style="width:50px; text-align:center;">${it.cantidad}</td>
       <td contenteditable="true" data-field="descripcion" style="min-width:180px;">${escapeHtml(it.descripcion)}</td>
-      <td contenteditable="true" data-field="precio" style="width:70px; text-align:right;">${it.precio.toFixed(2)}</td>
+      <td contenteditable="true" data-field="precio" style="width:70px; text-align:right;">${it.precio.toFixed(1)}</td>
       <td style="text-align:right; font-weight:600;">${fmtMoney(it.total)}</td>
       <td><span class="ocr-del-btn" data-ocr-del="${it.id}">🗑️</span></td>
     </tr>`;
@@ -5634,10 +5727,10 @@ function exportProductosExcel(){
     toast('No hay productos para exportar', 'error');
     return;
   }
-  const header = ['CODIGO','CODIGO DE BARRAS','DESCRIPCION','MARCA','CATEGORIA','PRECIO COMPRA','PRECIO MARCA','PRECIO VENTA','STOCK','STOCK MIN','CARACTERISTICAS','IMAGEN'];
+  const header = ['CODIGO','CODIGO DE BARRAS','DESCRIPCION','MARCA','CATEGORIA','PRECIO MARCA','PRECIO DESCUENTO','PRECIO VENTA','STOCK','STOCK MIN','CARACTERISTICAS','IMAGEN'];
   const rows = db.productos.map(p => [
     p.codigo || '', p.codigoBarras || '', p.nombre, p.marca || '', p.categoria || '',
-    p.precioCompra, p.precioMarca, p.precioVenta, p.stock,
+    p.precioMarca, p.precioCompra, p.precioVenta, p.stock,
     p.stockMin,
     p.caracteristicas || '',
     getImage(p.id) ? '[foto local]' : ''
@@ -5730,8 +5823,8 @@ function exportVentasCSV(){
   }
   const header = ['FECHA','CODIGO','PRODUCTO','CANTIDAD','PRECIO UNITARIO','TOTAL','METODO DE PAGO','EFECTIVO','QR','QR PERSONA'];
   const rows = db.ventas.map(v => [
-    v.fecha, csvText(v.codigo), v.nombre, csvNumber(v.cantidad), csvNumber(v.precioUnitario, 2), csvNumber(v.total, 2), v.metodoPago,
-    csvNumber(efectivoMontoDeVenta(v), 2), csvNumber(qrMontoDeVenta(v), 2), csvText(v.qrPersona || '')
+    v.fecha, csvText(v.codigo), v.nombre, csvNumber(v.cantidad), csvNumber(v.precioUnitario, 1), csvNumber(v.total, 1), v.metodoPago,
+    csvNumber(efectivoMontoDeVenta(v), 1), csvNumber(qrMontoDeVenta(v), 1), csvText(v.qrPersona || '')
   ]);
   downloadCSV(`stockferre_ventas_${todayISO().slice(0,10)}.csv`, header, rows);
   toast('Ventas exportadas', 'success');
@@ -6178,7 +6271,7 @@ function importVentasCSV(file){
         if(!nombre) continue;
         const cantidad = idx.cantidad > -1 ? (parseFloat(String(r[idx.cantidad]).replace(',','.')) || 1) : 1;
         const total = parsePrecio(r[idx.total]);
-        const precioUnitario = idx.precioUnitario > -1 ? parsePrecio(r[idx.precioUnitario]) : (cantidad > 0 ? total / cantidad : 0);
+        const precioUnitario = idx.precioUnitario > -1 ? parsePrecio(r[idx.precioUnitario]) : round1(cantidad > 0 ? total / cantidad : 0);
         const mp = idx.metodoPago > -1 ? String(r[idx.metodoPago] || '').toLowerCase() : '';
         const metodoPago = mp.includes('mixto') ? 'mixto' : (mp.includes('qr') ? 'qr' : 'efectivo');
         let efectivoMonto = 0, qrMonto = 0;
@@ -6298,8 +6391,8 @@ function renderProductos(){
         <td>${escapeHtml(p.nombre)}</td>
         <td>${escapeHtml(p.marca || '-')}</td>
         <td>${p.categoria ? `<span class="badge badge-muted">${escapeHtml(p.categoria)}</span>` : '-'}</td>
-        <td class="price-guest-hide">${fmtMoney(p.precioCompra)}</td>
         <td class="price-guest-hide">${fmtMoney(p.precioMarca)}</td>
+        <td class="price-guest-hide">${fmtMoney(p.precioCompra)}</td>
         <td>${fmtMoney(p.precioVenta)}</td>
         <td>${p.stock}${bajo ? ' <span class="badge badge-danger-soft">Bajo</span>' : ''}</td>
         <td>${p.stockMin || 0}</td>
@@ -6413,7 +6506,17 @@ function openProductModal(producto, prefillCodigo){
     document.getElementById('pId').value = '';
     if(prefillCodigo) document.getElementById('pCodigo').value = prefillCodigo;
   }
+  updatePrecioMarcaLabel();
   openModal('modalProducto');
+}
+
+// Actualiza la etiqueta del "Precio {marca}" con el nombre real de la marca
+// (Truper, INGCO, Pretul...) o "según marca" si todavía no tiene.
+function updatePrecioMarcaLabel(){
+  const label = document.getElementById('pPrecioMarcaLabel');
+  if(!label) return;
+  const marca = document.getElementById('pMarca') ? document.getElementById('pMarca').value.trim() : '';
+  label.textContent = marca || 'según marca';
 }
 
 function handleProductSubmit(e){
@@ -6488,6 +6591,7 @@ function openProductDetails(productId){
   document.getElementById('detCategoria').textContent = p.categoria || '-';
   document.getElementById('detPCompra').textContent = fmtMoney(p.precioCompra);
   document.getElementById('detPMarca').textContent = fmtMoney(p.precioMarca);
+  document.getElementById('detPrecioMarcaLabel').textContent = (p.marca || '').trim() || 'según marca';
   document.getElementById('detPVenta').textContent = fmtMoney(p.precioVenta);
   document.getElementById('detStock').textContent = p.stock;
   document.getElementById('detStockMin').textContent = p.stockMin || 0;
@@ -6977,7 +7081,7 @@ function normalizeHeader(h){
 //   "1.234,00" → 1234
 function parsePrecio(raw){
   if(raw === undefined || raw === null) return 0;
-  if(typeof raw === 'number') return isNaN(raw) ? 0 : raw;
+  if(typeof raw === 'number') return isNaN(raw) ? 0 : round1(raw);
   let s = String(raw).trim().replace(/\s/g,'');
   if(!s) return 0;
   const hasComma = s.includes(',');
@@ -6994,7 +7098,10 @@ function parsePrecio(raw){
   }
   // Si solo hay punto, se toma como decimal ("1234.56").
   const n = parseFloat(s);
-  return isNaN(n) ? 0 : n;
+  if(isNaN(n)) return 0;
+  // La app trabaja con UN decimal: cualquier valor con 2 o 3 decimales (por
+  // ej. subido desde un Excel) se redondea a un solo decimal.
+  return round1(n);
 }
 
 function importProductsCSV(file){
@@ -7016,8 +7123,8 @@ function importProductsCSV(file){
         nombre: headers.findIndex(h => h.includes('DESCRIPCION') || h === 'NOMBRE'),
         marca: headers.indexOf('MARCA'),
         categoria: headers.indexOf('CATEGORIA'),
-        // Acepta "PRECIO COMPRA", "PRECIO DE COMPRA", "PRECIO_COMPRA", etc.
-        precioCompra: headers.findIndex(h => h.includes('PRECIO') && h.includes('COMPRA')),
+        // Acepta "PRECIO COMPRA", "PRECIO DE COMPRA", "PRECIO DESCUENTO", etc.
+        precioCompra: headers.findIndex(h => (h.includes('PRECIO') && h.includes('COMPRA')) || h.includes('DESCUENTO')),
         precioMarca: headers.findIndex(h => h.includes('PRECIO') && h.includes('MARCA') && !h.includes('BARRA')),
         precioVenta: headers.findIndex(h => h.includes('PRECIO') && h.includes('VENTA')),
         stock: headers.findIndex(h => h.includes('STOCK') && !h.includes('MIN')),
@@ -8261,11 +8368,10 @@ function stopOcrScanner(){
   }
   const videoEl = document.getElementById('ocrVideo');
   if(videoEl) videoEl.srcObject = null;
-  if(ocrWorker){
-    const w = ocrWorker;
-    ocrWorker = null;
-    w.terminate().catch(()=>{});
-  }
+  // NO se termina el worker de Tesseract al apagar la cámara: el idioma
+  // (~10MB) ya está cargado y mantenerlo vivo hace que el próximo escaneo
+  // arranque al instante en vez de "quedarse en Iniciando cámara" recargando
+  // el modelo cada vez. El worker se recicla en el siguiente startOcrScanner().
   const frozenImg = document.getElementById('ocrFrozenImg');
   if(frozenImg){ frozenImg.classList.remove('visible'); frozenImg.removeAttribute('src'); }
   const btnCapture = document.getElementById('btnCaptureShot');
@@ -8630,6 +8736,16 @@ function setupEventListeners(){
     }
   });
 
+  // Lightbox: clic en la foto de la tarjeta de resultado del escáner/inventario
+  // (agranda la imagen del producto).
+  document.addEventListener('click', (e)=>{
+    const thumb = e.target.closest('.sr-thumb');
+    if(thumb && thumb.tagName === 'IMG'){
+      e.stopImmediatePropagation();
+      openImageLightbox(thumb.src);
+    }
+  });
+
   // Thumbnails del buscador de nueva venta: clic abre lightbox (no selecciona)
   document.getElementById('ventaSearchResults').addEventListener('click', (e)=>{
     const thumb = e.target.closest('.vsi-thumb');
@@ -8677,6 +8793,8 @@ function setupEventListeners(){
   document.getElementById('btnNewProduct').addEventListener('click', ()=> openProductModal());
   document.getElementById('btnExportProducts').addEventListener('click', exportProductosExcel);
   document.getElementById('formProducto').addEventListener('submit', handleProductSubmit);
+  const _pMarca = document.getElementById('pMarca');
+  if(_pMarca) _pMarca.addEventListener('input', updatePrecioMarcaLabel);
   let _prodSearchTimer = null;
   document.getElementById('prodSearch').addEventListener('input', ()=>{
     clearTimeout(_prodSearchTimer);
@@ -8920,12 +9038,12 @@ function setupEventListeners(){
   if(splitEf) splitEf.addEventListener('input', ()=>{
     const total = parseFloat(document.getElementById('vPrecioTotal').value) || 0;
     const ef = parseFloat(splitEf.value) || 0;
-    splitQr.value = Math.max(0, total - ef).toFixed(2);
+    splitQr.value = Math.max(0, total - ef).toFixed(1);
   });
   if(splitQr) splitQr.addEventListener('input', ()=>{
     const total = parseFloat(document.getElementById('vPrecioTotal').value) || 0;
     const qr = parseFloat(splitQr.value) || 0;
-    splitEf.value = Math.max(0, total - qr).toFixed(2);
+    splitEf.value = Math.max(0, total - qr).toFixed(1);
   });
   const qrSel = document.getElementById('vQrPersona');
   if(qrSel) qrSel.innerHTML = QR_PERSONAS.map(p=>`<option value="${escapeHtml(p)}">${escapeHtml(p)}</option>`).join('');
@@ -9012,7 +9130,7 @@ function setupEventListeners(){
     e.target.value = '';
   });
   document.getElementById('btnPurgeCompras').addEventListener('click', ()=>{
-    confirmDialog('Borrar ingresos antiguos', '¿Borrar los ingresos de hace más de 3 meses? Se recomienda exportarlos antes con "Exportar CSV". El stock de los productos no se modifica.', ()=>{
+    confirmDialog('Borrar ingresos antiguos', '¿Borrar los ingresos de hace más de 3 meses? Se recomienda exportarlos antes con "Exportar Excel". El stock de los productos no se modifica.', ()=>{
       purgeComprasAntiguas();
     });
   });

@@ -367,6 +367,12 @@ body.modo-invitado .sidebar-logos{display:flex;}
 .scan-result-card h4{margin:0 0 8px;}
 .scan-result-card .sr-row{display:flex; justify-content:space-between; padding:6px 0; font-size:14px; border-bottom:1px dashed var(--border);}
 .scan-result-card .sr-row:last-child{border-bottom:none;}
+
+/* Foto del producto dentro de la tarjeta de resultado del escáner/inventario:
+   visible pero no demasiado grande, centrada, con clic para agrandar. */
+.sr-img-wrap{text-align:center; margin:0 0 12px;}
+.sr-thumb{width:150px; height:150px; object-fit:cover; border-radius:12px; border:1px solid var(--border); box-shadow:var(--shadow); cursor:pointer; background:var(--bg); transition:transform .15s;}
+.sr-thumb:hover{transform:scale(1.05);}
 .scan-not-found{background:var(--warning-light); color:#fbbf24; border-radius:10px; padding:14px; font-size:13.5px;}
 
 /* ---------- REGISTRO DE INVENTARIO: cantidades rápidas ---------- */

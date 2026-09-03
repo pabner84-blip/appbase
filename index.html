@@ -128,17 +128,6 @@
     <!-- ---------- ESCÁNER (pantalla principal) ---------- -->
     <section class="view" id="view-escaner">
       <div id="scannerBlockHome"><div id="scannerBlock">
-      <div class="scan-mode-tabs">
-        <button class="scan-tab active" data-scan-code-mode="numerico">🔢 Escanear números</button>
-        <button class="scan-tab" data-scan-code-mode="alfanumerico">🔤 Escanear números y letras</button>
-        <button class="scan-tab" data-scan-code-mode="codigobarras">📷 Escanear código de barras</button>
-      </div>
-
-      <div class="scan-manual">
-        <input type="text" id="manualCodeInput" class="input" placeholder="Escribe el código y presiona Enter (ej: HNV3445)" autocomplete="off">
-        <button class="btn btn-primary" id="btnManualCodeGo">Buscar</button>
-      </div>
-
       <div class="panel">
         <div class="panel-header">
           <h3>📷 Cámara</h3>
@@ -158,6 +147,18 @@
           <p class="hint">Acerca el celular a ~5 cm del código y encájalo dentro del recuadro punteado (solo se lee lo que está adentro). Si se mueve y no lee bien, toca "Capturar foto" para congelar la imagen y analizarla con calma.</p>
         </div>
       </div>
+
+      <div class="scan-mode-tabs">
+        <button class="scan-tab active" data-scan-code-mode="numerico">🔢 Escanear números</button>
+        <button class="scan-tab" data-scan-code-mode="alfanumerico">🔤 Escanear números y letras</button>
+        <button class="scan-tab" data-scan-code-mode="codigobarras">📷 Escanear código de barras</button>
+      </div>
+
+      <div class="scan-manual">
+        <input type="text" id="manualCodeInput" class="input" placeholder="Escribe el código y presiona Enter (ej: HNV3445)" autocomplete="off">
+        <button class="btn btn-primary" id="btnManualCodeGo">Buscar</button>
+      </div>
+
       </div></div>
 
       <div id="scanResult"></div>
@@ -178,7 +179,7 @@
           <thead>
             <tr>
               <th>Imagen</th><th>Código</th><th>Cód. Barras</th><th>Descripción</th><th>Marca</th><th>Categoría</th>
-              <th class="price-guest-hide">P. Compra</th><th class="price-guest-hide">P. Marca</th><th>P. Venta</th><th>Stock</th><th>Stock mín.</th><th class="admin-only">Acciones</th>
+              <th class="price-guest-hide">Precio según marca</th><th class="price-guest-hide">Precio con descuento</th><th>Precio de venta</th><th>Stock</th><th>Stock mín.</th><th class="admin-only">Acciones</th>
             </tr>
           </thead>
           <tbody></tbody>
@@ -230,7 +231,7 @@
       <div class="panel total-ventas-panel" id="totalVentasDia">
         <div class="panel-body-total">
           <span class="total-ventas-label">TOTAL DE VENTAS <span id="totalVentasDiaFecha">de hoy</span></span>
-          <strong class="total-ventas-valor" id="totalVentasDiaValor">Bs 0.00</strong>
+          <strong class="total-ventas-valor" id="totalVentasDiaValor">Bs 0.0</strong>
         </div>
       </div>
       <div class="panel ajuste-cuentas-panel" id="ajusteCuentas">
@@ -240,29 +241,29 @@
             <span class="hint" id="ajusteFecha">de hoy</span>
             <label class="ajuste-cambio ajuste-cambio-admin" title="Monto inicial (fondo de cambio) con el que empieza la cuenta del día: la suma total parte desde este monto.">
               <span>CAMBIO</span>
-              <input type="number" id="ajusteCambio" class="input" step="0.01" min="0" value="0">
+              <input type="number" id="ajusteCambio" class="input" step="0.1" min="0" value="0">
             </label>
             <div class="ajuste-cambio-guest" id="ajusteCambioGuest">
               <label class="ajuste-cambio" title="CAMBIO de Manuales (naranja): arranca la cuenta de Manuales desde este monto.">
                 <span class="adjust-legend"><span class="gp-modo-dot man"></span>CAMBIO Manuales</span>
-                <input type="number" id="ajusteCambioMan" class="input" step="0.01" min="0" value="0">
+                <input type="number" id="ajusteCambioMan" class="input" step="0.1" min="0" value="0">
               </label>
               <label class="ajuste-cambio" title="CAMBIO de Eléctricas (amarillo): arranca la cuenta de Eléctricas desde este monto.">
                 <span class="adjust-legend"><span class="gp-modo-dot el"></span>CAMBIO Eléctricas</span>
-                <input type="number" id="ajusteCambioEl" class="input" step="0.01" min="0" value="0">
+                <input type="number" id="ajusteCambioEl" class="input" step="0.1" min="0" value="0">
               </label>
             </div>
           </div>
         </div>
         <div class="panel-body">
           <div class="fin-stats">
-            <div class="fin-card"><span class="fin-label">Total vendido</span><strong class="fin-value" id="ajusteTotal">Bs 0.00</strong></div>
-            <div class="fin-card"><span class="fin-label">💵 Efectivo</span><strong class="fin-value" id="ajusteEfectivo">Bs 0.00</strong></div>
-            <div class="fin-card"><span class="fin-label">📱 QR</span><strong class="fin-value" id="ajusteQr">Bs 0.00</strong></div>
+            <div class="fin-card"><span class="fin-label">Total vendido</span><strong class="fin-value" id="ajusteTotal">Bs 0.0</strong></div>
+            <div class="fin-card"><span class="fin-label">💵 Efectivo</span><strong class="fin-value" id="ajusteEfectivo">Bs 0.0</strong></div>
+            <div class="fin-card"><span class="fin-label">📱 QR</span><strong class="fin-value" id="ajusteQr">Bs 0.0</strong></div>
           </div>
           <div class="ajuste-real-box" id="ajusteRealBox">
             <label class="ajuste-real-label">💵 Dinero real en efectivo
-              <input type="number" id="ajusteDineroReal" class="input ajuste-real-input" step="0.01" min="0" placeholder="0.00">
+              <input type="number" id="ajusteDineroReal" class="input ajuste-real-input" step="0.1" min="0" placeholder="0.0">
             </label>
             <div class="ajuste-real-resultado" id="ajusteRealResultado"></div>
           </div>
@@ -274,7 +275,7 @@
         <div class="panel-header"><h3>🧾 Gastos/Prestamos</h3><span class="hint" id="gpFecha">de hoy</span></div>
         <div class="panel-body">
           <form id="formGastoPrestamo" class="gp-form" style="margin-bottom:12px; flex-wrap:wrap;">
-            <input type="number" id="gpBs" class="input gp-bs-input" step="0.01" min="0.01" placeholder="Bs" required>
+            <input type="number" id="gpBs" class="input gp-bs-input" step="0.1" min="0.01" placeholder="Bs" required>
             <input type="text" id="gpObs" class="input gp-obs-input" placeholder="Observación (ej: préstamo a José, pasaje, comida...)">
             <div class="gp-tipo-pago" id="gpTipoPago">
               <button type="button" class="scan-tab active" data-gp-tipo="efectivo">💵 Efectivo</button>
@@ -284,7 +285,7 @@
           </form>
           <p class="hint gp-legend" id="gpLegend" style="margin-bottom:8px;"><span class="gp-dot-legend man"></span> Manuales &nbsp;·&nbsp; <span class="gp-dot-legend el"></span> Eléctricas &nbsp;·&nbsp; <span class="gp-dot-legend none"></span> Sin color (no envía) — toca el punto para cambiar</p>
           <div id="gastosPrestamosList"></div>
-          <div class="gp-total" id="gastosPrestamosTotal">Total <strong>Bs 0.00</strong></div>
+          <div class="gp-total" id="gastosPrestamosTotal">Total <strong>Bs 0.0</strong></div>
           <p class="hint" id="gpAjustadoNota" style="margin:8px 0 0;"></p>
         </div>
       </div>
@@ -295,8 +296,8 @@
       <div class="toolbar">
         <button class="btn btn-primary" id="btnNuevaCompra">➕ Nuevo ingreso</button>
         <button class="btn btn-secondary" id="btnFacturaOCR">📷 Subir factura</button>
-        <button class="btn btn-secondary" id="btnExportCompras">📤 Exportar CSV</button>
-        <button class="btn btn-secondary" id="btnImportCompras">📥 Importar CSV</button>
+        <button class="btn btn-secondary" id="btnExportCompras">📤 Exportar Excel</button>
+        <button class="btn btn-secondary" id="btnImportCompras">📥 Importar Excel/CSV</button>
         <button class="btn btn-secondary" id="btnPurgeCompras">🧹 Borrar antiguas</button>
         <button class="btn btn-danger" id="btnVaciarCompras">🧹 Vaciar historial</button>
       </div>
@@ -333,22 +334,22 @@
           <div class="fin-stats">
             <div class="fin-card">
               <span class="fin-label">Capital en productos</span>
-              <strong class="fin-value" id="finCapital">Bs 0.00</strong>
+              <strong class="fin-value" id="finCapital">Bs 0.0</strong>
               <span class="fin-sub">Inventario × precio de compra</span>
             </div>
             <div class="fin-card">
               <span class="fin-label">Efectivo actual</span>
-              <strong class="fin-value" id="finCaja">Bs 0.00</strong>
+              <strong class="fin-value" id="finCaja">Bs 0.0</strong>
               <span class="fin-sub">Se ajusta con ventas y retiros</span>
             </div>
             <div class="fin-card">
               <span class="fin-label">Patrimonio total</span>
-              <strong class="fin-value" id="finTotal">Bs 0.00</strong>
+              <strong class="fin-value" id="finTotal">Bs 0.0</strong>
               <span class="fin-sub">Productos + efectivo</span>
             </div>
             <div class="fin-card">
               <span class="fin-label">Deuda pendiente</span>
-              <strong class="fin-value" id="finDeuda">Bs 0.00</strong>
+              <strong class="fin-value" id="finDeuda">Bs 0.0</strong>
               <span class="fin-sub">Deudas − pagos registrados</span>
             </div>
           </div>
@@ -397,7 +398,7 @@
           <option value="">Todas las fechas</option>
         </select>
       </div>
-      <p class="hint" id="deudasTotal" style="margin-bottom:12px;">Total de deudas: Bs 0.00</p>
+      <p class="hint" id="deudasTotal" style="margin-bottom:12px;">Total de deudas: Bs 0.0</p>
       <div id="deudasGroups"></div>
     </section>
 
@@ -465,7 +466,7 @@
         <button class="btn btn-secondary" id="btnExportPedidos">📤 Exportar CSV</button>
         <button class="btn btn-secondary" id="btnImportPedidos">📥 Importar CSV</button>
       </div>
-      <p class="hint" id="pedidoSummary" style="margin-bottom:12px;">0 productos · 0 unidades · Bs 0.00</p>
+      <p class="hint" id="pedidoSummary" style="margin-bottom:12px;">0 productos · 0 unidades · Bs 0.0</p>
       <div class="table-wrap">
         <table class="table" id="pedidosTable">
           <thead>
@@ -552,7 +553,7 @@
         <div class="panel">
           <div class="panel-header"><h3>📂 Importar productos (CSV)</h3></div>
           <div class="panel-body">
-            <p class="hint">Acepta un CSV exportado antes (coma, punto y coma o tabulador) o el archivo .xlsx / .xls que genera "Exportar Excel". Formato: <code>CODIGO,DESCRIPCION,MARCA,CATEGORIA,CODIGO DE BARRAS,PRECIO COMPRA,PRECIO VENTA</code> (código de barras es opcional).</p>
+            <p class="hint">Acepta un CSV exportado antes (coma, punto y coma o tabulador) o el archivo .xlsx / .xls que genera "Exportar Excel". Formato: <code>CODIGO,DESCRIPCION,MARCA,CATEGORIA,CODIGO DE BARRAS,PRECIO MARCA,PRECIO DESCUENTO,PRECIO VENTA</code> (código de barras es opcional).</p>
             <button class="btn btn-secondary" id="btnImportProductsConfig">📥 Elegir archivo CSV o Excel</button>
           </div>
         </div>
@@ -599,9 +600,9 @@
       <label>Marca<input type="text" id="pMarca" class="input"></label>
       <label>Categoría<input type="text" id="pCategoria" class="input" list="categoriasList" placeholder="Elige o escribe una nueva"></label>
       <datalist id="categoriasList"></datalist>
-      <label class="price-guest-hide">Precio de compra<input type="number" id="pPrecioCompra" class="input" step="0.01" min="0"></label>
-      <label class="price-guest-hide">Precio de marca<input type="number" id="pPrecioMarca" class="input" step="0.01" min="0"></label>
-      <label>Precio de venta<input type="number" id="pPrecioVenta" class="input" step="0.01" min="0"></label>
+      <label class="price-guest-hide">Precio <span id="pPrecioMarcaLabel">según marca</span><input type="number" id="pPrecioMarca" class="input" step="0.1" min="0"></label>
+      <label class="price-guest-hide">Precio con descuento<input type="number" id="pPrecioCompra" class="input" step="0.1" min="0"></label>
+      <label>Precio de venta<input type="number" id="pPrecioVenta" class="input" step="0.1" min="0"></label>
       <div class="form-actions">
         <button type="submit" class="btn btn-primary">Guardar</button>
         <button type="button" class="btn btn-secondary" data-close-modal>Cancelar</button>
@@ -672,8 +673,8 @@
       <div class="detail-row"><span class="detail-label">Descripción</span><span id="detNombre" class="detail-value"></span></div>
       <div class="detail-row"><span class="detail-label">Marca</span><span id="detMarca" class="detail-value"></span></div>
       <div class="detail-row"><span class="detail-label">Categoría</span><span id="detCategoria" class="detail-value"></span></div>
-      <div class="detail-row price-guest-hide"><span class="detail-label">Precio de compra</span><span id="detPCompra" class="detail-value"></span></div>
-      <div class="detail-row price-guest-hide"><span class="detail-label">Precio de marca</span><span id="detPMarca" class="detail-value"></span></div>
+      <div class="detail-row price-guest-hide"><span class="detail-label">Precio <span id="detPrecioMarcaLabel"></span></span><span id="detPMarca" class="detail-value"></span></div>
+      <div class="detail-row price-guest-hide"><span class="detail-label">Precio con descuento</span><span id="detPCompra" class="detail-value"></span></div>
       <div class="detail-row"><span class="detail-label">Precio de venta</span><span id="detPVenta" class="detail-value"></span></div>
       <div class="detail-row"><span class="detail-label">Stock</span><span id="detStock" class="detail-value"></span></div>
       <div class="detail-row"><span class="detail-label">Stock mín.</span><span id="detStockMin" class="detail-value"></span></div>
@@ -712,7 +713,7 @@
         <input type="text" id="vNombreOtroInput" class="input" placeholder="Describe el producto que estás vendiendo">
       </label>
       <label>Cantidad *<input type="number" id="vCantidad" class="input" step="1" min="1" value="1" required></label>
-      <label>Precio Total *<input type="number" id="vPrecioTotal" class="input" step="0.01" min="0" required></label>
+      <label>Precio Total *<input type="number" id="vPrecioTotal" class="input" step="0.1" min="0" required></label>
       <label style="grid-column:1/-1;">Precio Unitario (calculado)<input type="text" id="vPrecioUnitario" class="input" readonly tabindex="-1" style="background:var(--bg); color:var(--text-muted);"></label>
       <label style="grid-column:1/-1;">Método de pago
         <div class="scan-mode-tabs" style="margin-top:4px;">
@@ -725,8 +726,8 @@
       <div id="vSplitPago" style="grid-column:1/-1; display:none; background:rgba(255,255,255,.05); border:1px dashed var(--border); border-radius:8px; padding:10px;">
         <p class="hint" style="margin:0 0 8px;">Total <strong id="vSplitTotal"></strong> — escribe cuánto va en uno y el otro se llena solo:</p>
         <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px;">
-          <label>Bs en efectivo<input type="number" id="vEfectivoMonto" class="input" step="0.01" min="0" placeholder="0.00"></label>
-          <label>Bs en QR<input type="number" id="vQrMonto" class="input" step="0.01" min="0" placeholder="0.00"></label>
+          <label>Bs en efectivo<input type="number" id="vEfectivoMonto" class="input" step="0.1" min="0" placeholder="0.0"></label>
+          <label>Bs en QR<input type="number" id="vQrMonto" class="input" step="0.1" min="0" placeholder="0.0"></label>
         </div>
       </div>
       <label id="vModoDestinoLabel" style="grid-column:1/-1; display:none;">Registrar venta en
@@ -868,6 +869,7 @@
   <div class="modal-body">
     <form id="formInventario">
       <input type="hidden" id="invCodigo">
+      <div id="invImgThumb" class="sr-img-wrap" style="display:none;"></div>
       <div class="product-info-box visible">
         📦 <strong id="invNombreDisplay"></strong><br>
         <span style="font-size:12px;">Código: <strong id="invCodigoDisplay"></strong></span><br>
@@ -923,7 +925,7 @@
       <label style="grid-column:1/-1;">Descripción *<input type="text" id="cNombreInput" class="input" required></label>
       <label style="grid-column:1/-1;">Proveedor<input type="text" id="cProveedor" class="input" placeholder="Nombre del proveedor o distribuidor"></label>
       <label>Cantidad *<input type="number" id="cCantidad" class="input" step="1" min="1" value="1" required></label>
-      <label>Precio de compra (c/u) *<input type="number" id="cPrecioCompra" class="input" step="0.01" min="0" required></label>
+      <label>Precio con descuento (c/u) *<input type="number" id="cPrecioCompra" class="input" step="0.1" min="0" required></label>
       <label style="grid-column:1/-1;">Fecha de la compra<input type="date" id="cFecha" class="input" title="Fecha del recibo (si la compra fue de otro día, elige esa fecha)"></label>
       <label style="grid-column:1/-1;">Observaciones<textarea id="cObservaciones" class="input" rows="2" placeholder="Opcional: notas sobre este ingreso..." style="resize:vertical; min-height:44px;"></textarea></label>
       <label style="grid-column:1/-1;">Total (calculado)<input type="text" id="cTotalDisplay" class="input" readonly tabindex="-1" style="background:var(--bg); color:var(--text-muted);"></label>
@@ -940,7 +942,7 @@
         <p class="hint" style="margin:0 0 8px; font-size:11.5px;">Los precios de ventas pasadas no cambian: solo afecta al producto y a las ventas futuras.</p>
         <div id="compraUpdateFields" style="display:none; grid-template-columns:1fr 1fr; gap:10px;">
           <label>Marca<input type="text" id="cMarca" class="input" placeholder="Opcional"></label>
-          <label>Precio de venta<input type="number" id="cPrecioVenta" class="input" step="0.01" min="0" placeholder="Opcional"></label>
+          <label>Precio de venta<input type="number" id="cPrecioVenta" class="input" step="0.1" min="0" placeholder="Opcional"></label>
         </div>
       </div>
       <div class="form-actions">
@@ -963,7 +965,7 @@
       <table class="table" id="histComprasTable">
         <thead>
           <tr>
-            <th>Fecha</th><th>Proveedor</th><th>P. Compra</th><th>Cant.</th><th>Obs.</th><th></th>
+            <th>Fecha</th><th>Proveedor</th><th>Precio con descuento</th><th>Cant.</th><th>Obs.</th><th></th>
           </tr>
         </thead>
         <tbody></tbody>
@@ -1024,7 +1026,7 @@
   </div>
   <div class="modal-body">
     <form id="formEditarCaja" class="form-grid">
-      <label style="grid-column:1/-1;">Efectivo actual (Bs) *<input type="number" id="cajaMonto" class="input" step="0.01" min="0" required></label>
+      <label style="grid-column:1/-1;">Efectivo actual (Bs) *<input type="number" id="cajaMonto" class="input" step="0.1" min="0" required></label>
       <p class="hint" style="grid-column:1/-1; margin:0;">Este monto se modifica solo con este botón, con las ventas y con los retiros de dinero.</p>
       <div class="form-actions">
         <button type="submit" class="btn btn-primary">Guardar</button>
@@ -1043,7 +1045,7 @@
   <div class="modal-body">
     <form id="formRetiro" class="form-grid">
       <input type="hidden" id="rId">
-      <label style="grid-column:1/-1;">Monto (Bs) *<input type="number" id="rMonto" class="input" step="0.01" min="0.01" required></label>
+      <label style="grid-column:1/-1;">Monto (Bs) *<input type="number" id="rMonto" class="input" step="0.1" min="0.01" required></label>
       <label style="grid-column:1/-1;">Marca *
         <select id="rMarca" class="input" required>
           <option value="Ingco">Ingco</option>
@@ -1082,7 +1084,7 @@
         </select>
       </label>
       <label style="grid-column:1/-1; display:none;" id="dNuevaMarcaRow">Nueva marca<input type="text" id="dNuevaMarca" class="input" placeholder="Nombre de la nueva marca" maxlength="40"></label>
-      <label style="grid-column:1/-1;">Monto (Bs) *<input type="number" id="dMonto" class="input" step="0.01" min="0.01" required></label>
+      <label style="grid-column:1/-1;">Monto (Bs) *<input type="number" id="dMonto" class="input" step="0.1" min="0.01" required></label>
       <label>Fecha de la deuda<input type="date" id="dFecha" class="input"></label>
       <label>Vencimiento<input type="date" id="dVencimiento" class="input"></label>
       <label style="grid-column:1/-1;">Observación<input type="text" id="dObs" class="input" placeholder="Ej: Pedido Truper #123"></label>
@@ -1104,7 +1106,7 @@
     <form id="formGasto" class="form-grid">
       <input type="hidden" id="gId">
       <label style="grid-column:1/-1;">Cantidad *<input type="number" id="gCant" class="input" step="1" min="1" value="1" required></label>
-      <label style="grid-column:1/-1;">Bs (precio unitario) *<input type="number" id="gBs" class="input" step="0.01" min="0.01" required></label>
+      <label style="grid-column:1/-1;">Bs (precio unitario) *<input type="number" id="gBs" class="input" step="0.1" min="0.01" required></label>
       <label style="grid-column:1/-1;">Observación<input type="text" id="gObs" class="input" placeholder="Ej: pasaje, comida, gasolina, flete..."></label>
       <label style="grid-column:1/-1;">Tipo de pago
         <div class="scan-mode-tabs" style="margin-top:4px;">
@@ -1115,7 +1117,7 @@
       <input type="hidden" id="gTipoPago" value="efectivo">
       <label>Fecha del gasto<input type="date" id="gFecha" class="input" title="Fecha del gasto (por defecto hoy y se recuerda)."></label>
       <label>Hora<input type="time" id="gHora" class="input" title="Hora del gasto (por defecto la actual)."></label>
-      <p class="hint" id="gTotalHint" style="grid-column:1/-1; margin:0;">Total: Bs 0.00</p>
+      <p class="hint" id="gTotalHint" style="grid-column:1/-1; margin:0;">Total: Bs 0.0</p>
       <div class="form-actions">
         <button type="submit" class="btn btn-danger">Guardar gasto</button>
         <button type="button" class="btn btn-secondary" data-close-modal>Cancelar</button>
@@ -1265,7 +1267,7 @@
 <input type="file" id="fileImportProducts" accept=".csv,.xls,.xlsx,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" hidden>
 <input type="file" id="fileImportInventario" accept=".csv" hidden>
 <input type="file" id="fileImportVentas" accept=".csv" hidden>
-<input type="file" id="fileImportCompras" accept=".csv" hidden>
+<input type="file" id="fileImportCompras" accept=".csv,.xls,.xlsx,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" hidden>
 <input type="file" id="fileImportTopVentas" accept=".csv" hidden>
 <input type="file" id="fileImportPedidos" accept=".csv" hidden>
 <input type="file" id="fileImportBackup" accept=".json" hidden>

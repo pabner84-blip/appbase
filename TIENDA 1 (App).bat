@@ -1,5 +1,5 @@
 @echo off
-title TIENDA 1
+title TIENDA 1 - App
 setlocal EnableExtensions
 cd /d "%~dp0"
 
@@ -21,15 +21,17 @@ for %%c in (
 ) do if exist %%c set "NAV=%%~c"
 
 if not defined NAV (
+  echo   No se encontro Edge ni Chrome en este equipo.
+  echo   Abriendo el archivo en el navegador por defecto...
   start "" "%~dp0index.html"
   goto :done
 )
 
 rem ============================================================
-rem  Si existe Node.js levanta el servidor local (permite instalar
-rem  la app y el autollenado de fotos). Si NO existe Node.js abre
-rem  el archivo directo en una ventana de "app": la app funciona
-rem  completa, solo sin el autollenado de imagenes.
+rem  Si existe Node.js usa el servidor (permite instalar la app
+rem  como PWA y sirve el autollenado de fotos). Si no existe,
+rem  abre el archivo directo: la app funciona igual completa,
+rem  solo sin autollenado de imagenes.
 rem ============================================================
 set "HASNODE="
 where node >nul 2>nul && set "HASNODE=1"
@@ -37,15 +39,11 @@ where node >nul 2>nul && set "HASNODE=1"
 if defined HASNODE (
   start "TIENDA 1 - Servidor" /min node "%~dp0server.js"
   timeout /t 2 /nobreak >nul
-  if defined NAV (
-    start "" "%NAV%" --app=http://localhost:8765
-  ) else (
-    start "" http://localhost:8765
-  )
+  start "" "%NAV%" --app=http://localhost:8765
   goto :done
 )
 
-rem Sin Node.js: abre el archivo directo en ventana de app
+rem Sin Node: abre el archivo directo en ventana de app
 set "BASE=%~dp0"
 set "BASE=%BASE:\=/%"
 start "" "%NAV%" --app="file:///%BASE%index.html"

@@ -30,6 +30,66 @@ let welcomeTimer = null;
 // guardan aquí el id de la venta y a qué modo pertenece (para el invitado).
 let editingVentaId = null;
 let editingVentaModo = null;
+// Instalación PWA: guarda el evento "beforeinstallprompt" (Chrome/Edge) para
+// mostrarlo desde el botón de la pestaña Configuración. Estos eventos se
+// registran al cargar (no dentro de setupEventListeners) para no perder el
+// evento aunque el navegador lo dispare temprano.
+let deferredInstallPrompt = null;
+
+window.addEventListener('beforeinstallprompt', (e)=>{
+  e.preventDefault();
+  deferredInstallPrompt = e;
+  updatePWAInstallUI();
+});
+window.addEventListener('appinstalled', ()=>{
+  updatePWAInstallUI();
+});
+
+// Prepara el texto/botón de "Instalar la app" según cómo se abrió el archivo:
+//  - Desde el disco (file://): no se puede instalar → avisa cómo hacerlo.
+//  - Desde localhost/https con service worker: muestra el botón si el
+//    navegador ofreció instalarla (beforeinstallprompt), si no, avisa del
+//    icono de instalación en la barra de direcciones.
+//  - Dentro de la app instalada: lo confirma.
+function updatePWAInstallUI(){
+  const btn = document.getElementById('btnInstallPWA');
+  const hint = document.getElementById('installPwaHint');
+  if(!btn) return;
+  let standalone = false;
+  try{ standalone = window.matchMedia && matchMedia('(display-mode: standalone)').matches; }catch(e){}
+  if(standalone){
+    btn.style.display = 'none';
+    if(hint) hint.textContent = '✅ La app ya está instalada y corriendo como app en este equipo.';
+    return;
+  }
+  const secure = location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1';
+  if(!secure || !('serviceWorker' in navigator)){
+    btn.style.display = 'none';
+    if(hint) hint.textContent = 'Estás abriendo el archivo directo de la carpeta (file://), y ahí el navegador no permite instalar apps. Para instalarla: cierra esto, haz doble clic en "Iniciar StockFerre.bat" (abre http://localhost:8765) y desde esa página pulsa el botón Instalar.';
+    return;
+  }
+  if(!deferredInstallPrompt){
+    btn.style.display = 'none';
+    if(hint) hint.textContent = 'Pulsa el icono de instalación (⬇️) que aparece en la barra de direcciones del navegador para guardarla como app en tu equipo. También puedes usar el archivo "TIENDA 1 (App).bat" que abre la app en su propia ventana sin navegador.';
+    return;
+  }
+  btn.style.display = '';
+  if(hint) hint.textContent = '';
+}
+
+async function handleInstallClick(){
+  if(!deferredInstallPrompt){
+    toast('El navegador no permite instalarla ahora. Prueba con Edge o usa "TIENDA 1 (App).bat".', 'warning');
+    return;
+  }
+  deferredInstallPrompt.prompt();
+  const choice = await deferredInstallPrompt.userChoice.catch(()=> ({ outcome: 'dismissed' }));
+  if(choice.outcome === 'accepted'){
+    toast('App instalada 🎉', 'success');
+  }
+  deferredInstallPrompt = null;
+  updatePWAInstallUI();
+}
 
 function storageKey(){ return 'stockferre_catalogo_v1_' + currentModo; }
 function invUpdatesKey(){ return 'stockferre_inv_actualizaciones_v1_' + currentModo; }
@@ -100,7 +160,6 @@ function normalizeDB(obj){
   obj.compras = obj.compras || [];
   obj.gastos = obj.gastos || [];
   obj.gastosPrestamos = obj.gastosPrestamos || [];
-  obj.comprasClearedAt = typeof obj.comprasClearedAt === 'number' ? obj.comprasClearedAt : 0;
   obj.finanzas = obj.finanzas || {};
   obj.finanzas.caja = typeof obj.finanzas.caja === 'number' ? obj.finanzas.caja : 0;
   obj.finanzas.retiros = obj.finanzas.retiros || [];
@@ -265,7 +324,7 @@ function findProductoInDB(dbObj, codigo){
 // correcta (Manuales o Eléctricas).
 function persistModoDB(modo, dbObj){
   try{ localStorage.setItem('stockferre_catalogo_v1_' + modo, JSON.stringify(dbObj)); }catch(e){}
-  if(typeof firebase !== 'undefined' && typeof firebaseConfig !== 'undefined' && firebaseConfig.apiKey){
+  if(firebaseToggleOn() && typeof firebase !== 'undefined' && typeof firebaseConfig !== 'undefined' && firebaseConfig.apiKey){
     try{
       if(!firebase.apps || !firebase.apps.length){ firebase.initializeApp(firebaseConfig); }
       const ref = firebase.firestore().collection('stockferre').doc('inventario_' + modo);
@@ -352,48 +411,14 @@ function mergeRemoteIntoLocal(local, remote){
     (local.ajustes || {}),
     (remote.ajustes || {})
   );
-  // La marca de vaciado del historial de ingresos: nunca retrocede. El máximo
-  // de las dos evita que una copia vieja "deshaga" un vaciado ya propagado.
-  merged.comprasClearedAt = Math.max(
-    Number(local.comprasClearedAt) || 0,
-    Number(remote.comprasClearedAt) || 0
-  );
   return normalizeDB(merged);
-}
-
-// Propaga un "Vaciar historial de ingresos" hecho en OTRO dispositivo.
-// Cuando alguien vacía el historial deja en la nube una marca (comprasClearedAt).
-// Si la copia remota trae una marca MÁS NUEVA que la local, este dispositivo
-// borra también sus ingresos locales para que el vaciado quede en todos lados.
-// Se llama ANTES de mergeRemoteIntoLocal, porque la fusión por id conserva los
-// registros que solo existen localmente y eso volvería a "resucitar" los
-// ingresos borrados.
-function applyRemoteClears(local, remote){
-  local = local || {};
-  remote = remote || {};
-  const rc = Number(remote.comprasClearedAt) || 0;
-  const lc = Number(local.comprasClearedAt) || 0;
-  if(rc > lc){
-    // Solo se borran los ingresos ANTERIORES a esta marca de vaciado. Los que
-    // se crearon DESPUÉS (por ejemplo, compras recién importadas o registradas
-    // en este dispositivo después de que otro vació el historial) se conservan:
-    // si no, un "vaciar" hecho en un celular borraría también lo recién cargado
-    // desde Excel en este. Los registros viejos sin marca de creación (_createdAt,
-    // anteriores a este arreglo) tienen 0 y quedan por debajo de la marca: se
-    // limpian como antes.
-    local.compras = (local.compras || []).filter(c => {
-      const creada = Number(c && c._createdAt) || 0;
-      return creada > rc;
-    });
-    local.comprasClearedAt = rc;
-  }
-  return local;
 }
 
 let guestUnsubs = [];
 function disconnectGuestFirebase(){
   guestUnsubs.forEach(u => { try{ u(); }catch(e){ /* ignorar */ } });
   guestUnsubs = [];
+  Object.keys(fbWriteQueues).forEach(k => delete fbWriteQueues[k]);
   fbReady = false;
   fbDocRef = null;
 }
@@ -402,6 +427,10 @@ function disconnectGuestFirebase(){
 // Eléctricas (solo para catálogo/productos) y también el documento propio del
 // invitado (ventas/gastos/finanzas). Cada uno se mantiene aislado.
 function connectGuestFirebase(){
+  if(!firebaseToggleOn()){
+    setSyncStatus('local'); // el usuario apagó la sincronización en este dispositivo
+    return;
+  }
   if(typeof firebaseConfig === 'undefined' || !firebaseConfig.apiKey || !firebaseConfig.projectId) return;
   if(typeof firebase === 'undefined') return;
   try{
@@ -416,7 +445,6 @@ function connectGuestFirebase(){
         if(snap.exists){
           const prev = loadModoDB(modo);
           const remote = normalizeDB(snap.data());
-          applyRemoteClears(prev, remote);
           const merged = mergeRemoteIntoLocal(prev, remote);
           merged.historialEscaneos = prev.historialEscaneos;
           merged.historialBusquedas = prev.historialBusquedas;
@@ -430,7 +458,6 @@ function connectGuestFirebase(){
         if(!snap.exists) return;
         const prev = loadModoDB(modo);
         const remote = normalizeDB(snap.data());
-        applyRemoteClears(prev, remote);
         const merged = mergeRemoteIntoLocal(prev, remote);
         merged.historialEscaneos = prev.historialEscaneos;
         merged.historialBusquedas = prev.historialBusquedas;
@@ -452,7 +479,6 @@ function connectGuestFirebase(){
         const prevRaw = localStorage.getItem(storageKey());
         const prev = prevRaw ? normalizeDB(JSON.parse(prevRaw)) : defaultDB();
         const remote = normalizeDB(snap.data());
-        applyRemoteClears(prev, remote);
         const merged = mergeRemoteIntoLocal(prev, remote);
         merged.historialEscaneos = guestSessionScans;
         merged.historialBusquedas = guestSessionSearches;
@@ -468,7 +494,6 @@ function connectGuestFirebase(){
       const prevRaw = localStorage.getItem(storageKey());
       const prev = prevRaw ? normalizeDB(JSON.parse(prevRaw)) : defaultDB();
       const remote = normalizeDB(snap.data());
-      applyRemoteClears(prev, remote);
       const merged = mergeRemoteIntoLocal(prev, remote);
       merged.historialEscaneos = guestSessionScans;
       merged.historialBusquedas = guestSessionSearches;
@@ -500,6 +525,7 @@ function disconnectFirebase(){
   if(fbUnsub){ try{ fbUnsub(); }catch(e){ /* ignorar */ } fbUnsub = null; }
   if(fbOtherUnsub){ try{ fbOtherUnsub(); }catch(e){ /* ignorar */ } fbOtherUnsub = null; }
   stopStockListeners();
+  Object.keys(fbWriteQueues).forEach(k => delete fbWriteQueues[k]);
   fbReady = false;
   fbDocRef = null;
 }
@@ -536,6 +562,10 @@ function rerenderCurrentView(){
 }
 
 async function connectFirebase(){
+  if(!firebaseToggleOn()){
+    setSyncStatus('local'); // el usuario apagó la sincronización en este dispositivo
+    return;
+  }
   if(typeof firebaseConfig === 'undefined' || !firebaseConfig.apiKey || !firebaseConfig.projectId){
     setSyncStatus('local');
     return; // no configurado: la app sigue funcionando 100% local
@@ -560,7 +590,6 @@ async function connectFirebase(){
       // (por si este dispositivo tenía cambios que la nube todavía no vio),
       // manteniendo siempre el historial local.
       const remote = normalizeDB(snap.data());
-      applyRemoteClears(db, remote);
       const merged = mergeRemoteIntoLocal(db, remote);
       merged.historialEscaneos = db.historialEscaneos;
       merged.historialBusquedas = db.historialBusquedas;
@@ -579,7 +608,6 @@ async function connectFirebase(){
       if(!snap.exists) return;
       const prevVentas = (db.ventas || []).map(v => v.id);
       const remote = normalizeDB(snap.data());
-      applyRemoteClears(db, remote);
       const merged = mergeRemoteIntoLocal(db, remote);
       merged.historialEscaneos = db.historialEscaneos;
       merged.historialBusquedas = db.historialBusquedas;
@@ -630,7 +658,6 @@ function cacheRemoteModo(data, modo){
   try{
     const prev = loadModoDB(modo);
     const remote = normalizeDB(data);
-    applyRemoteClears(prev, remote);
     const merged = mergeRemoteIntoLocal(prev, remote);
     merged.historialEscaneos = prev.historialEscaneos;
     merged.historialBusquedas = prev.historialBusquedas;
@@ -678,7 +705,7 @@ function fbConfigOk(){
 }
 
 function fbFirestoreOrNull(){
-  if(!fbConfigOk()) return null;
+  if(!fbConfigOk() || !firebaseToggleOn()) return null;
   try{
     if(!firebase.apps || !firebase.apps.length){ firebase.initializeApp(firebaseConfig); }
     const fs = firebase.firestore();
@@ -945,21 +972,9 @@ function escapeHtml(str){
     .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
 
-// Redondea cualquier valor de dinero a UN decimal (la app trabaja con 1 decimal).
-// Si llega "12.345" devuelve 12.3; si llega "12.350" devuelve 12.3 (el tercer
-// decimal simplemente se descarta redondeando al segundo).
-function round1(n){
-  return Math.round((Number(n) || 0) * 10) / 10;
-}
-
 function fmtMoney(n){
   n = Number(n) || 0;
-  return 'Bs ' + n.toFixed(1);
-}
-
-function fmtNum1(n){
-  n = Number(n) || 0;
-  return n.toFixed(1);
+  return 'Bs ' + n.toFixed(2);
 }
 
 function normalize(str){
@@ -986,6 +1001,22 @@ function productMatchesSearch(p, search){
 
 function todayISO(){
   return new Date().toISOString();
+}
+
+// Construye un timestamp ISO del DÍA indicado (YYYY-MM-DD) usando la HORA local
+// ACTUAL. La fecha se guarda con hora para que, al mostrarla, coincida con el día
+// seleccionado en Ventas (los timestamps "solo fecha" tipo new Date('2026-09-07')
+// retroceden un día en zonas detrás de UTC, como Bolivia).
+function stampForDay(dayKey){
+  const now = new Date();
+  let y, m, d;
+  if(/^\d{4}-\d{2}-\d{2}$/.test(dayKey || '')){
+    const parts = dayKey.split('-');
+    y = +parts[0]; m = +parts[1]; d = +parts[2];
+  }else{
+    y = now.getFullYear(); m = now.getMonth()+1; d = now.getDate();
+  }
+  return new Date(y, m-1, d, now.getHours(), now.getMinutes(), now.getSeconds(), 0).toISOString();
 }
 
 /* -------------------------------------------------------------------------
@@ -1412,10 +1443,6 @@ function upsertCategoria(nombre){
 
 function saveProducto(data){
   upsertCategoria(data.categoria);
-  // La app maneja los precios con UN decimal: se redondean al guardar.
-  data.precioCompra = round1(parseFloat(data.precioCompra)) || 0;
-  data.precioMarca = round1(parseFloat(data.precioMarca)) || 0;
-  data.precioVenta = round1(parseFloat(data.precioVenta)) || 0;
 
   if(data.id){
     const p = getProductoById(data.id);
@@ -1490,7 +1517,7 @@ function deleteProducto(id){
 function saveVenta(data){
   const cantidad = parseFloat(data.cantidad) || 0;
   const total = parseFloat(data.total) || 0;
-  const precioUnitario = round1(cantidad > 0 ? total / cantidad : 0);
+  const precioUnitario = cantidad > 0 ? total / cantidad : 0;
   const venta = {
     id: uid('venta'),
     codigo: data.codigo,
@@ -1502,10 +1529,10 @@ function saveVenta(data){
     qrPersona: data.qrPersona || '',
     efectivoMonto: parseFloat(data.efectivoMonto) || 0,
     qrMonto: parseFloat(data.qrMonto) || 0,
-    // Se guarda en el día que se está viendo en Ventas (si es "Todas", hoy).
-    // Así no se mezclan fechas: si estás viendo Ayer o cualquier fecha del
-    // calendario, la venta nueva se registra en ESA fecha.
-    fecha: ventaFilterDateKey() || todayISO()
+    // Se guarda en el día que se está viendo en Ventas (si es "Todas", hoy)
+    // y con la HORA actual al momento de registrar. Así la fecha y hora que
+    // se muestran coinciden con el día seleccionado en Ventas.
+    fecha: stampForDay(ventaFilterDateKey())
   };
 
   // En modo invitado la venta se guarda en su propia base (aislada).
@@ -1740,7 +1767,7 @@ function openVentaEditModal(id){
 function updateVenta(id, oldModo, data){
   const cantidad = parseFloat(data.cantidad) || 0;
   const total = parseFloat(data.total) || 0;
-  const precioUnitario = round1(cantidad > 0 ? total / cantidad : 0);
+  const precioUnitario = cantidad > 0 ? total / cantidad : 0;
   const v = db.ventas.find(x => x.id === id);
   if(!v) return false;
 
@@ -1856,8 +1883,8 @@ function syncSplitPago(){
   const efVal = parseFloat(ef.value);
   const qrVal = parseFloat(qr.value);
   if((isNaN(efVal) && isNaN(qrVal)) || (total > 0 && efVal === 0 && qrVal === 0)){
-    ef.value = total.toFixed(1);
-    qr.value = '0.0';
+    ef.value = total.toFixed(2);
+    qr.value = '0.00';
   }
 }
 function resetSplitPagoUI(){
@@ -1872,8 +1899,7 @@ function handleVentaSubmit(e){
   e.preventDefault();
   const esOtro = document.getElementById('vEsOtro').value === '1';
   const cantidad = parseFloat(document.getElementById('vCantidad').value);
-  // La app maneja los precios con UN decimal: se redondea al registrar.
-  const total = round1(parseFloat(document.getElementById('vPrecioTotal').value));
+  const total = parseFloat(document.getElementById('vPrecioTotal').value);
   const metodoPago = document.getElementById('vMetodoPago').value;
 
   if(!cantidad || cantidad <= 0){
@@ -1891,8 +1917,8 @@ function handleVentaSubmit(e){
 
   let efectivoMonto = 0, qrMonto = 0;
   if(metodoPago === 'mixto'){
-    efectivoMonto = round1(parseFloat(document.getElementById('vEfectivoMonto').value) || 0);
-    qrMonto = round1(parseFloat(document.getElementById('vQrMonto').value) || 0);
+    efectivoMonto = parseFloat(document.getElementById('vEfectivoMonto').value) || 0;
+    qrMonto = parseFloat(document.getElementById('vQrMonto').value) || 0;
     if(Math.abs((efectivoMonto + qrMonto) - total) > 0.01){
       toast('Efectivo + QR deben sumar el total', 'error');
       return;
@@ -2015,19 +2041,21 @@ function renderScanResultInto(elementId, codigo, context){
       <div class="sr-row"><span>Categoría</span><strong>${escapeHtml(p.categoria || '-')}</strong></div>
       ${stockRowHtml}
       ${currentRole === 'guest' ? '' : `
-      <div class="sr-row"><span>Precio ${escapeHtml((p.marca || 'según marca').trim())}</span><strong>${fmtMoney(p.precioMarca)}</strong></div>
-      <div class="sr-row"><span>Precio con descuento</span><strong>${fmtMoney(p.precioCompra)}</strong></div>`}
+      <div class="sr-row"><span>Precio de compra</span><strong>${fmtMoney(p.precioCompra)}</strong></div>
+      <div class="sr-row"><span>Precio de marca</span><strong>${fmtMoney(p.precioMarca)}</strong></div>`}
       <div class="sr-row"><span>Precio de venta</span><strong>${fmtMoney(p.precioVenta)}</strong></div>`;
 
-  const srImgSrc = getImage(p.id);
-  const srImgHtml = srImgSrc
-    ? `<div class="sr-img-wrap"><img src="${srImgSrc}" class="sr-thumb" alt="${escapeHtml(p.nombre)}" decoding="async" loading="lazy"></div>`
-    : '';
+  const img = getImage(p.id);
+  const imgHtml = img
+    ? `<img src="${img}" class="sr-img" alt="" data-img-product="${p.id}" decoding="async">`
+    : `<div class="sr-img sr-img-empty" data-img-product="${p.id}">🖼️</div>`;
 
   resultDiv.innerHTML = `
     <div class="scan-result-card">
-      ${srImgHtml}
-      <h4>📦 ${escapeHtml(p.nombre)}</h4>
+      <div class="sr-head">
+        <div class="sr-img-wrap">${imgHtml}</div>
+        <h4>📦 ${escapeHtml(p.nombre)}</h4>
+      </div>
       <div class="sr-row"><span>Código</span><strong>${escapeHtml(p.codigo)}</strong></div>
       ${detailRowsHtml}
       <div style="margin-top:12px; display:flex; gap:8px; flex-wrap:wrap;">
@@ -3457,7 +3485,7 @@ function openHistorialVentaProducto(codigo){
   title.textContent = 'Historial de ventas — ' + nombre;
   const totalUnidades = ventas.reduce((s,v) => s + (parseFloat(v.cantidad) || 0), 0);
   const totalMonto = ventas.reduce((s,v) => s + (parseFloat(v.total) || 0), 0);
-  resumen.textContent = `${ventas.length} venta(s) · ${totalUnidades} unidades vendidas · Bs ${totalMonto.toFixed(1)}`;
+  resumen.textContent = `${ventas.length} venta(s) · ${totalUnidades} unidades vendidas · Bs ${totalMonto.toFixed(2)}`;
   if(ventas.length === 0){
     tbody.innerHTML = '<tr class="empty-row"><td colspan="5">No hay ventas registradas para este producto.</td></tr>';
   } else {
@@ -3470,8 +3498,8 @@ function openHistorialVentaProducto(codigo){
       return `<tr>
         <td>${escapeHtml(fecha)}</td>
         <td>${cant}</td>
-        <td>Bs ${pu.toFixed(1)}</td>
-        <td><strong>Bs ${total.toFixed(1)}</strong></td>
+        <td>Bs ${pu.toFixed(2)}</td>
+        <td><strong>Bs ${total.toFixed(2)}</strong></td>
         <td>${escapeHtml(metodo)}</td>
       </tr>`;
     }).join('');
@@ -3579,7 +3607,7 @@ function renderPedidos(){
 
   if(list.length === 0){
     tbody.innerHTML = `<tr class="empty-row"><td colspan="7">No hay productos${marcaSel.value ? ' de esa marca' : ''}.</td></tr>`;
-    summary.textContent = '0 productos · 0 unidades · Bs 0.0';
+    summary.textContent = '0 productos · 0 unidades · Bs 0.00';
     return;
   }
 
@@ -3935,14 +3963,11 @@ function vaciarComprasConStock(quitarStock){
     });
   }
   db.compras = [];
-  // Marca el vaciado para que se propague a los demás dispositivos: cualquier
-  // copia remota con esta marca más nueva borrará también sus ingresos.
-  db.comprasClearedAt = Date.now();
   saveDB();
   renderCompras();
   renderInventario();
   renderProductos();
-  toast('Historial de ingresos vaciado (en todos los dispositivos)', 'success');
+  toast('Historial de ingresos vaciado', 'success');
 }
 
 // Borra ingresos de hace más de 3 meses (el stock no se modifica).
@@ -3990,43 +4015,22 @@ function exportComprasCSV(){
   }
   const header = ['FECHA','CODIGO','PRODUCTO','PROVEEDOR','CANTIDAD','PRECIO UNITARIO','TOTAL','METODO DE PAGO','OBSERVACIONES'];
   const rows = db.compras.map(c => [
-    c.fecha, c.codigo || '', c.nombre, c.proveedor || '', Number(c.cantidad) || 0, Number(c.precioUnitario) || 0, Number(c.total) || 0, c.metodoPago || '', c.observaciones || ''
+    c.fecha, csvText(c.codigo), c.nombre, c.proveedor || '', csvNumber(c.cantidad), csvNumber(c.precioUnitario, 2), csvNumber(c.total, 2), c.metodoPago, c.observaciones || ''
   ]);
-  // Igual que en Productos: con SheetJS generamos un .xlsx REAL que Excel abre
-  // sin el aviso de "formato y extensión no coinciden" y, al editarlo y
-  // guardarlo, se re-importa bien.
-  if(typeof XLSX !== 'undefined'){
-    try{
-      const aoa = [header, ...rows];
-      const ws = XLSX.utils.aoa_to_sheet(aoa);
-      ws['!cols'] = [12,15,30,16,10,16,12,14,32].map(w => ({ wch: w }));
-      const wb = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(wb, ws, 'Ingresos');
-      XLSX.writeFile(wb, `stockferre_ingresos_${todayISO().slice(0,10)}.xlsx`);
-      toast('Ingresos exportados a Excel (.xlsx)', 'success');
-      return;
-    }catch(err){
-      console.error('Error generando .xlsx', err);
-      // se cae al .xls XML 2003 como respaldo
-    }
-  }
-  const types = ['text','text','text','text','number','number','number','text','text'];
-  downloadXLS(`stockferre_ingresos_${todayISO().slice(0,10)}.xls`, [{ name: 'Ingresos', header, rows, types }]);
-  toast('Ingresos exportados a Excel', 'success');
+  downloadCSV(`stockferre_ingresos_${todayISO().slice(0,10)}.csv`, header, rows);
+  toast('Ingresos exportados', 'success');
 }
 
-// Importa compras desde Excel (.xlsx/.xls) o CSV (un respaldo exportado antes).
-// Igual que en Productos, acepta los archivos que se exportan, incluso después
-// de editarlos y guardarlos con Excel. Se agregan como registros al historial
-// de compras; NO modifica el stock (para no sumarlo dos veces si esa compra ya
-// afectó el inventario al registrarse).
+// Importa compras desde un CSV (un respaldo exportado antes). Se agregan como
+// registros al historial de compras; NO modifica el stock (para no sumarlo
+// dos veces si esa compra ya afectó el inventario al registrarse).
 function importComprasCSV(file){
   const reader = new FileReader();
   reader.onload = (e)=>{
     try{
-      const rows = fileRowsFromBuffer(file, e.target.result);
-      if(!rows || rows.length < 2){
-        toast('El archivo no tiene datos', 'error');
+      const rows = parseCSV(e.target.result);
+      if(rows.length < 2){
+        toast('El archivo CSV no tiene datos', 'error');
         return;
       }
       const headers = rows[0].map(normalizeHeader);
@@ -4042,7 +4046,7 @@ function importComprasCSV(file){
         observaciones: headers.findIndex(h => h.includes('OBSERVACION') || h.includes('NOTA'))
       };
       if(idx.codigo === -1 || idx.nombre === -1 || idx.total === -1){
-        toast('El archivo debe tener al menos columnas CODIGO, PRODUCTO y TOTAL', 'error');
+        toast('El CSV debe tener al menos columnas CODIGO, PRODUCTO y TOTAL', 'error');
         return;
       }
       let importadas = 0;
@@ -4052,7 +4056,7 @@ function importComprasCSV(file){
         if(!nombre) continue;
         const cantidad = idx.cantidad > -1 ? (parseFloat(String(r[idx.cantidad]).replace(',','.')) || 1) : 1;
         const total = parsePrecio(r[idx.total]);
-        const precioUnitario = idx.precioUnitario > -1 ? parsePrecio(r[idx.precioUnitario]) : round1(cantidad > 0 ? total / cantidad : 0);
+        const precioUnitario = idx.precioUnitario > -1 ? parsePrecio(r[idx.precioUnitario]) : (cantidad > 0 ? total / cantidad : 0);
         const codigo = String(r[idx.codigo] || '').trim() || 'OTRO';
         const proveedor = idx.proveedor > -1 ? String(r[idx.proveedor] || '').trim() : '';
         const observaciones = idx.observaciones > -1 ? String(r[idx.observaciones] || '').trim() : '';
@@ -4068,10 +4072,6 @@ function importComprasCSV(file){
           fecha: idx.fecha > -1 ? (r[idx.fecha] || todayISO()) : todayISO(),
           proveedor,
           observaciones,
-          // Momento exacto en que se importó este registro: protege las compras
-          // recién importadas de borrarse cuando otro dispositivo vacía el
-          // historial (ver applyRemoteClears).
-          _createdAt: Date.now(),
           productoId: p ? p.id : null
         });
         importadas++;
@@ -4082,11 +4082,11 @@ function importComprasCSV(file){
       toast(`Ingresos importados: ${importadas} (no se modificó el stock)`, 'success');
     }catch(err){
       console.error(err);
-      toast('No se pudo leer el archivo. Verifica el formato.', 'error');
+      toast('No se pudo leer el archivo CSV. Verifica el formato.', 'error');
     }
   };
   reader.onerror = ()=> toast('Error al leer el archivo', 'error');
-  reader.readAsArrayBuffer(file);
+  reader.readAsText(file, 'UTF-8');
 }
 
 /* -------------------------------------------------------------------------
@@ -4134,9 +4134,10 @@ function exportFinanzasCSV(){
   const caja = Number(db.finanzas.caja) || 0;
   const header = ['FECHA','CONCEPTO','MONTO'];
   const rows = [
-    [todayISO(), 'Capital en productos (stock x precio de compra)', csvNumber(capital, 1)],
-    [todayISO(), 'Efectivo actual', csvNumber(caja, 1)],
-    [todayISO(), 'Patrimonio total (productos + efectivo)', csvNumber(capital + caja, 1)]
+    [todayISO(), 'Capital en productos (stock x precio de compra)', csvNumber(capital, 2)],
+    [todayISO(), 'Efectivo actual', csvNumber(caja, 2)],
+    [todayISO(), 'Deuda pendiente (deudas - pagos)', csvNumber(deudaPendienteTotal(), 2)],
+    [todayISO(), 'Patrimonio total (productos + efectivo)', csvNumber(capital + caja, 2)]
   ];
   downloadCSV(`stockferre_finanzas_${todayISO().slice(0,10)}.csv`, header, rows);
   toast('Estado financiero exportado', 'success');
@@ -4306,7 +4307,7 @@ function exportRetirosCSV(){
   const list = db.finanzas.retiros || [];
   if(list.length === 0){ toast('No hay pagos para exportar', 'error'); return; }
   const header = ['FECHA','MONTO','MARCA','OBSERVACION'];
-  const rows = list.map(r => [r.fecha, csvNumber(r.monto, 1), retiroMarca(r), r.obs || '']);
+  const rows = list.map(r => [r.fecha, csvNumber(r.monto, 2), retiroMarca(r), r.obs || '']);
   downloadCSV(`stockferre_pagos_${todayISO().slice(0,10)}.csv`, header, rows);
   toast('Pagos exportados', 'success');
 }
@@ -4531,7 +4532,7 @@ function exportDeudasCSV(){
   const list = db.finanzas.deudas || [];
   if(list.length === 0){ toast('No hay deudas para exportar', 'error'); return; }
   const header = ['FECHA','MARCA','MONTO','VENCIMIENTO','OBSERVACION'];
-  const rows = list.map(d => [d.fecha, d.marca || '', csvNumber(d.monto, 1), d.vencimiento || '', d.obs || '']);
+  const rows = list.map(d => [d.fecha, d.marca || '', csvNumber(d.monto, 2), d.vencimiento || '', d.obs || '']);
   downloadCSV(`stockferre_deudas_${todayISO().slice(0,10)}.csv`, header, rows);
   toast('Deudas exportadas', 'success');
 }
@@ -4826,23 +4827,17 @@ function handleInventoryScan(codigo){
 // producto lista. Se puede registrar con los botones 1-6 (registro inmediato)
 // o tocar "Más" para escribir una cantidad con el teclado y luego "Registrar".
 function openInventarioCantidadBox(producto, codigo){
+  const imgWrap = document.getElementById('invImgWrap');
+  if(imgWrap){
+    const im = getImage(producto.id);
+    imgWrap.innerHTML = im
+      ? `<img src="${im}" class="sr-img" alt="" data-img-product="${producto.id}" decoding="async">`
+      : `<div class="sr-img sr-img-empty" data-img-product="${producto.id}">🖼️</div>`;
+  }
   document.getElementById('invCodigo').value = codigo;
   document.getElementById('invCodigoDisplay').textContent = codigo;
   document.getElementById('invNombreDisplay').textContent = producto.nombre;
   document.getElementById('invStockActualDisplay').textContent = `Stock actual: ${producto.stock || 0}`;
-
-  const invImgWrap = document.getElementById('invImgThumb');
-  const invImgSrc = getImage(producto.id);
-  if(invImgWrap){
-    if(invImgSrc){
-      invImgWrap.style.display = 'block';
-      invImgWrap.innerHTML = `<img src="${invImgSrc}" class="sr-thumb" alt="${escapeHtml(producto.nombre)}" decoding="async">`;
-    }else{
-      invImgWrap.style.display = 'none';
-      invImgWrap.innerHTML = '';
-    }
-  }
-
   document.getElementById('invCantidad').value = 1;
   document.getElementById('invMasBox').style.display = 'none';
   openModal('modalInventarioDetalle');
@@ -4935,7 +4930,7 @@ function openCompraDetalleForm(producto, codigo){
 function recalcCompraTotal(){
   const cant = parseFloat(document.getElementById('cCantidad').value) || 0;
   const pre = parseFloat(document.getElementById('cPrecioCompra').value) || 0;
-  document.getElementById('cTotalDisplay').value = (cant * pre).toFixed(1);
+  document.getElementById('cTotalDisplay').value = (cant * pre).toFixed(2);
 }
 
 // Convierte la fecha elegida en el recuadro ("YYYY-MM-DD", por defecto hoy)
@@ -4981,8 +4976,7 @@ function handleCompraSubmit(e){
   const codigo = document.getElementById('cCodigo').value.trim();
   const nombre = document.getElementById('cNombreInput').value.trim();
   const cantidad = parseFloat(document.getElementById('cCantidad').value);
-  // La app maneja los precios con UN decimal: se redondean al registrar.
-  const precioCompra = round1(parseFloat(document.getElementById('cPrecioCompra').value));
+  const precioCompra = parseFloat(document.getElementById('cPrecioCompra').value);
 
   if(!codigo || !nombre){
     toast('Ingresa el código y la descripción', 'error');
@@ -4999,7 +4993,7 @@ function handleCompraSubmit(e){
 
   const actualizar = document.getElementById('cActualizarDatos').checked;
   const marca = document.getElementById('cMarca').value.trim();
-  const precioVenta = !isNaN(parseFloat(document.getElementById('cPrecioVenta').value)) ? round1(parseFloat(document.getElementById('cPrecioVenta').value)) : NaN;
+  const precioVenta = parseFloat(document.getElementById('cPrecioVenta').value);
 
   let p = getProductoByCodigo(codigo);
   const esNuevo = !p;
@@ -5045,14 +5039,11 @@ function handleCompraSubmit(e){
     nombre,
     cantidad,
     precioUnitario: precioCompra,
-    total: round1(precioCompra * cantidad),
+    total: precioCompra * cantidad,
     metodoPago: document.getElementById('cMetodoPago').value,
     fecha: compraFechaFromInput(fechaElegida),
     proveedor,
     observaciones,
-    // Momento exacto en que se registró esta compra: evita que un "vaciar
-    // historial" hecho en otro dispositivo borre lo que se acaba de cargar aquí.
-    _createdAt: Date.now(),
     productoId: p.id
   });
   db.compras.sort((a,b)=> new Date(b.fecha) - new Date(a.fecha));
@@ -5261,7 +5252,7 @@ function renderCompraSearchResults(){
       ${thumb}
       <span class="vsi-info">
         <span class="vsi-nombre">${escapeHtml(p.nombre)}</span>
-        <span class="vsi-meta">${escapeHtml(p.codigo)} · Descuento ${fmtMoney(p.precioCompra)}</span>
+        <span class="vsi-meta">${escapeHtml(p.codigo)} · Compra ${fmtMoney(p.precioCompra)}</span>
       </span>
     </button>`;
   }).join('');
@@ -5388,7 +5379,7 @@ function ocrRenderTable(){
       <td contenteditable="true" data-field="codigo">${escapeHtml(it.codigo)}</td>
       <td contenteditable="true" data-field="cantidad" style="width:50px; text-align:center;">${it.cantidad}</td>
       <td contenteditable="true" data-field="descripcion" style="min-width:180px;">${escapeHtml(it.descripcion)}</td>
-      <td contenteditable="true" data-field="precio" style="width:70px; text-align:right;">${it.precio.toFixed(1)}</td>
+      <td contenteditable="true" data-field="precio" style="width:70px; text-align:right;">${it.precio.toFixed(2)}</td>
       <td style="text-align:right; font-weight:600;">${fmtMoney(it.total)}</td>
       <td><span class="ocr-del-btn" data-ocr-del="${it.id}">🗑️</span></td>
     </tr>`;
@@ -5433,6 +5424,10 @@ async function ocrProcessImage(imgSrc){
   status.textContent = 'Cargando Tesseract.js...';
 
   try{
+    if(typeof window.__LAZY_LIBS__ !== 'undefined' && window.__LAZY_LIBS__.tesseract){
+      await window.__LAZY_LIBS__.tesseract();
+    }
+    if(typeof Tesseract === 'undefined') throw new Error('No se pudo cargar Tesseract.js');
     const result = await Tesseract.recognize(imgSrc, 'spa+eng', {
       logger: m => {
         if(m.status === 'recognizing text'){
@@ -5474,6 +5469,10 @@ async function ocrProcessPDF(file){
   status.textContent = 'Cargando PDF...';
 
   try{
+    if(typeof window.__LAZY_LIBS__ !== 'undefined' && window.__LAZY_LIBS__.pdf){
+      await window.__LAZY_LIBS__.pdf();
+    }
+    if(typeof pdfjsLib === 'undefined') throw new Error('No se pudo cargar el lector de PDF');
     const arrayBuffer = await file.arrayBuffer();
     const pdf = await pdfjsLib.getDocument({data: arrayBuffer}).promise;
     const numPages = pdf.numPages;
@@ -5500,6 +5499,10 @@ async function ocrProcessPDF(file){
         // PDF escaneado: usar OCR en el canvas
         status.textContent = 'OCR página ' + i + '/' + numPages + '...';
         progress.style.width = (35 + (i / numPages) * 60) + '%';
+        if(typeof window.__LAZY_LIBS__ !== 'undefined' && window.__LAZY_LIBS__.tesseract){
+          await window.__LAZY_LIBS__.tesseract();
+        }
+        if(typeof Tesseract === 'undefined') throw new Error('No se pudo cargar Tesseract.js');
         const result = await Tesseract.recognize(canvas.toDataURL('image/png'), 'spa+eng');
         allText += result.data.text + '\n';
       }
@@ -5679,6 +5682,358 @@ function downloadXLS(filename, sheets){
   URL.revokeObjectURL(url);
 }
 
+/* -------------------------------------------------------------------------
+   EXCEL REAL (.xlsx) — exportación e importación
+   El .xls XML 2003 que se generaba antes abría en Excel con el aviso "El
+   formato y la extensión del archivo no coinciden", y al guardar los cambios
+   Excel lo convertía a .xlsx comprimido que la app no podía importar. Ahora se
+   exporta un .xlsx de verdad (un ZIP con XML), que Excel abre y RE-guarda
+   sin avisos, y la importación lee tanto el .xlsx exportado como el que Excel
+   vuelve a guardar (compresión DEFLATE incluida).
+   ------------------------------------------------------------------------- */
+let crc32Table = null;
+function crc32(bytes){
+  if(!crc32Table){
+    crc32Table = new Int32Array(256);
+    for(let n = 0; n < 256; n++){
+      let c = n;
+      for(let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+      crc32Table[n] = c;
+    }
+  }
+  let c = -1;
+  for(let i = 0; i < bytes.length; i++) c = (c >>> 8) ^ crc32Table[(c ^ bytes[i]) & 0xff];
+  return (c ^ -1) >>> 0;
+}
+
+const XLSX_CT = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>';
+const XLSX_RELS = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>';
+const XLSX_WB = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Productos" sheetId="1" r:id="rId1"/></sheets></workbook>';
+const XLSX_WB_RELS = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>';
+
+function downloadBlob(blob, filename){
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+// Empaqueta entradas { name, data:Uint8Array } en un ZIP real (método STORED,
+// sin comprimir — Excel y LibreOffice lo abren igual). El .xlsx es un ZIP.
+function buildZipBlob(entries){
+  const enc = new TextEncoder();
+  const H = 30;
+  const chunks = [];
+  const meta = [];
+  let offset = 0;
+  entries.forEach(e => {
+    const data = e.data;
+    const name = enc.encode(e.name);
+    const crc = crc32(data);
+    const h = new DataView(new ArrayBuffer(H));
+    h.setUint32(0, 0x04034b50, true);
+    h.setUint16(4, 20, true);
+    h.setUint16(6, 0, true);
+    h.setUint16(8, 0, true);        // método STORED
+    h.setUint16(10, 0, true);
+    h.setUint16(12, 0x21, true);
+    h.setUint32(14, crc, true);
+    h.setUint32(18, data.length, true);
+    h.setUint32(22, data.length, true);
+    h.setUint16(26, name.length, true);
+    h.setUint16(28, 0, true);
+    chunks.push(h.buffer, name.buffer, data.buffer);
+    meta.push({ name, crc, len: data.length, off: offset });
+    offset += H + name.length + data.length;
+  });
+  const cdStart = offset;
+  meta.forEach(m => {
+    const cd = new DataView(new ArrayBuffer(46));
+    cd.setUint32(0, 0x02014b50, true);
+    cd.setUint16(4, 20, true); cd.setUint16(6, 20, true);
+    cd.setUint16(8, 0, true); cd.setUint16(10, 0, true);
+    cd.setUint16(12, 0, true); cd.setUint16(14, 0x21, true);
+    cd.setUint32(16, m.crc, true);
+    cd.setUint32(20, m.len, true);
+    cd.setUint32(24, m.len, true);
+    cd.setUint16(28, m.name.length, true);
+    cd.setUint16(30, 0, true); cd.setUint16(32, 0, true); cd.setUint16(34, 0, true);
+    cd.setUint16(36, 0, true);
+    cd.setUint32(42, m.off, true);
+    chunks.push(cd.buffer, m.name.buffer);
+    offset += 46 + m.name.length;
+  });
+  const eocd = new DataView(new ArrayBuffer(22));
+  eocd.setUint32(0, 0x06054b50, true);
+  eocd.setUint16(4, 0, true); eocd.setUint16(6, 0, true);
+  eocd.setUint16(8, meta.length, true);
+  eocd.setUint16(10, meta.length, true);
+  eocd.setUint32(12, offset - cdStart, true);
+  eocd.setUint32(16, cdStart, true);
+  eocd.setUint16(20, 0, true);
+  chunks.push(eocd.buffer);
+  return new Blob(chunks, { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+}
+
+function colLetterXLSX(i){
+  let s = '';
+  i++;
+  while(i > 0){ i--; s = String.fromCharCode(65 + (i % 26)) + s; i = Math.floor(i / 26); }
+  return s;
+}
+
+// Genera un .xlsx real: { name, header, rows, types } igual que downloadXLS.
+function downloadXLSX(filename, sheets){
+  const enc = new TextEncoder();
+  const escXML = s => String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  const sheet = sheets[0];
+  if(!sheet) return;
+  let p = [];
+  p.push('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>');
+  p.push('<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>');
+  p.push('<row r="1">' + sheet.header.map((h, ci) => `<c r="${colLetterXLSX(ci)}1" t="inlineStr"><is><t>${escXML(h)}</t></is></c>`).join('') + '</row>');
+  sheet.rows.forEach((row, ri) => {
+    const rn = ri + 2;
+    const cells = row.map((v, ci) => {
+      const ref = colLetterXLSX(ci) + rn;
+      if(sheet.types && sheet.types[ci] === 'number'){
+        const n = Number(v);
+        return `<c r="${ref}"><v>${isFinite(n) ? n : 0}</v></c>`;
+      }
+      return `<c r="${ref}" t="inlineStr"><is><t>${escXML(v)}</t></is></c>`;
+    }).join('');
+    p.push(`<row r="${rn}">${cells}</row>`);
+  });
+  p.push('</sheetData></worksheet>');
+  const blob = buildZipBlob([
+    { name: '[Content_Types].xml', data: enc.encode(XLSX_CT) },
+    { name: '_rels/.rels', data: enc.encode(XLSX_RELS) },
+    { name: 'xl/workbook.xml', data: enc.encode(XLSX_WB) },
+    { name: 'xl/_rels/workbook.xml.rels', data: enc.encode(XLSX_WB_RELS) },
+    { name: 'xl/worksheets/sheet1.xml', data: enc.encode(p.join('')) }
+  ]);
+  downloadBlob(blob, filename);
+}
+
+// Descomprime DEFLATE sin cabecera (RFC 1951) — usada para leer los .xlsx que
+// Excel re-guarda comprimidos. Validada contra zlib en Node.
+function inflateRawBytes(u8){
+  let pi = 0, bitBuf = 0, bitCnt = 0;
+  function readBits(n){
+    let v = 0;
+    for(let i = 0; i < n; i++){
+      if(bitCnt === 0){ bitBuf = u8[pi++]; bitCnt = 8; }
+      v |= (bitBuf & 1) << i;
+      bitBuf >>= 1;
+      bitCnt--;
+    }
+    return v;
+  }
+  const LENGTH_BASE = [3,4,5,6,7,8,9,10,11,13,15,17,19,23,27,31,35,43,51,59,67,83,99,115,131,163,195,227,258];
+  const LENGTH_EXTRA = [0,0,0,0,0,0,0,0,1,1,1,1,2,2,2,2,3,3,3,3,4,4,4,4,5,5,5,5,0];
+  const DIST_BASE = [1,2,3,4,5,7,9,13,17,25,33,49,65,97,129,193,257,385,513,769,1025,1537,2049,3073,4097,6145,8193,12289,16385,24577];
+  const DIST_EXTRA = [0,0,0,0,1,1,2,2,3,3,4,4,5,5,6,6,7,7,8,8,9,9,10,10,11,11,12,12,13,13];
+  function buildTables(lengths){
+    const count = new Array(16).fill(0);
+    for(const l of lengths) if(l > 0) count[l]++;
+    let maxBits = 15;
+    while(maxBits > 0 && !count[maxBits]) maxBits--;
+    if(maxBits === 0) return null;
+    const total = lengths.reduce((a, l) => a + (l > 0 ? 1 : 0), 0);
+    const syms = new Array(total).fill(0);
+    let pos = 0;
+    for(let len = 1; len <= maxBits; len++){
+      for(let s = 0; s < lengths.length; s++){
+        if(lengths[s] === len) syms[pos++] = s;
+      }
+    }
+    return { count, syms, maxBits };
+  }
+  function decodeSym(t){
+    let code = 0, first = 0, index = 0;
+    for(let len = 1; len <= (t ? t.maxBits : 1); len++){
+      code |= readBits(1);
+      const cnt = t ? t.count[len] : (len === 1 ? 1 : 0);
+      if(code - first < cnt) return t ? t.syms[index + (code - first)] : 0;
+      index += cnt;
+      first = (first + cnt) << 1;
+      code <<= 1;
+    }
+    return -1;
+  }
+  const FIXED_LIT = new Array(288).fill(0);
+  for(let i = 0; i <= 143; i++) FIXED_LIT[i] = 8;
+  for(let i = 144; i <= 255; i++) FIXED_LIT[i] = 9;
+  for(let i = 256; i <= 279; i++) FIXED_LIT[i] = 7;
+  for(let i = 280; i <= 287; i++) FIXED_LIT[i] = 8;
+  const FIXED_DIST = new Array(30).fill(5);
+  const out = [];
+  function readBlock(litT, distT){
+    for(;;){
+      const sym = decodeSym(litT);
+      if(sym < 0) throw new Error('Huffman inválido');
+      if(sym < 256){ out.push(sym); continue; }
+      if(sym === 256) return;
+      let len = LENGTH_BASE[sym - 257] + readBits(LENGTH_EXTRA[sym - 257]);
+      const dsym = decodeSym(distT);
+      if(dsym < 0) throw new Error('Distancia inválida');
+      const dist = DIST_BASE[dsym] + readBits(DIST_EXTRA[dsym]);
+      for(let k = 0; k < len; k++){
+        if(out.length < dist) throw new Error('Referencia fuera de rango');
+        out.push(out[out.length - dist]);
+      }
+    }
+  }
+  for(;;){
+    const bfinal = readBits(1);
+    const btype = readBits(2);
+    if(btype === 0){
+      bitBuf = 0; bitCnt = 0;
+      const blen = u8[pi] | (u8[pi+1] << 8);
+      pi += 2; pi += 2;
+      for(let k = 0; k < blen; k++) out.push(u8[pi++]);
+    }else if(btype === 1){
+      readBlock(buildTables(FIXED_LIT), buildTables(FIXED_DIST));
+    }else if(btype === 2){
+      const HLIT = readBits(5) + 257;
+      const HDIST = readBits(5) + 1;
+      const HCLEN = readBits(4) + 4;
+      const ORDER = [16,17,18,0,8,7,9,6,10,5,11,4,12,3,13,2,14,1,15];
+      const clLens = new Array(19).fill(0);
+      for(let i = 0; i < HCLEN; i++) clLens[ORDER[i]] = readBits(3);
+      const clTree = buildTables(clLens);
+      const lengths = new Array(HLIT + HDIST).fill(0);
+      let i = 0;
+      while(i < HLIT + HDIST){
+        const sym = decodeSym(clTree);
+        if(sym < 16){ lengths[i++] = sym; }
+        else if(sym === 16){
+          const rep = 3 + readBits(2);
+          const prev = i > 0 ? lengths[i-1] : 0;
+          for(let k = 0; k < rep && i < lengths.length; k++) lengths[i++] = prev;
+        }else if(sym === 17){
+          i += 3 + readBits(3);
+        }else{
+          i += 11 + readBits(7);
+        }
+      }
+      let distT = buildTables(lengths.slice(HLIT));
+      if(!distT) distT = { count: new Array(16).fill(0), syms: [0], maxBits: 1 };
+      readBlock(buildTables(lengths.slice(0, HLIT)), distT);
+    }else{
+      throw new Error('Bloque inválido');
+    }
+    if(bfinal) break;
+  }
+  return Uint8Array.from(out);
+}
+
+// Lee un ZIP (ArrayBuffer) y devuelve { nombre: Uint8Array } de cada archivo.
+function unzipEntries(buffer){
+  const u8 = new Uint8Array(buffer);
+  const rdU16 = o => (u8[o] | (u8[o+1] << 8));
+  const rdU32 = o => ((u8[o] | (u8[o+1] << 8) | (u8[o+2] << 16) | (u8[o+3] << 24)) >>> 0);
+  let eocd = -1;
+  for(let i = u8.length - 22; i >= 0; i--){
+    if(u8[i] === 0x50 && u8[i+1] === 0x4b && u8[i+2] === 0x05 && u8[i+3] === 0x06){ eocd = i; break; }
+  }
+  if(eocd < 0) throw new Error('No es un ZIP válido');
+  const total = rdU16(eocd + 10);
+  const cdOff = rdU32(eocd + 16);
+  const files = {};
+  let pos = cdOff;
+  for(let n = 0; n < total; n++){
+    if(rdU32(pos) !== 0x02014b50) break;
+    const method = rdU16(pos + 10);
+    const csize = rdU32(pos + 20);
+    const lhOff = rdU32(pos + 42);
+    const namelen = rdU16(pos + 28);
+    let nm = '';
+    for(let k = 0; k < namelen; k++) nm += String.fromCharCode(u8[pos + 46 + k]);
+    const lh = lhOff;
+    const lnamelen = rdU16(lh + 26);
+    const lextralen = rdU16(lh + 28);
+    const dataStart = lh + 30 + lnamelen + lextralen;
+    const data = u8.subarray(dataStart, dataStart + csize);
+    if(method === 0){
+      files[nm] = data;
+    }else if(method === 8){
+      files[nm] = inflateRawBytes(data);
+    }else{
+      throw new Error('ZIP método ' + method + ' no soportado');
+    }
+    pos += 46 + namelen + rdU16(pos + 30) + rdU16(pos + 32);
+  }
+  return files;
+}
+
+function decText(u8){
+  try{ return new TextDecoder('UTF-8').decode(u8); }catch(e){ return String.fromCharCode.apply(null, u8); }
+}
+
+// Lee los textos de un .xlsx del que ya se extrajeron las entradas del ZIP.
+function parseSharedStringsXML(xml){
+  const doc = new DOMParser().parseFromString(xml, 'application/xml');
+  const out = [];
+  const siEls = doc.getElementsByTagName('si');
+  for(let i = 0; i < siEls.length; i++){
+    const tEls = siEls[i].getElementsByTagName('t');
+    let s = '';
+    for(let j = 0; j < tEls.length; j++) s += (tEls[j].textContent || '');
+    out.push(s);
+  }
+  return out;
+}
+
+// Convierte la hoja de un .xlsx a filas (arreglos), igual que parseCSV.
+function parseSheetXML(xml, shared){
+  const doc = new DOMParser().parseFromString(xml, 'application/xml');
+  const rows = [];
+  const rowEls = doc.getElementsByTagName('row');
+  for(let i = 0; i < rowEls.length; i++){
+    const rowMap = {};
+    let maxCol = -1;
+    const cells = rowEls[i].getElementsByTagName('c');
+    let seq = 0;
+    for(let j = 0; j < cells.length; j++){
+      const c = cells[j];
+      const ref = c.getAttribute('r') || '';
+      let col = seq;
+      const m = /^([A-Za-z]+)/.exec(ref);
+      if(m){ col = 0; const letters = m[1].toUpperCase(); for(let k = 0; k < letters.length; k++) col = col * 26 + (letters.charCodeAt(k) - 64) - 1; }
+      let val = '';
+      const t = c.getAttribute('t') || '';
+      if(t === 'inlineStr'){
+        const tEls = c.getElementsByTagName('t');
+        if(tEls.length) val = tEls[0].textContent || '';
+      }else if(t === 's'){
+        const vEls = c.getElementsByTagName('v');
+        if(vEls.length){
+          const idx = parseInt(vEls[0].textContent || '0', 10);
+          val = shared && shared[idx] != null ? shared[idx] : '';
+        }
+      }else if(t === 'str' || t === 'e' || t === ''){
+        const vEls = c.getElementsByTagName('v');
+        if(vEls.length) val = vEls[0].textContent || '';
+      }else if(t === 'n'){
+        const vEls = c.getElementsByTagName('v');
+        if(vEls.length) val = vEls[0].textContent || '';
+      }
+      rowMap[col] = val;
+      if(col > maxCol) maxCol = col;
+      seq++;
+    }
+    const arr = [];
+    for(let k = 0; k <= maxCol; k++) arr.push(rowMap[k] != null ? rowMap[k] : '');
+    rows.push(arr);
+  }
+  return rows;
+}
+
 // Parsea un archivo .xls en formato XML 2003 (el mismo que genera downloadXLS)
 // y devuelve un arreglo de filas, para poder importarlo en la app igual que un CSV.
 function parseExcelXML(text){
@@ -5704,34 +6059,6 @@ function isExcelXMLFile(file, text){
   return String(text || '').trim().startsWith('<?xml');
 }
 
-// Convierte el contenido de un archivo importado en filas (arreglo de arreglos)
-// sin importar su formato: .xlsx / .xls reales (con SheetJS) o CSV / Excel XML
-// 2003 (parser manual). Devuelve null si no se pudo interpretar.
-function fileRowsFromBuffer(file, buf){
-  // 1) Con SheetJS: lee .xlsx, .xls o CSV reales (incluye los guardados por
-  //    Excel después de editarlos, que es justo donde fallaba el .xls XML).
-  if(typeof XLSX !== 'undefined'){
-    try{
-      const wb = XLSX.read(buf, { type: 'array' });
-      if(wb && wb.SheetNames && wb.SheetNames.length){
-        const sheet = wb.Sheets[wb.SheetNames[0]];
-        if(sheet) return XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' });
-      }
-    }catch(e){ console.error('Error leyendo con SheetJS', e); }
-  }
-  // 2) Respaldo sin SheetJS: decodifica a texto y detecta Excel XML 2003 o CSV.
-  try{
-    let text = '';
-    if(buf instanceof ArrayBuffer){
-      text = new TextDecoder('utf-8').decode(buf);
-    }else{
-      text = String(buf);
-    }
-    text = text.replace(/^\uFEFF/, '');
-    return isExcelXMLFile(file, text) ? parseExcelXML(text) : parseCSV(text);
-  }catch(e){ console.error('Error leyendo archivo como texto', e); return null; }
-}
-
 // Exporta los productos a un archivo Excel (.xls) que abre directo sin errores
 // ni apóstrofos. El CSV no podía hacerlo: Excel detecta la columna de códigos
 // como número (por la mayoría de códigos numéricos) y marca como "errores" los
@@ -5744,33 +6071,16 @@ function exportProductosExcel(){
     toast('No hay productos para exportar', 'error');
     return;
   }
-  const header = ['CODIGO','CODIGO DE BARRAS','DESCRIPCION','MARCA','CATEGORIA','PRECIO MARCA','PRECIO DESCUENTO','PRECIO VENTA','STOCK','STOCK MIN','CARACTERISTICAS','IMAGEN'];
+  const header = ['CODIGO','CODIGO DE BARRAS','DESCRIPCION','MARCA','CATEGORIA','PRECIO COMPRA','PRECIO MARCA','PRECIO VENTA','STOCK','STOCK MIN','CARACTERISTICAS','IMAGEN'];
+  const types = ['text','text','text','text','text','number','number','number','number','number','text','text'];
   const rows = db.productos.map(p => [
     p.codigo || '', p.codigoBarras || '', p.nombre, p.marca || '', p.categoria || '',
-    p.precioMarca, p.precioCompra, p.precioVenta, p.stock,
+    p.precioCompra, p.precioMarca, p.precioVenta, p.stock,
     p.stockMin,
     p.caracteristicas || '',
     getImage(p.id) ? '[foto local]' : ''
   ]);
-  // Con SheetJS generamos un .xlsx REAL: Excel lo abre sin el aviso de "formato
-  // y extensión no coinciden" y, al editarlo y guardarlo, se re-importa bien.
-  if(typeof XLSX !== 'undefined'){
-    try{
-      const aoa = [header, ...rows];
-      const ws = XLSX.utils.aoa_to_sheet(aoa);
-      ws['!cols'] = [12,15,30,14,14,12,12,12,9,10,32,10].map(w => ({ wch: w }));
-      const wb = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(wb, ws, 'Productos');
-      XLSX.writeFile(wb, `stockferre_productos_${todayISO().slice(0,10)}.xlsx`);
-      toast('Productos exportados a Excel (.xlsx)', 'success');
-      return;
-    }catch(err){
-      console.error('Error generando .xlsx', err);
-      // se cae al .xls XML 2003 como respaldo
-    }
-  }
-  const types = ['text','text','text','text','text','number','number','number','number','number','text','text'];
-  downloadXLS(`stockferre_productos_${todayISO().slice(0,10)}.xls`, [{ name: 'Productos', header, rows, types }]);
+  downloadXLSX(`stockferre_productos_${todayISO().slice(0,10)}.xlsx`, [{ name: 'Productos', header, rows, types }]);
   toast('Productos exportados a Excel (las fotos se respaldan con "Exportar backup")', 'success');
 }
 
@@ -5806,7 +6116,7 @@ function importInventarioCSV(file){
         const p = getProductoByCodigo(codigo);
         if(!p){ noEncontrados++; continue; }
         const stockAnterior = p.stock || 0;
-        const nuevoStock = parsePrecio(r[idx.stock]);
+        const nuevoStock = parseFloat(String(r[idx.stock] ?? '').replace(',','.'));
         if(!isNaN(nuevoStock)) p.stock = nuevoStock;
         if(idx.codigoBarras > -1){
           const cb = String(r[idx.codigoBarras] || '').trim();
@@ -5840,8 +6150,8 @@ function exportVentasCSV(){
   }
   const header = ['FECHA','CODIGO','PRODUCTO','CANTIDAD','PRECIO UNITARIO','TOTAL','METODO DE PAGO','EFECTIVO','QR','QR PERSONA'];
   const rows = db.ventas.map(v => [
-    v.fecha, csvText(v.codigo), v.nombre, csvNumber(v.cantidad), csvNumber(v.precioUnitario, 1), csvNumber(v.total, 1), v.metodoPago,
-    csvNumber(efectivoMontoDeVenta(v), 1), csvNumber(qrMontoDeVenta(v), 1), csvText(v.qrPersona || '')
+    v.fecha, csvText(v.codigo), v.nombre, csvNumber(v.cantidad), csvNumber(v.precioUnitario, 2), csvNumber(v.total, 2), v.metodoPago,
+    csvNumber(efectivoMontoDeVenta(v), 2), csvNumber(qrMontoDeVenta(v), 2), csvText(v.qrPersona || '')
   ]);
   downloadCSV(`stockferre_ventas_${todayISO().slice(0,10)}.csv`, header, rows);
   toast('Ventas exportadas', 'success');
@@ -6288,7 +6598,7 @@ function importVentasCSV(file){
         if(!nombre) continue;
         const cantidad = idx.cantidad > -1 ? (parseFloat(String(r[idx.cantidad]).replace(',','.')) || 1) : 1;
         const total = parsePrecio(r[idx.total]);
-        const precioUnitario = idx.precioUnitario > -1 ? parsePrecio(r[idx.precioUnitario]) : round1(cantidad > 0 ? total / cantidad : 0);
+        const precioUnitario = idx.precioUnitario > -1 ? parsePrecio(r[idx.precioUnitario]) : (cantidad > 0 ? total / cantidad : 0);
         const mp = idx.metodoPago > -1 ? String(r[idx.metodoPago] || '').toLowerCase() : '';
         const metodoPago = mp.includes('mixto') ? 'mixto' : (mp.includes('qr') ? 'qr' : 'efectivo');
         let efectivoMonto = 0, qrMonto = 0;
@@ -6408,8 +6718,8 @@ function renderProductos(){
         <td>${escapeHtml(p.nombre)}</td>
         <td>${escapeHtml(p.marca || '-')}</td>
         <td>${p.categoria ? `<span class="badge badge-muted">${escapeHtml(p.categoria)}</span>` : '-'}</td>
-        <td class="price-guest-hide">${fmtMoney(p.precioMarca)}</td>
         <td class="price-guest-hide">${fmtMoney(p.precioCompra)}</td>
+        <td class="price-guest-hide">${fmtMoney(p.precioMarca)}</td>
         <td>${fmtMoney(p.precioVenta)}</td>
         <td>${p.stock}${bajo ? ' <span class="badge badge-danger-soft">Bajo</span>' : ''}</td>
         <td>${p.stockMin || 0}</td>
@@ -6523,17 +6833,7 @@ function openProductModal(producto, prefillCodigo){
     document.getElementById('pId').value = '';
     if(prefillCodigo) document.getElementById('pCodigo').value = prefillCodigo;
   }
-  updatePrecioMarcaLabel();
   openModal('modalProducto');
-}
-
-// Actualiza la etiqueta del "Precio {marca}" con el nombre real de la marca
-// (Truper, INGCO, Pretul...) o "según marca" si todavía no tiene.
-function updatePrecioMarcaLabel(){
-  const label = document.getElementById('pPrecioMarcaLabel');
-  if(!label) return;
-  const marca = document.getElementById('pMarca') ? document.getElementById('pMarca').value.trim() : '';
-  label.textContent = marca || 'según marca';
 }
 
 function handleProductSubmit(e){
@@ -6608,7 +6908,6 @@ function openProductDetails(productId){
   document.getElementById('detCategoria').textContent = p.categoria || '-';
   document.getElementById('detPCompra').textContent = fmtMoney(p.precioCompra);
   document.getElementById('detPMarca').textContent = fmtMoney(p.precioMarca);
-  document.getElementById('detPrecioMarcaLabel').textContent = (p.marca || '').trim() || 'según marca';
   document.getElementById('detPVenta').textContent = fmtMoney(p.precioVenta);
   document.getElementById('detStock').textContent = p.stock;
   document.getElementById('detStockMin').textContent = p.stockMin || 0;
@@ -7090,46 +7389,58 @@ function normalizeHeader(h){
     .replace(/\s+/g,' ');
 }
 
-// Convierte un número a su valor numérico soportando el formato de Bolivia /
-// Latinoamérica, donde la COMA es el separador decimal y el PUNTO separa miles.
-// Ejemplos manejados correctamente:
-//   "0"      → 0         "1234,56"  → 1234.56
-//   "1.234,56" → 1234.56  "10"       → 10
-//   "1.234,00" → 1234
 function parsePrecio(raw){
   if(raw === undefined || raw === null) return 0;
-  if(typeof raw === 'number') return isNaN(raw) ? 0 : round1(raw);
-  let s = String(raw).trim().replace(/\s/g,'');
-  if(!s) return 0;
-  const hasComma = s.includes(',');
-  const hasDot = s.includes('.');
-  if(hasComma){
-    // Formato Español/LatAm: la coma es el decimal.
-    if(hasDot){
-      // "1.234,56" → el punto es separador de miles → se elimina.
-      s = s.replace(/\./g,'').replace(',', '.');
-    }else{
-      // "1234,56" → la coma pasa a punto decimal.
-      s = s.replace(',', '.');
-    }
+  const cleaned = String(raw).trim().replace(/[^\d.,-]/g,'');
+  if(!cleaned) return 0;
+  const lastComma = cleaned.lastIndexOf(',');
+  const lastDot = cleaned.lastIndexOf('.');
+  let normalized;
+  if(lastComma > lastDot){
+    // Formato latino: "1.234,56" — puntos como miles y coma decimal.
+    normalized = cleaned.replace(/\./g,'').replace(',', '.');
+  }else if(lastDot > lastComma){
+    // Formato US: "1,234.56" — comas como miles y punto decimal.
+    normalized = cleaned.replace(/,/g,'');
+  }else if(cleaned.includes(',')){
+    // Solo coma: "120,5" — la coma es el decimal.
+    normalized = cleaned.replace(',', '.');
+  }else{
+    normalized = cleaned;
   }
-  // Si solo hay punto, se toma como decimal ("1234.56").
-  const n = parseFloat(s);
-  if(isNaN(n)) return 0;
-  // La app trabaja con UN decimal: cualquier valor con 2 o 3 decimales (por
-  // ej. subido desde un Excel) se redondea a un solo decimal.
-  return round1(n);
+  const n = parseFloat(normalized);
+  return isNaN(n) ? 0 : n;
 }
 
 function importProductsCSV(file){
   const reader = new FileReader();
   reader.onload = (e)=>{
     try{
-      // Acepta .xlsx / .xls (con SheetJS) o CSV / Excel XML 2003 (con el parser
-      // manual), para que lo que se exporta también se pueda importar, incluso
-      // después de editarlo y guardarlo con Excel.
-      const rows = fileRowsFromBuffer(file, e.target.result);
-      if(!rows || rows.length < 2){
+      // Acepta tres formatos:
+      //  - .xlsx real (ZIP): exportado por la app o re-guardado por Excel
+      //  - .xls XML 2003 (exportado por versiones viejas de la app)
+      //  - CSV (coma, punto y coma o tabulador)
+      const u8 = new Uint8Array(e.target.result);
+      let rows;
+      if(u8.length > 30 && u8[0] === 0x50 && u8[1] === 0x4b && u8[2] === 0x03 && u8[3] === 0x04){
+        const files = unzipEntries(e.target.result);
+        let sheet = null;
+        for(const k in files){
+          if(/^xl\/worksheets\/sheet\d+\.xml$/.test(k)){ sheet = files[k]; break; }
+        }
+        if(!sheet){
+          toast('El archivo .xlsx no tiene una hoja de cálculo válida', 'error');
+          return;
+        }
+        const shared = files['xl/sharedStrings.xml']
+          ? parseSharedStringsXML(decText(files['xl/sharedStrings.xml']))
+          : null;
+        rows = parseSheetXML(decText(sheet), shared);
+      }else{
+        const text = decText(u8).replace(/^\uFEFF/, '');
+        rows = isExcelXMLFile(file, text) ? parseExcelXML(text) : parseCSV(text);
+      }
+      if(rows.length < 2){
         toast('El archivo CSV no tiene datos', 'error');
         return;
       }
@@ -7140,8 +7451,8 @@ function importProductsCSV(file){
         nombre: headers.findIndex(h => h.includes('DESCRIPCION') || h === 'NOMBRE'),
         marca: headers.indexOf('MARCA'),
         categoria: headers.indexOf('CATEGORIA'),
-        // Acepta "PRECIO COMPRA", "PRECIO DE COMPRA", "PRECIO DESCUENTO", etc.
-        precioCompra: headers.findIndex(h => (h.includes('PRECIO') && h.includes('COMPRA')) || h.includes('DESCUENTO')),
+        // Acepta "PRECIO COMPRA", "PRECIO DE COMPRA", "PRECIO_COMPRA", etc.
+        precioCompra: headers.findIndex(h => h.includes('PRECIO') && h.includes('COMPRA')),
         precioMarca: headers.findIndex(h => h.includes('PRECIO') && h.includes('MARCA') && !h.includes('BARRA')),
         precioVenta: headers.findIndex(h => h.includes('PRECIO') && h.includes('VENTA')),
         stock: headers.findIndex(h => h.includes('STOCK') && !h.includes('MIN')),
@@ -7186,11 +7497,8 @@ function importProductsCSV(file){
           existing.precioCompra = precioCompra || existing.precioCompra;
           existing.precioMarca = precioMarca || existing.precioMarca;
           existing.precioVenta = precioVenta || existing.precioVenta;
+          if(stockVal !== null) existing.stock = stockVal;
           if(stockMinVal !== null) existing.stockMin = stockMinVal;
-          // Si el archivo trae la columna STOCK, se aplica el valor EXACTO
-          // (así "poner 0 en Excel" realmente deja el stock en 0). Usa >= 0
-          // para que el 0 y los negativos también se apliquen.
-          if(stockVal !== null && !isNaN(stockVal) && stockVal >= 0) existing.stock = stockVal;
           if(caracteristicas) existing.caracteristicas = caracteristicas;
           touchProducto(existing);
           productoId = existing.id;
@@ -7202,7 +7510,7 @@ function importProductsCSV(file){
             codigo, codigoBarras, nombre, marca, categoria,
             precioCompra, precioMarca, precioVenta,
             caracteristicas,
-            stock: (stockVal !== null && !isNaN(stockVal) && stockVal >= 0) ? stockVal : 0,
+            stock: stockVal !== null ? stockVal : 0,
             stockMin: stockMinVal !== null ? stockMinVal : 0,
             fechaCreacion: todayISO(),
             _updatedAt: Date.now()
@@ -7231,12 +7539,10 @@ function importProductsCSV(file){
       toast(`Importación completa: ${creados} nuevos, ${actualizados} actualizados`, 'success');
     }catch(err){
       console.error(err);
-      toast('No se pudo leer el archivo CSV. Verifica el formato.', 'error');
+      toast('No se pudo leer el archivo CSV o Excel. Verifica el formato.', 'error');
     }
   };
   reader.onerror = ()=> toast('Error al leer el archivo', 'error');
-  // Se lee como ArrayBuffer para poder interpretar .xlsx/.xls binarios con
-  // SheetJS y, si no está disponible, decodificarlo a texto (CSV / XML).
   reader.readAsArrayBuffer(file);
 }
 
@@ -7423,6 +7729,7 @@ const MODO_KEY = 'stockferre_modo_v1';
 const ROLE_KEY = 'stockferre_role_v1';
 const REMEMBER_KEY = 'stockferre_remember_v1';
 const NOTIF_KEY = 'stockferre_notif_v1';
+const FIREBASE_KEY = 'stockferre_firebase_v1';
 const MODO_LABELS = { manual: 'Herramientas Manuales', electrico: 'Herramientas Eléctricas', invitado: 'Modo Invitado' };
 
 let pendingGateModo = null;
@@ -7467,6 +7774,26 @@ function syncNotifSwitchUI(){
   const sw = document.getElementById('notifySwitch');
   if(!sw) return;
   sw.checked = currentModo === 'invitado' ? false : notifEnabled(currentModo);
+}
+
+// "Conectar a Firebase": switch global de este dispositivo. De fábrica viene
+// ENCENDIDO (la app conserva el comportamiento de siempre). Al apagarlo, la
+// app deja de leer/escribir en Firebase: todo queda solo en este dispositivo.
+// Solo afecta a este dispositivo, no a los demás.
+function firebaseToggleOn(){
+  try{ return localStorage.getItem(FIREBASE_KEY) !== '0'; }catch(e){ return true; }
+}
+function setFirebaseToggle(on){
+  try{ localStorage.setItem(FIREBASE_KEY, on ? '1' : '0'); }catch(e){}
+}
+function setFirebaseToggleUI(on){
+  const a = document.getElementById('firebaseSwitch');
+  const b = document.getElementById('firebaseSwitchConfig');
+  if(a) a.checked = !!on;
+  if(b) b.checked = !!on;
+}
+function syncFirebaseSwitchUI(){
+  setFirebaseToggleUI(firebaseToggleOn());
 }
 
 // Modo pro: recuerda en este dispositivo si el usuario lo dejó abierto (el
@@ -8158,9 +8485,15 @@ async function startOcrScanner(){
   if(ocrActive || ocrStarting) return;
   ensureAudioCtx(); // desbloquea el audio dentro del gesto que abrió la cámara
   ocrStarting = true;
+  setOcrStatus('Cargando lector de texto (una sola vez)...');
 
-  if(typeof Tesseract === 'undefined'){
+  if(typeof window.__LAZY_LIBS__ === 'undefined' || !window.__LAZY_LIBS__.tesseract){
     setOcrStatus('No se pudo cargar Tesseract.js. Verifica tu conexión a internet o usa la búsqueda manual.');
+    ocrStarting = false;
+    return;
+  }
+  try{ await window.__LAZY_LIBS__.tesseract(); }catch(err){
+    setOcrStatus('No se pudo cargar el lector de texto. Verifica tu conexión a internet o usa la búsqueda manual.');
     ocrStarting = false;
     return;
   }
@@ -8385,10 +8718,11 @@ function stopOcrScanner(){
   }
   const videoEl = document.getElementById('ocrVideo');
   if(videoEl) videoEl.srcObject = null;
-  // NO se termina el worker de Tesseract al apagar la cámara: el idioma
-  // (~10MB) ya está cargado y mantenerlo vivo hace que el próximo escaneo
-  // arranque al instante en vez de "quedarse en Iniciando cámara" recargando
-  // el modelo cada vez. El worker se recicla en el siguiente startOcrScanner().
+  if(ocrWorker){
+    const w = ocrWorker;
+    ocrWorker = null;
+    w.terminate().catch(()=>{});
+  }
   const frozenImg = document.getElementById('ocrFrozenImg');
   if(frozenImg){ frozenImg.classList.remove('visible'); frozenImg.removeAttribute('src'); }
   const btnCapture = document.getElementById('btnCaptureShot');
@@ -8409,6 +8743,14 @@ let zxingLiveActive = false;
 async function startZxingLiveScanner(){
   if(zxingLiveActive) return;
   ensureAudioCtx(); // desbloquea el audio dentro del gesto que abrió la cámara
+  if(typeof window.__LAZY_LIBS__ === 'undefined' || !window.__LAZY_LIBS__.zxing){
+    setOcrStatus('No se pudo cargar el lector de códigos de barras (revisa tu conexión a internet).');
+    return;
+  }
+  try{ await window.__LAZY_LIBS__.zxing(); }catch(err){
+    setOcrStatus('No se pudo cargar el lector de códigos de barras (revisa tu conexión a internet).');
+    return;
+  }
   if(typeof ZXing === 'undefined'){
     setOcrStatus('No se pudo cargar el lector de códigos de barras (revisa tu conexión a internet).');
     return;
@@ -8513,6 +8855,14 @@ function setBcStatus(msg){
 
 async function startBarcodeScanner(){
   ensureAudioCtx(); // desbloquea el audio dentro del gesto que abrió la cámara
+  if(typeof window.__LAZY_LIBS__ === 'undefined' || !window.__LAZY_LIBS__.zxing){
+    setBcStatus('No se pudo cargar el lector de códigos de barras (revisa tu conexión a internet).');
+    return;
+  }
+  try{ await window.__LAZY_LIBS__.zxing(); }catch(err){
+    setBcStatus('No se pudo cargar el lector de códigos de barras (revisa tu conexión a internet).');
+    return;
+  }
   if(typeof ZXing === 'undefined'){
     setBcStatus('No se pudo cargar el lector de códigos de barras (revisa tu conexión a internet).');
     return;
@@ -8707,6 +9057,35 @@ function setupEventListeners(){
     }
   });
 
+  // "Conectar a Firebase": al apagarlo la app deja de sincronizar con otros
+  // dispositivos; al encenderlo vuelve a conectarse (y se descarga la última
+  // copia de la nube). El resultado se refleja en el menú lateral y en
+  // Configuración (mismo interruptor, mismo estado).
+  function aplicarSwitchFirebase(on){
+    setFirebaseToggle(on);
+    setFirebaseToggleUI(on);
+    if(on){
+      toast('Conectando a Firebase...', 'success');
+      if(currentModo === 'invitado') connectGuestFirebase();
+      else connectFirebase();
+    }else{
+      disconnectFirebase();
+      disconnectGuestFirebase();
+      setSyncStatus('local');
+      toast('Firebase apagado: todo queda solo en este dispositivo', 'success');
+    }
+  }
+  const swFB = document.getElementById('firebaseSwitch');
+  if(swFB) swFB.addEventListener('change', (e)=> aplicarSwitchFirebase(e.target.checked));
+  const swFBConfig = document.getElementById('firebaseSwitchConfig');
+  if(swFBConfig) swFBConfig.addEventListener('change', (e)=> aplicarSwitchFirebase(e.target.checked));
+
+  // Instalar la app (PWA): el botón de Configuración y la guía según cómo se
+  // abrió el archivo (file://, localhost o ya instalada).
+  const btnInstall = document.getElementById('btnInstallPWA');
+  if(btnInstall) btnInstall.addEventListener('click', handleInstallClick);
+  updatePWAInstallUI();
+
   // Pestaña "👑 Modo Pro": abre/cierra el submenú (Estado Financiero / Pagos /
   // Deudas) que se desliza hacia abajo. La paleta de colores solo cambia el
   // tema (blanco, negro, naranjado, amarillo), sin tocar las pestañas.
@@ -8749,16 +9128,6 @@ function setupEventListeners(){
   document.addEventListener('click', (e)=>{
     const thumb = e.target.closest('.venta-thumb, .cat-thumb');
     if(thumb && thumb.tagName === 'IMG'){
-      openImageLightbox(thumb.src);
-    }
-  });
-
-  // Lightbox: clic en la foto de la tarjeta de resultado del escáner/inventario
-  // (agranda la imagen del producto).
-  document.addEventListener('click', (e)=>{
-    const thumb = e.target.closest('.sr-thumb');
-    if(thumb && thumb.tagName === 'IMG'){
-      e.stopImmediatePropagation();
       openImageLightbox(thumb.src);
     }
   });
@@ -8810,8 +9179,6 @@ function setupEventListeners(){
   document.getElementById('btnNewProduct').addEventListener('click', ()=> openProductModal());
   document.getElementById('btnExportProducts').addEventListener('click', exportProductosExcel);
   document.getElementById('formProducto').addEventListener('submit', handleProductSubmit);
-  const _pMarca = document.getElementById('pMarca');
-  if(_pMarca) _pMarca.addEventListener('input', updatePrecioMarcaLabel);
   let _prodSearchTimer = null;
   document.getElementById('prodSearch').addEventListener('input', ()=>{
     clearTimeout(_prodSearchTimer);
@@ -9055,12 +9422,12 @@ function setupEventListeners(){
   if(splitEf) splitEf.addEventListener('input', ()=>{
     const total = parseFloat(document.getElementById('vPrecioTotal').value) || 0;
     const ef = parseFloat(splitEf.value) || 0;
-    splitQr.value = Math.max(0, total - ef).toFixed(1);
+    splitQr.value = Math.max(0, total - ef).toFixed(2);
   });
   if(splitQr) splitQr.addEventListener('input', ()=>{
     const total = parseFloat(document.getElementById('vPrecioTotal').value) || 0;
     const qr = parseFloat(splitQr.value) || 0;
-    splitEf.value = Math.max(0, total - qr).toFixed(1);
+    splitEf.value = Math.max(0, total - qr).toFixed(2);
   });
   const qrSel = document.getElementById('vQrPersona');
   if(qrSel) qrSel.innerHTML = QR_PERSONAS.map(p=>`<option value="${escapeHtml(p)}">${escapeHtml(p)}</option>`).join('');
@@ -9147,7 +9514,7 @@ function setupEventListeners(){
     e.target.value = '';
   });
   document.getElementById('btnPurgeCompras').addEventListener('click', ()=>{
-    confirmDialog('Borrar ingresos antiguos', '¿Borrar los ingresos de hace más de 3 meses? Se recomienda exportarlos antes con "Exportar Excel". El stock de los productos no se modifica.', ()=>{
+    confirmDialog('Borrar ingresos antiguos', '¿Borrar los ingresos de hace más de 3 meses? Se recomienda exportarlos antes con "Exportar CSV". El stock de los productos no se modifica.', ()=>{
       purgeComprasAntiguas();
     });
   });
@@ -9423,6 +9790,7 @@ function init(){
   setupEventListeners();
   syncRememberSwitchUI();
   syncNotifSwitchUI();
+  syncFirebaseSwitchUI();
   syncProModeUI();
   updateSidebarProductCount();
   updateSidebarBrand();
@@ -9441,9 +9809,9 @@ function init(){
   }
   updateInicioClock();
   setInterval(updateInicioClock, 1000);
-  // Precalienta Tesseract unos segundos después de cargar: así el primer
-  // escaneo no espera la descarga del idioma ni el arranque del motor.
-  setTimeout(()=>{ warmupOcrWorker(); }, 3500);
+  // El OCR ya no se precarga al abrir la app: se descarga/arranca recién al
+  // usarlo (ver startOcrScanner), así la app abre al instante incluso en
+  // computadoras viejas.
 }
 
 document.addEventListener('DOMContentLoaded', init);

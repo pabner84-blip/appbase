@@ -278,6 +278,7 @@ function runQueuedWrite(docId, ref){
     }
     q.attempt = 0;
     setSyncStatus('error');
+    console.warn('Escritura a Firebase no pudo subir tras varios reintentos. Se reintentará al volver la conexión.');
     finishQueuedWrite(docId, ref, toSend);
   });
 }
@@ -292,9 +293,21 @@ function finishQueuedWrite(docId, ref, toSend){
 
 function saveDB(){
   persistLocalCache();
-  if(fbReady && fbDocRef){
-    const { historialEscaneos, historialBusquedas, historialInventario, ...syncData } = db;
-    scheduleFirestoreWrite(firebaseDocId(), fbDocRef, syncData);
+  // Sube SIEMPRE que Firebase esté configurado (no hace falta esperar a que
+  // "fbReady" termine de arrancar): si la conexión todavía no está lista, la
+  // cola espera el momento correcto y reenvía sola. Así UNA VENTA REGISTRADA
+  // EN EL CELULAR sube igual y llega a la compu aunque el arranque de la
+  // sincronización haya sido lento (era el motivo por el que el celular
+  // guardaba la venta solo ahí y la compu nunca se enteraba).
+  if(firebaseToggleOn() && typeof firebase !== 'undefined' && typeof firebaseConfig !== 'undefined' && firebaseConfig.apiKey){
+    try{
+      if(!firebase.apps || !firebase.apps.length){ firebase.initializeApp(firebaseConfig); }
+      const ref = fbDocRef || firebase.firestore().collection('stockferre').doc(firebaseDocId());
+      const { historialEscaneos, historialBusquedas, historialInventario, ...syncData } = db;
+      scheduleFirestoreWrite(firebaseDocId(), ref, syncData);
+    }catch(err){
+      console.error('Error guardando en Firebase', err);
+    }
   }
 }
 

@@ -70,11 +70,14 @@ self.addEventListener('fetch', (event) => {
     // la versión nueva con los arreglos de sincronización (clave para el
     // celular: si sirviéramos siempre la copia, el celular vería el código
     // viejo y seguiría desincronizado para siempre).
-    const pathname = url.pathname.replace(/\/+$/, '') || '/';
+    // NOTA: sirve también cuando la app está publicada en GitHub Pages, donde
+    // las rutas son ".../repo/app.js" (por eso se compara el nombre del
+    // archivo y no la ruta exacta).
+    const archivo = (url.pathname.replace(/\/+$/, '') || '/').split('/').pop();
     const esCore = esNavegacion ||
-      pathname === '/index.html' || pathname === '/app.js' ||
-      pathname === '/styles.css' || pathname === '/firebase-config.js' ||
-      pathname === '/manifest.json' || pathname === '/';
+      archivo === 'index.html' || archivo === 'app.js' ||
+      archivo === 'styles.css' || archivo === 'firebase-config.js' ||
+      archivo === 'manifest.json';
     if (esCore) {
       try {
         const fresh = await fetch(req);

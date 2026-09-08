@@ -305,7 +305,7 @@ function saveDB(){
     try{
       if(!firebase.apps || !firebase.apps.length){ firebase.initializeApp(firebaseConfig); }
       const ref = fbDocRef || firebase.firestore().collection('stockferre').doc(firebaseDocId());
-      const { historialEscaneos, historialBusquedas, historialInventario, ventas, ...syncData } = db;
+      const { historialEscaneos, historialBusquedas, historialInventario, ventas, ajustes, gastosPrestamos, ...syncData } = db;
       scheduleFirestoreWrite(firebaseDocId(), ref, syncData);
     }catch(err){
       console.error('Error guardando en Firebase', err);
@@ -372,7 +372,7 @@ function persistModoDB(modo, dbObj){
     try{
       if(!firebase.apps || !firebase.apps.length){ firebase.initializeApp(firebaseConfig); }
       const ref = firebase.firestore().collection('stockferre').doc('inventario_' + modo);
-      const { historialEscaneos, historialBusquedas, historialInventario, ventas, ...syncData } = dbObj;
+      const { historialEscaneos, historialBusquedas, historialInventario, ventas, ajustes, gastosPrestamos, ...syncData } = dbObj;
       scheduleFirestoreWrite('inventario_' + modo, ref, syncData);
     }catch(err){
       console.error('Error guardando en Firebase', err);
@@ -493,7 +493,7 @@ function mergeRemoteIntoLocal(local, remote){
   merged.ventas = (local.ventas || []);
   merged.compras = mergeById(local.compras, remote.compras);
   merged.gastos = mergeById(local.gastos, remote.gastos);
-  merged.gastosPrestamos = mergeById(local.gastosPrestamos, remote.gastosPrestamos);
+  merged.gastosPrestamos = (local.gastosPrestamos || []); // la colección los actualiza por separado
   merged.finanzas = Object.assign({}, remote.finanzas);
   merged.finanzas.retiros = mergeById((local.finanzas||{}).retiros, (remote.finanzas||{}).retiros);
   merged.finanzas.deudas = mergeById((local.finanzas||{}).deudas, (remote.finanzas||{}).deudas);
@@ -504,12 +504,10 @@ function mergeRemoteIntoLocal(local, remote){
     producto: Math.max((local.contador||{}).producto || 1, (remote.contador||{}).producto || 1),
     venta: Math.max((local.contador||{}).venta || 1, (remote.contador||{}).venta || 1)
   };
-  // Ajustes de cuenta (cambio y dinero real por día): se toman las entradas
-  // del remoto y se completan con las locales que el remoto no conozca.
-  merged.ajustes = Object.assign({},
-    (local.ajustes || {}),
-    (remote.ajustes || {})
-  );
+  // Ajustes de cuenta: ahora cada día es su propio documento en una colección
+  // compartida, así que aquí se conserva la copia local (la colección la
+  // actualiza por separado y no la "resucita" un dispositivo viejo).
+  merged.ajustes = Object.assign({}, (local.ajustes || {}));
   // Los borrados viajan y se aplican en AMBOS lados: si alguien borró una
   // venta/producto/etc. en cualquier dispositivo, desaparece también aquí y
   // no vuelve a "resucitar" en la próxima escritura del otro dispositivo.
@@ -529,6 +527,8 @@ function disconnectGuestFirebase(){
   guestUnsubs.forEach(u => { try{ u(); }catch(e){ /* ignorar */ } });
   guestUnsubs = [];
   stopVentasListeners();
+  stopAjustesListeners();
+  stopGastosPrestamosListeners();
   Object.keys(fbWriteQueues).forEach(k => delete fbWriteQueues[k]);
   fbReady = false;
   fbDocRef = null;
@@ -628,6 +628,12 @@ function connectGuestFirebase(){
     // ventas locales que no tengan documento y luego escucha la colección.
     try{ backfillVentas(); }catch(e){ /* no bloquea */ }
     startVentasListener();
+    // AJUSTE DE CUENTAS y GASTOS/PRÉSTAMOS compartidos con el dueño (mismo
+    // modelo): lo ajustado o registrado aquí se ve al instante en la compu.
+    try{ backfillAjustes(); }catch(e){ /* no bloquea */ }
+    try{ backfillGastosPrestamos(); }catch(e){ /* no bloquea */ }
+    startAjustesListener();
+    startGastosPrestamosListener();
   }catch(err){
     console.error('No se pudo conectar a Firebase en modo invitado', err);
     setSyncStatus('error');
@@ -652,6 +658,8 @@ function disconnectFirebase(){
   if(fbOtherUnsub){ try{ fbOtherUnsub(); }catch(e){ /* ignorar */ } fbOtherUnsub = null; }
   stopStockListeners();
   stopVentasListeners();
+  stopAjustesListeners();
+  stopGastosPrestamosListeners();
   Object.keys(fbWriteQueues).forEach(k => delete fbWriteQueues[k]);
   fbReady = false;
   fbDocRef = null;
@@ -818,7 +826,7 @@ async function connectFirebase(){
       applySnapshot(snap);
     }else if(snap && !snap.exists){
       // Primera vez: sube los datos locales como semilla inicial de la nube
-      const { historialEscaneos, historialBusquedas, historialInventario, ventas, ...syncData } = db;
+      const { historialEscaneos, historialBusquedas, historialInventario, ventas, ajustes, gastosPrestamos, ...syncData } = db;
       try{ await withTimeout(fbDocRef.set(syncData), 12000); }catch(e){ /* el SDK reintenta */ }
     }
 
@@ -848,6 +856,11 @@ async function connectFirebase(){
     // documento aún y empieza a escuchar la de los demás dispositivos.
     try{ await withTimeout(backfillVentas(), 15000); }catch(e){ /* no bloquea */ }
     startVentasListener();
+    // AJUSTE DE CUENTAS y GASTOS/PRÉSTAMOS compartidos (mismo modelo).
+    try{ await withTimeout(backfillAjustes(), 15000); }catch(e){ /* no bloquea */ }
+    try{ await withTimeout(backfillGastosPrestamos(), 15000); }catch(e){ /* no bloquea */ }
+    startAjustesListener();
+    startGastosPrestamosListener();
   }catch(err){
     console.error('No se pudo conectar a Firebase', err);
     setSyncStatus('error');
@@ -1217,6 +1230,230 @@ function startVentasListener(){
 function stopVentasListeners(){
   if(fbVentasUnsub){ try{ fbVentasUnsub(); }catch(e){ /* ignorar */ } fbVentasUnsub = null; }
   ventasStoreCache.list = null;
+}
+
+/* -------------------------------------------------------------------------
+   AJUSTE DE CUENTAS COMPARTIDO: UNA FECHA = UN DOCUMENTO
+   Igual que ventas y stock: cada día de "Ajuste de cuentas" (cambio, dinero
+   real) es su PROPIO documento en una colección compartida. Un ajuste hecho
+   en el celular invitado se ve AL INSTANTE en la compu, y al revés.
+   ------------------------------------------------------------------------- */
+const FB_AJUSTES_COL = 'stockferre_ajustes_v1';
+let fbAjustesUnsub = null;
+let fbGpUnsub = null;
+
+function fbAjustesCol(){
+  const fs = fbFirestoreOrNull();
+  return fs ? fs.collection(FB_AJUSTES_COL) : null;
+}
+
+function ajusteDocData(dia, record){
+  const data = Object.assign({}, record || {});
+  data.dia = dia;
+  data._ts = Date.now();
+  return data;
+}
+
+function syncAjusteDay(dia){
+  const col = fbAjustesCol();
+  if(!col || !dia) return;
+  const rec = (db.ajustes && db.ajustes[dia]) || {};
+  try{
+    if(Object.keys(rec).length){
+      col.doc(String(dia)).set(ajusteDocData(dia, rec));
+    }else{
+      col.doc(String(dia)).delete();
+    }
+  }catch(e){ console.error('Error subiendo ajuste de cuentas a la nube', e); }
+}
+
+// Sube las fechas locales que no tengan documento (historias viejas).
+async function backfillAjustes(){
+  const col = fbAjustesCol();
+  if(!col) return;
+  const local = db.ajustes || {};
+  const dias = Object.keys(local).filter(d => local[d] && Object.keys(local[d]).length);
+  if(!dias.length) return;
+  try{
+    const snap = await col.get();
+    const existing = new Set(snap.docs.map(d => d.id));
+    const fs = firebase.firestore();
+    for(let i = 0; i < dias.length; i += 450){
+      const batch = fs.batch();
+      dias.slice(i, i + 450).forEach(d => {
+        if(existing.has(String(d))) return;
+        batch.set(col.doc(String(d)), ajusteDocData(d, local[d]));
+      });
+      if(dias.slice(i, i + 450).some(d => !existing.has(String(d)))) await batch.commit();
+    }
+  }catch(e){ console.error('Error respaldando ajustes de cuentas en la nube', e); }
+}
+
+function startAjustesListener(){
+  const col = fbAjustesCol();
+  if(!col) return;
+  if(fbAjustesUnsub){ try{ fbAjustesUnsub(); }catch(e){ /* ignorar */ } }
+  let timer = null;
+  const dirty = {};
+  const flush = () => {
+    const keys = Object.keys(dirty);
+    if(!keys.length) return;
+    keys.forEach(k => { delete dirty[k]; });
+    try{ persistLocalCache(); }catch(e){ /* ignorar */ }
+    rerenderCurrentView();
+    if(typeof refreshModoDetalleIfOpen === 'function') refreshModoDetalleIfOpen();
+  };
+  fbAjustesUnsub = col.onSnapshot(snap => {
+    let changed = false;
+    snap.docChanges().forEach(ch => {
+      if(ch.doc.metadata.hasPendingWrites) return;
+      const dia = ch.doc.id;
+      db.ajustes = db.ajustes || {};
+      if(ch.type === 'removed'){
+        if(db.ajustes[dia]){ delete db.ajustes[dia]; dirty[dia] = true; changed = true; }
+        return;
+      }
+      const data = ch.doc.data();
+      if(!data) return;
+      // Se aplica la copia remota como fuente de verdad de ese día.
+      const rec = Object.assign({}, data);
+      delete rec.dia;
+      delete rec._ts;
+      db.ajustes[dia] = Object.keys(rec).length ? rec : {};
+      dirty[dia] = true;
+      changed = true;
+    });
+    if(changed){
+      if(timer) clearTimeout(timer);
+      timer = setTimeout(()=>{ timer = null; flush(); }, 60);
+    }
+  }, err => {
+    console.error('Error escuchando el ajuste de cuentas', err);
+  });
+}
+
+function stopAjustesListeners(){
+  if(fbAjustesUnsub){ try{ fbAjustesUnsub(); }catch(e){ /* ignorar */ } fbAjustesUnsub = null; }
+}
+
+/* -------------------------------------------------------------------------
+   GASTOS/PRÉSTAMOS COMPARTIDOS: UN GASTO = UN DOCUMENTO
+   Igual que ventas: cada gasto/préstamo es su PROPIO documento en una
+   colección compartida, así lo registrado en el celular invitado aparece al
+   instante en la compu (y al revés). Los gastos "sin color" (modo ninguno)
+   se quedan SOLO en el dispositivo que los creó, como ya funcionaba.
+   ------------------------------------------------------------------------- */
+const FB_GP_COL = 'stockferre_gastosprestamos_v1';
+
+function fbGpCol(){
+  const fs = fbFirestoreOrNull();
+  return fs ? fs.collection(FB_GP_COL) : null;
+}
+
+function gpDocData(g){
+  return {
+    id: g.id,
+    bs: Number(g.bs) || 0,
+    observacion: g.observacion || '',
+    ajustar: !!g.ajustar,
+    tipoPago: g.tipoPago || 'efectivo',
+    modo: (g.modo === 'ninguno' || g.modo === undefined || g.modo === null) ? 'ninguno' : g.modo,
+    fecha: g.fecha || todayISO(),
+    _ts: Date.now()
+  };
+}
+
+// Sube el documento de un gasto. Si el gasto es "sin color" (modo ninguno)
+// se borra de la nube: no se comparte con nadie, solo vive en este dispositivo.
+function syncGastoPrestamoDoc(g){
+  const col = fbGpCol();
+  if(!col || !g || !g.id) return;
+  try{
+    const isNeutral = (g.modo === 'ninguno' || g.modo === undefined || g.modo === null);
+    if(isNeutral){
+      col.doc(String(g.id)).delete();
+    }else{
+      col.doc(String(g.id)).set(gpDocData(g));
+    }
+  }catch(e){ console.error('Error subiendo gasto/préstamo a la nube', e); }
+}
+
+async function deleteGastoPrestamoDocs(ids){
+  const col = fbGpCol();
+  if(!col || !ids || !ids.length) return;
+  try{
+    const fs = firebase.firestore();
+    for(let i = 0; i < ids.length; i += 450){
+      const batch = fs.batch();
+      ids.slice(i, i + 450).forEach(id => { if(id) batch.delete(col.doc(String(id))); });
+      await batch.commit();
+    }
+  }catch(e){ console.error('Error borrando gastos/préstamos de la nube', e); }
+}
+
+// Sube los gastos/préstamos locales que no tengan documento (historia vieja).
+async function backfillGastosPrestamos(){
+  const col = fbGpCol();
+  if(!col) return;
+  const arr = (db.gastosPrestamos || []).filter(g => g && g.id && g.modo !== 'ninguno');
+  if(!arr.length) return;
+  try{
+    const snap = await col.get();
+    const existing = new Set(snap.docs.map(d => d.id));
+    const missing = arr.filter(g => !existing.has(String(g.id)));
+    const fs = firebase.firestore();
+    for(let i = 0; i < missing.length; i += 450){
+      const batch = fs.batch();
+      missing.slice(i, i + 450).forEach(g => batch.set(col.doc(String(g.id)), gpDocData(g)));
+      await batch.commit();
+    }
+  }catch(e){ console.error('Error respaldando gastos/préstamos en la nube', e); }
+}
+
+function startGastosPrestamosListener(){
+  const col = fbGpCol();
+  if(!col) return;
+  if(fbGpUnsub){ try{ fbGpUnsub(); }catch(e){ /* ignorar */ } }
+  let timer = null, changed = false;
+  const flush = () => {
+    if(!changed) return;
+    changed = false;
+    try{ persistLocalCache(); }catch(e){ /* ignorar */ }
+    rerenderCurrentView();
+    if(typeof refreshModoDetalleIfOpen === 'function') refreshModoDetalleIfOpen();
+  };
+  fbGpUnsub = col.onSnapshot(snap => {
+    snap.docChanges().forEach(ch => {
+      if(ch.doc.metadata.hasPendingWrites) return;
+      const id = String(ch.doc.id);
+      if(ch.type === 'removed'){
+        const i = (db.gastosPrestamos || []).findIndex(x => x && String(x.id) === id);
+        if(i !== -1){ db.gastosPrestamos.splice(i, 1); changed = true; }
+        return;
+      }
+      const data = ch.doc.data();
+      if(!data || !data.id) return;
+      const g = (db.gastosPrestamos || []).find(x => x && String(x.id) === String(data.id));
+      if(g){
+        Object.assign(g, data);
+        changed = true;
+      }else if(data.modo && data.modo !== 'ninguno'){
+        db.gastosPrestamos = db.gastosPrestamos || [];
+        db.gastosPrestamos.push(data);
+        changed = true;
+      }
+    });
+    if(changed){
+      if(timer) clearTimeout(timer);
+      timer = setTimeout(()=>{ timer = null; flush(); }, 60);
+    }
+  }, err => {
+    console.error('Error escuchando los gastos/préstamos compartidos', err);
+  });
+}
+
+function stopGastosPrestamosListeners(){
+  if(fbGpUnsub){ try{ fbGpUnsub(); }catch(e){ /* ignorar */ } fbGpUnsub = null; }
 }
 
 // Crea los documentos de los productos locales que todavía no tienen uno en
@@ -3001,6 +3238,7 @@ function setCambioBase(v, fechaKey){
     if(!db.ajustes[fecha]) db.ajustes[fecha] = {};
     db.ajustes[fecha].cambio = val;
     saveDB();
+    syncAjusteDay(fecha); // el ajuste viaja a todos los dispositivos
   }
 }
 
@@ -3028,6 +3266,7 @@ function setCambioForModo(v, fechaKey, modo){
       if(!db.ajustes[fecha]) db.ajustes[fecha] = {};
       db.ajustes[fecha][cambioModoField(modo)] = val;
       saveDB();
+      syncAjusteDay(fecha); // el ajuste viaja a todos los dispositivos
     }
     return;
   }
@@ -3063,6 +3302,7 @@ function setDineroReal(v, fechaKey){
     if(!db.ajustes[fecha]) db.ajustes[fecha] = {};
     db.ajustes[fecha].dineroReal = val;
     saveDB();
+    syncAjusteDay(fecha); // el ajuste viaja a todos los dispositivos
   }
 }
 function clearDineroReal(fechaKey){
@@ -3071,6 +3311,7 @@ function clearDineroReal(fechaKey){
   if(db.ajustes && db.ajustes[fecha]){
     delete db.ajustes[fecha].dineroReal;
     saveDB();
+    syncAjusteDay(fecha); // el ajuste viaja a todos los dispositivos
   }
 }
 // "Ajuste de cuentas": resume el dinero de las ventas que se están mostrando
@@ -3266,7 +3507,7 @@ function renderGastosPrestamos(){
 }
 
 function addGastoPrestamo(data){
-  db.gastosPrestamos.push({
+  const nuevo = {
     id: uid('gp'),
     bs: parseFloat(data.bs) || 0,
     observacion: data.observacion || '',
@@ -3275,8 +3516,10 @@ function addGastoPrestamo(data){
     modo: data.modo || (currentModo === 'invitado' ? 'ninguno' : currentModo),
     // Se guarda en el día que se está viendo en Ventas (si es "Todas", hoy).
     fecha: ventaFilterDateKey() || todayISO()
-  });
+  };
+  db.gastosPrestamos.push(nuevo);
   saveGastosPrestamos();
+  syncGastoPrestamoDoc(nuevo); // cada gasto es su propio documento en la nube
   renderVentas();
 }
 
@@ -3291,6 +3534,7 @@ function toggleGastoPrestamoModo(id){
   if(currentModo === 'invitado'){
     g.modo = nuevo;
     saveGastosPrestamos();
+    syncGastoPrestamoDoc(g); // el color nuevo viaja a todos los dispositivos
   }else{
     // El dueño está viendo UNA base: el gasto se saca de ambas bases y queda
     // en la que corresponde al color elegido (gris = se queda en la actual,
@@ -3307,6 +3551,7 @@ function toggleGastoPrestamoModo(id){
     }
     persistModoDB(otro, m);
     saveDB();
+    syncGastoPrestamoDoc(g); // el destino nuevo viaja a todos los dispositivos
     toast('Gasto enviado a ' + (nuevo === 'electrico' ? 'Eléctricas' : nuevo === 'manual' ? 'Manuales' : 'sin modo'), 'success');
   }
   renderVentas();
@@ -3317,6 +3562,7 @@ function toggleGastoPrestamoAjustar(id){
   if(!g) return;
   g.ajustar = !g.ajustar;
   saveGastosPrestamos();
+  syncGastoPrestamoDoc(g); // el cable de "Ajustar" viaja a todos los dispositivos
   renderVentas();
   refreshModoDetalleIfOpen();
 }
@@ -3324,6 +3570,7 @@ function toggleGastoPrestamoAjustar(id){
 function deleteGastoPrestamo(id){
   db.gastosPrestamos = (db.gastosPrestamos || []).filter(x => x.id !== id);
   marcarBorrado('gastosPrestamos', id); // el borrado viaja a los otros dispositivos
+  deleteGastoPrestamoDocs([id]); // borra también el documento en la nube
   saveGastosPrestamos();
   renderVentas();
   refreshModoDetalleIfOpen();
@@ -3334,6 +3581,7 @@ function toggleGastoPrestamoTipoPago(id){
   if(!g) return;
   g.tipoPago = g.tipoPago === 'qr' ? 'efectivo' : 'qr';
   saveGastosPrestamos();
+  syncGastoPrestamoDoc(g); // el tipo de pago viaja a todos los dispositivos
   renderVentas();
 }
 

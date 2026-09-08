@@ -435,9 +435,9 @@ body.modo-invitado .sidebar-logos{display:flex;}
 
 /* ---------- ROL INVITADO ---------- */
 /* Los invitados no ven precio de compra ni precio de marca, y no tienen
-   acceso a las pestañas de Inventario ni Configuración. */
+   acceso a las pestañas de Inventario. La pestaña Configuración sí la ven
+   (con la versión reducida: backup y sincronización). */
 body.role-guest .nav-item[data-view="inventario"],
-body.role-guest .nav-item[data-view="config"],
 body.role-guest .nav-item[data-view="compras"],
 body.role-guest .nav-item[data-view="finanzas"],
 body.role-guest .nav-item[data-view="retiros"],

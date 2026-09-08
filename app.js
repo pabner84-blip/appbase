@@ -233,11 +233,19 @@ function persistLocalCache(){
    sobrescribir un cambio nuevo con uno viejo, sin importar la velocidad a la
    que se registren productos ni la latencia de la red.
    ------------------------------------------------------------------------- */
-const fbWriteQueues = {}; // docId -> { inFlight: bool, latestData: object }
+const fbWriteQueues = {}; // docId -> { inFlight: bool, latestData: object, attempt: int }
+
+// Si una escritura a Firestore falla (cortón de red, o el servidor rechaza por
+// un momento), NO se pierde: se reintenta sola con espera creciente (2s, 4s,
+// 8s, ... hasta 60s). Así una venta registrada con internet inestable llega
+// igual al otro dispositivo apenas la conexión se recupera, sin que el dueño
+// tenga que hacer nada.
+const FB_WRITE_MAX_ATTEMPTS = 7; // 2+4+8+16+32+64+60 ≈ 3 minutos de reintentos
+const fbWriteRetryTimers = {};   // docId -> timeout id
 
 function scheduleFirestoreWrite(docId, ref, data){
   let q = fbWriteQueues[docId];
-  if(!q){ q = fbWriteQueues[docId] = { inFlight: false, latestData: null }; }
+  if(!q){ q = fbWriteQueues[docId] = { inFlight: false, latestData: null, attempt: 0 }; }
   q.latestData = data; // siempre nos quedamos con la versión más reciente conocida
   if(q.inFlight) return; // ya hay una escritura en camino; cuando termine, tomará latestData
   runQueuedWrite(docId, ref);
@@ -245,20 +253,41 @@ function scheduleFirestoreWrite(docId, ref, data){
 
 function runQueuedWrite(docId, ref){
   const q = fbWriteQueues[docId];
-  if(!q) return;
+  if(!q || q.inFlight) return;
   q.inFlight = true;
+  q.attempt = (q.attempt || 0) + 1;
   const toSend = q.latestData;
   setSyncStatus('connecting');
   ref.set(toSend).then(()=>{
+    q.attempt = 0;
     setSyncStatus('synced');
+    finishQueuedWrite(docId, ref, toSend);
   }).catch(err=>{
     console.error('Error guardando en Firebase', err);
+    // Durante los reintentos NO marcamos "error de sincronización": seguimos
+    // "conectando" para que no salte el aviso de error por un cortón tonto.
+    if(q.attempt < FB_WRITE_MAX_ATTEMPTS){
+      const delay = Math.min(60000, 2000 * Math.pow(2, q.attempt - 1));
+      if(fbWriteRetryTimers[docId]) clearTimeout(fbWriteRetryTimers[docId]);
+      fbWriteRetryTimers[docId] = setTimeout(()=>{
+        fbWriteRetryTimers[docId] = null;
+        q.inFlight = false;
+        runQueuedWrite(docId, ref);
+      }, delay);
+      return;
+    }
+    q.attempt = 0;
     setSyncStatus('error');
-  }).finally(()=>{
-    q.inFlight = false;
-    // Si mientras escribíamos llegó un cambio más nuevo, lo mandamos ahora.
-    if(q.latestData !== toSend){ runQueuedWrite(docId, ref); }
+    finishQueuedWrite(docId, ref, toSend);
   });
+}
+
+function finishQueuedWrite(docId, ref, toSend){
+  const q = fbWriteQueues[docId];
+  if(!q) return;
+  q.inFlight = false;
+  // Si mientras escribíamos llegó un cambio más nuevo, lo mandamos ahora.
+  if(q.latestData !== toSend){ runQueuedWrite(docId, ref); }
 }
 
 function saveDB(){
@@ -433,6 +462,11 @@ function connectGuestFirebase(){
   }
   if(typeof firebaseConfig === 'undefined' || !firebaseConfig.apiKey || !firebaseConfig.projectId) return;
   if(typeof firebase === 'undefined') return;
+  // Limpia los listeners del invitado de una conexión previa (para poder
+  // reconectar desde el watchdog sin duplicar), SIN tocar la cola de
+  // escrituras pendientes para que ninguna venta se pierda.
+  guestUnsubs.forEach(u => { try{ u(); }catch(e){ /* ignorar */ } });
+  guestUnsubs = [];
   try{
     if(!firebase.apps || !firebase.apps.length){ firebase.initializeApp(firebaseConfig); }
     const fbFirestore = firebase.firestore();
@@ -542,6 +576,57 @@ function setSyncStatus(status){
   el.textContent = labels[status] || '';
 }
 
+// Botón "Recibir y mandar actualizaciones": fuerza una sincronización con
+// Firebase en este momento (baja los cambios de otros dispositivos y sube los
+// de este). Si la sincronización estaba apagada, la enciende al presionarlo.
+function manualSync(){
+  setFirebaseToggle(true);
+  setFirebaseToggleUI(true);
+  const btn = document.getElementById('btnManualSync');
+  if(btn){ btn.disabled = true; btn.textContent = '🔄 Sincronizando…'; }
+  const finish = ()=>{ if(btn){ btn.disabled = false; btn.textContent = '🔄 Recibir y mandar actualizaciones'; } };
+  if(typeof firebaseConfig === 'undefined' || !firebaseConfig.apiKey || !firebaseConfig.projectId){
+    setFirebaseToggle(false);
+    setFirebaseToggleUI(false);
+    finish();
+    toast('No hay sincronización configurada en este equipo', 'error');
+    return;
+  }
+  if(typeof firebase === 'undefined'){
+    finish();
+    toast('No se pudo cargar Firebase (revisa tu conexión a internet)', 'error');
+    return;
+  }
+  if(currentModo === 'invitado'){
+    // El modo invitado avisa con setSyncStatus() al terminar de leer
+    // el documento propio; se confirma cuando aparece "synced" o "error".
+    connectGuestFirebase();
+    const statusEl = document.getElementById('sidebarSyncStatus');
+    const started = Date.now();
+    const poll = setInterval(()=>{
+      const txt = statusEl ? (statusEl.textContent || '') : '';
+      if(txt.indexOf('Sincronizado') !== -1){
+        clearInterval(poll);
+        finish();
+        toast('🔥 Actualizaciones recibidas y enviadas', 'success');
+      }else if(txt.indexOf('Error') !== -1){
+        clearInterval(poll);
+        finish();
+        toast('No se pudo sincronizar (revisa tu conexión a internet)', 'error');
+      }else if(Date.now() - started > 8000){
+        clearInterval(poll);
+        finish();
+      }
+    }, 300);
+    return;
+  }
+  connectFirebase().catch(()=>{ /* conecta vs no conecta; el estado se ve en setSyncStatus */ }).then(()=>{
+    finish();
+    if(fbReady) toast('🔥 Actualizaciones recibidas y enviadas', 'success');
+    else toast('No se pudo sincronizar (revisa tu conexión a internet)', 'error');
+  });
+}
+
 function rerenderCurrentView(){
   const activeView = document.querySelector('.view.active');
   if(!activeView) return;
@@ -577,6 +662,12 @@ async function connectFirebase(){
   }
 
   try{
+    // Limpia cualquier conexión previa (para poder llamar connectFirebase()
+    // de nuevo cuando el watchdog detecta un error): evita listeners duplicados
+    // que aplicarían los cambios varias veces.
+    if(fbUnsub){ try{ fbUnsub(); }catch(e){ /* ignorar */ } fbUnsub = null; }
+    if(fbOtherUnsub){ try{ fbOtherUnsub(); }catch(e){ /* ignorar */ } fbOtherUnsub = null; }
+    stopStockListeners();
     setSyncStatus('connecting');
     if(!firebase.apps || !firebase.apps.length){ firebase.initializeApp(firebaseConfig); }
     const fbFirestore = firebase.firestore();
@@ -650,6 +741,40 @@ async function connectFirebase(){
     console.error('No se pudo conectar a Firebase', err);
     setSyncStatus('error');
   }
+}
+
+/* -------------------------------------------------------------------------
+   VIGÍA DE SINCRONIZACIÓN: si se pierde la conexión o una escritura quedó
+   fallando, la app se reconecta SOLA cada 12 segundos. Así los datos llegan
+   a los otros dispositivos apenas vuelve la red, sin que el usuario tenga
+   que apretar nada ni recargar la página.
+   ------------------------------------------------------------------------- */
+let fbWatchdogTimer = null;
+let fbReconnecting = false;
+
+function startSyncWatchdog(){
+  stopSyncWatchdog();
+  fbWatchdogTimer = setInterval(()=>{
+    if(typeof firebase === 'undefined' || typeof firebaseConfig === 'undefined') return;
+    if(!fbConfigOk() || !firebaseToggleOn()) return;
+    if(fbReconnecting) return;
+    const stEl = document.getElementById('sidebarSyncStatus');
+    const statusTxt = stEl ? (stEl.textContent || '') : '';
+    const looksError = statusTxt.indexOf('Error') !== -1;
+    if(!fbReady || looksError){
+      fbReconnecting = true;
+      setTimeout(()=>{ fbReconnecting = false; }, 8000);
+      if(currentModo === 'invitado'){
+        try{ connectGuestFirebase(); }catch(err){ /* ya avisa con setSyncStatus */ }
+      }else{
+        connectFirebase().catch(()=>{ /* ya avisa con setSyncStatus */ });
+      }
+    }
+  }, 12000);
+}
+
+function stopSyncWatchdog(){
+  if(fbWatchdogTimer){ clearInterval(fbWatchdogTimer); fbWatchdogTimer = null; }
 }
 
 // Guarda en LocalStorage los datos de UN modo recibidos de Firebase,
@@ -7661,7 +7786,7 @@ function updateInicioClock(){
 function showView(name){
   if(welcomeTimer){ clearTimeout(welcomeTimer); welcomeTimer = null; }
   currentView = name;
-  if(currentRole === 'guest' && (name === 'inventario' || name === 'config' || name === 'compras' || name === 'finanzas' || name === 'retiros' || name === 'deudas' || name === 'gastos' || name === 'codigobarras' || name === 'topventas' || name === 'pedidos')){
+  if(currentRole === 'guest' && (name === 'inventario' || name === 'compras' || name === 'finanzas' || name === 'retiros' || name === 'deudas' || name === 'gastos' || name === 'codigobarras' || name === 'topventas' || name === 'pedidos')){
     toast('Los invitados no tienen acceso a esa sección', 'error');
     name = 'productos';
   }
@@ -9778,6 +9903,7 @@ function setupEventListeners(){
     if(e.target.files[0]) importBackup(e.target.files[0]);
     e.target.value = '';
   });
+  document.getElementById('btnManualSync').addEventListener('click', manualSync);
   document.getElementById('btnFactoryReset').addEventListener('click', factoryReset);
 }
 
@@ -9809,6 +9935,10 @@ function init(){
   }
   updateInicioClock();
   setInterval(updateInicioClock, 1000);
+  // La vigía de sincronización: reconecta sola si Firebase se cae o queda una
+  // escritura fallando, para que los datos lleguen al instante a los otros
+  // dispositivos apenas vuelva la red.
+  startSyncWatchdog();
   // El OCR ya no se precarga al abrir la app: se descarga/arranca recién al
   // usarlo (ver startOcrScanner), así la app abre al instante incluso en
   // computadoras viejas.

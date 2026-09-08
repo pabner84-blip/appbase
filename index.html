@@ -12,7 +12,10 @@
 <link rel="apple-touch-icon" href="icon-192.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Alfa+Slab+One&family=Cormorant+Garamond:ital,wght@1,300&display=swap" rel="stylesheet">
+<!-- Las fuentes se cargan sin bloquear la app: si no hay internet, la app usa
+     las fuentes del sistema y abre igual. -->
+<link href="https://fonts.googleapis.com/css2?family=Alfa+Slab+One&family=Cormorant+Garamond:ital,wght@1,300&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
+<noscript><link href="https://fonts.googleapis.com/css2?family=Alfa+Slab+One&family=Cormorant+Garamond:ital,wght@1,300&display=swap" rel="stylesheet"></noscript>
 <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -563,7 +566,7 @@
     <!-- ---------- CONFIGURACIÓN ---------- -->
     <section class="view" id="view-config">
       <div class="panels-grid">
-        <div class="panel">
+        <div class="panel admin-only">
           <div class="panel-header"><h3>📂 Importar productos (CSV/Excel)</h3></div>
           <div class="panel-body">
             <p class="hint">Acepta un CSV exportado antes (coma, punto y coma o tabulador), el .xls viejo o el archivo .xlsx que genera "Exportar Excel". Si lo editas en Excel y lo guardas, impórtalo de vuelta igual. Formato: <code>CODIGO,DESCRIPCION,MARCA,CATEGORIA,CODIGO DE BARRAS,PRECIO COMPRA,PRECIO VENTA</code> (código de barras es opcional).</p>
@@ -579,6 +582,15 @@
               <button class="btn btn-primary" id="btnExportBackup">📤 Exportar backup</button>
               <button class="btn btn-secondary" id="btnImportBackup">📥 Restaurar backup</button>
             </div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-header"><h3>🔄 Recibir y mandar actualizaciones</h3></div>
+          <div class="panel-body">
+            <p class="hint">Baja los últimos cambios de otros dispositivos (productos, stock, ventas) y sube los de este equipo a Firebase. Ideal para que el invitado reciba las actualizaciones del dueño.</p>
+            <button class="btn btn-primary" id="btnManualSync">🔄 Recibir y mandar actualizaciones</button>
+            <p class="hint" style="margin:10px 0 0;" id="manualSyncHint">Si está apagada, esta acción enciende la sincronización de este dispositivo.</p>
           </div>
         </div>
 
@@ -609,7 +621,7 @@
           </div>
         </div>
 
-        <div class="panel">
+        <div class="panel admin-only">
           <div class="panel-header"><h3>⚠️ Zona de riesgo</h3></div>
           <div class="panel-body">
             <p class="hint">Esto borra todos los productos y categorías guardados en este dispositivo.</p>
@@ -1329,9 +1341,12 @@ window.__LAZY_LIBS__ = {
   zxing: function(){ return new Promise(function(ok, no){ if(window.ZXing) return ok(); var s=document.createElement('script'); s.src='https://unpkg.com/@zxing/library@0.20.0'; s.onload=ok; s.onerror=function(){no()}; document.head.appendChild(s); }); }
 };
 </script>
-<!-- Firebase (opcional): si firebase-config.js está vacío, la app funciona 100% local -->
-<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
-<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js"></script>
+<!-- Firebase (opcional): si firebase-config.js está vacío, la app funciona 100% local.
+     Se cargan con defer: descargan en paralelo SIN bloquear la app. Así, sin
+     internet o con internet lento, la app abre al instante (igual que la versión
+     puramente local) y Firebase conecta solo cuando llega la conexión. -->
+<script defer src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
+<script defer src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js"></script>
 <script src="firebase-config.js"></script>
 <script>if('serviceWorker' in navigator){ window.addEventListener('load', function(){ navigator.serviceWorker.register('./sw.js').catch(function(){}); }); }</script>
 <script src="app.js"></script>

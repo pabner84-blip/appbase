@@ -646,6 +646,18 @@ function rerenderCurrentView(){
   updateSidebarProductCount();
 }
 
+// Límite de tiempo para las esperas de Firebase dentro de connectFirebase:
+// si la red está rara, ninguna lectura puede quedar colgada para siempre (eso
+// era lo que dejaba la app pegada en "Conectando a Firebase..." sin recibir
+// los cambios de los otros dispositivos).
+function withTimeout(promise, ms){
+  let timer = null;
+  return Promise.race([
+    Promise.resolve(promise),
+    new Promise(resolve => { timer = setTimeout(resolve, ms); })
+  ]).finally(() => { if(timer) clearTimeout(timer); });
+}
+
 async function connectFirebase(){
   if(!firebaseToggleOn()){
     setSyncStatus('local'); // el usuario apagó la sincronización en este dispositivo
@@ -671,31 +683,14 @@ async function connectFirebase(){
     setSyncStatus('connecting');
     if(!firebase.apps || !firebase.apps.length){ firebase.initializeApp(firebaseConfig); }
     const fbFirestore = firebase.firestore();
-    await enableOfflinePersistence(fbFirestore);
+    await withTimeout(enableOfflinePersistence(fbFirestore), 5000);
     fbDocRef = fbFirestore.collection('stockferre').doc(firebaseDocId());
     fbReady = true;
 
-    const snap = await fbDocRef.get();
-    if(snap.exists){
-      // Ya hay datos en la nube: se fusionan con lo que tengamos localmente
-      // (por si este dispositivo tenía cambios que la nube todavía no vio),
-      // manteniendo siempre el historial local.
-      const remote = normalizeDB(snap.data());
-      const merged = mergeRemoteIntoLocal(db, remote);
-      merged.historialEscaneos = db.historialEscaneos;
-      merged.historialBusquedas = db.historialBusquedas;
-      merged.historialInventario = db.historialInventario;
-      db = merged;
-      persistLocalCache();
-      rerenderCurrentView();
-    }else{
-      // Primera vez: sube los datos locales como semilla inicial de la nube
-      const { historialEscaneos, historialBusquedas, historialInventario, ...syncData } = db;
-      await fbDocRef.set(syncData);
-    }
-
-    fbUnsub = fbDocRef.onSnapshot(snap=>{
-      if(snap.metadata.hasPendingWrites) return; // es un cambio que hicimos nosotros mismos
+    // IMPORTANTE: el listener del documento se activa AHORA MISMO, antes de
+    // cualquier lectura. Así este dispositivo empieza a recibir los cambios
+    // de los otros al instante, aunque la red esté lenta o una lectura tarde.
+    const applySnapshot = (snap) => {
       if(!snap.exists) return;
       const prevVentas = (db.ventas || []).map(v => v.id);
       const remote = normalizeDB(snap.data());
@@ -708,12 +703,31 @@ async function connectFirebase(){
       rerenderCurrentView();
       notifyNewRemoteSales(prevVentas, merged.ventas); // avisa ventas hechas en otro dispositivo
       setSyncStatus('synced');
+    };
+    fbUnsub = fbDocRef.onSnapshot(snap=>{
+      // Si este snapshot incluye una escritura propia todavía sin confirmar,
+      // esperamos: el snapshot confirmado que llega después ya lo aplica.
+      if(snap.metadata.hasPendingWrites) return;
+      applySnapshot(snap);
     }, err=>{
       console.error('Error de sincronización Firebase', err);
       setSyncStatus('error');
     });
 
+    // La conexión quedó activa: el estado ya no debe quedarse en "conectando".
     setSyncStatus('synced');
+
+    // Lectura inicial: fusiona lo que haya en la nube con lo local (o sube la
+    // semilla la primera vez). Con límite de tiempo: si la red tarda, el
+    // listener de arriba sigue activo recibiendo los cambios igual.
+    const snap = await withTimeout(fbDocRef.get(), 12000);
+    if(snap && snap.exists){
+      applySnapshot(snap);
+    }else if(snap && !snap.exists){
+      // Primera vez: sube los datos locales como semilla inicial de la nube
+      const { historialEscaneos, historialBusquedas, historialInventario, ...syncData } = db;
+      try{ await withTimeout(fbDocRef.set(syncData), 12000); }catch(e){ /* el SDK reintenta */ }
+    }
 
     // Mantiene también en caché el OTRO modo (Manuales ↔ Eléctricas). Así la
     // contraseña y los datos de ambos quedan listos en este dispositivo aunque
@@ -722,7 +736,7 @@ async function connectFirebase(){
     const otherModo = currentModo === 'manual' ? 'electrico' : 'manual';
     try{
       const otherRef = fbFirestore.collection('stockferre').doc('inventario_' + otherModo);
-      const otherSnap = await otherRef.get();
+      const otherSnap = await withTimeout(otherRef.get(), 8000);
       if(otherSnap.exists) cacheRemoteModo(otherSnap.data(), otherModo);
       fbOtherUnsub = otherRef.onSnapshot(snap=>{
         if(snap.metadata.hasPendingWrites) return;
@@ -733,8 +747,8 @@ async function connectFirebase(){
     // Stock atómico: crea los documentos de producto que falten (los que ya
     // existían antes de este arreglo) y escucha la colección para mantener el
     // stock local al día con el valor EXACTO de la nube.
-    try{ await backfillProductos(currentModo); }catch(e){ /* no bloquea */ }
-    try{ await backfillProductos(otherModo); }catch(e){ /* no bloquea */ }
+    try{ await withTimeout(backfillProductos(currentModo), 15000); }catch(e){ /* no bloquea */ }
+    try{ await withTimeout(backfillProductos(otherModo), 15000); }catch(e){ /* no bloquea */ }
     startStockListener(currentModo);
     startStockListener(otherModo);
   }catch(err){

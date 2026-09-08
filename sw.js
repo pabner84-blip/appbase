@@ -4,7 +4,7 @@
    funcione sin internet (los datos se sincronizan cuando hay conexión).
    ========================================================================= */
 
-const CACHE = 'stockferre-v1';
+const CACHE = 'stockferre-v2';
 
 // Archivos esenciales para que la app arranque sin conexión.
 // Los CDNs (Firebase, Tesseract, lector de barras, fuentes) también se
@@ -65,20 +65,31 @@ self.addEventListener('fetch', (event) => {
   event.respondWith((async () => {
     const cache = await caches.open(CACHE);
 
-    // Navegación: primero red (para ver lo nuevo), si falla usa la copia.
-    if (esNavegacion) {
+    // Navegación y archivos "core" (HTML, JS, CSS, config): PRIMERO red y, si
+    // no hay conexión, la copia. Así cada vez que se abre la app se descarga
+    // la versión nueva con los arreglos de sincronización (clave para el
+    // celular: si sirviéramos siempre la copia, el celular vería el código
+    // viejo y seguiría desincronizado para siempre).
+    const pathname = url.pathname.replace(/\/+$/, '') || '/';
+    const esCore = esNavegacion ||
+      pathname === '/index.html' || pathname === '/app.js' ||
+      pathname === '/styles.css' || pathname === '/firebase-config.js' ||
+      pathname === '/manifest.json' || pathname === '/';
+    if (esCore) {
       try {
         const fresh = await fetch(req);
         if (fresh && fresh.ok) cache.put(req, fresh.clone());
         return fresh;
       } catch (e) {
-        const copia = await cache.match('./index.html');
+        const clave = esNavegacion ? './index.html' : req;
+        const copia = await cache.match(clave);
         if (copia) return copia;
         return new Response('Sin conexión y sin copia guardada.', { status: 503 });
       }
     }
 
-    // Resto: usa la copia si existe y en segundo plano la actualiza.
+    // Resto (imágenes, fuentes, CDNs): usa la copia si existe y, en segundo
+    // plano, la actualiza.
     const cached = await cache.match(req);
     const network = fetch(req)
       .then((res) => {

@@ -622,18 +622,19 @@ function connectGuestFirebase(){
     }, ()=>{ /* ignorar */ });
     guestUnsubs.push(ownUnsub);
 
-    // VENTAS COMPARTIDAS: el invitado comparte la MISMA colección de ventas
-    // con el dueño. Así una venta registrada en el celular (invitado) llega
-    // al instante a la compu, y las de la compu se ven aquí. Primero sube las
-    // ventas locales que no tengan documento y luego escucha la colección.
-    try{ backfillVentas(); }catch(e){ /* no bloquea */ }
-    startVentasListener();
-    // AJUSTE DE CUENTAS y GASTOS/PRÉSTAMOS compartidos con el dueño (mismo
-    // modelo): lo ajustado o registrado aquí se ve al instante en la compu.
-    try{ backfillAjustes(); }catch(e){ /* no bloquea */ }
-    try{ backfillGastosPrestamos(); }catch(e){ /* no bloquea */ }
-    startAjustesListener();
-    startGastosPrestamosListener();
+    // VENTAS COMPARTIDAS del INVITADO: los dispositivos invitados comparten su
+    // PROPIA colección (stockferre_ventas_invitado), separada de la de manuales
+    // y eléctricas. Así el invitado no se mezcla con el dueño, pero dos
+    // invitados se ven al instante. Primero sube las ventas locales que no
+    // tengan documento y luego escucha la colección.
+    try{ backfillVentas('invitado'); }catch(e){ /* no bloquea */ }
+    startVentasListener('invitado');
+    // AJUSTE DE CUENTAS y GASTOS/PRÉSTAMOS del invitado (mismo modelo): lo
+    // ajustado o registrado aquí se comparte solo entre dispositivos invitados.
+    try{ backfillAjustes('invitado'); }catch(e){ /* no bloquea */ }
+    try{ backfillGastosPrestamos('invitado'); }catch(e){ /* no bloquea */ }
+    startAjustesListener('invitado');
+    startGastosPrestamosListener('invitado');
   }catch(err){
     console.error('No se pudo conectar a Firebase en modo invitado', err);
     setSyncStatus('error');
@@ -852,15 +853,16 @@ async function connectFirebase(){
     try{ await withTimeout(backfillProductos(otherModo), 15000); }catch(e){ /* no bloquea */ }
     startStockListener(currentModo);
     startStockListener(otherModo);
-    // VENTAS COMPARTIDAS: sube a la colección las ventas que no tengan
-    // documento aún y empieza a escuchar la de los demás dispositivos.
-    try{ await withTimeout(backfillVentas(), 15000); }catch(e){ /* no bloquea */ }
-    startVentasListener();
-    // AJUSTE DE CUENTAS y GASTOS/PRÉSTAMOS compartidos (mismo modelo).
-    try{ await withTimeout(backfillAjustes(), 15000); }catch(e){ /* no bloquea */ }
-    try{ await withTimeout(backfillGastosPrestamos(), 15000); }catch(e){ /* no bloquea */ }
-    startAjustesListener();
-    startGastosPrestamosListener();
+    // VENTAS COMPARTIDAS del dueño: cada modo (manual/electrico) tiene su
+    // PROPIA colección y sus propios dispositivos. Solo se escucha el dominio
+    // del modo actual; al cambiar de modo se re-conecta con su colección.
+    try{ await withTimeout(backfillVentas(currentModo), 15000); }catch(e){ /* no bloquea */ }
+    startVentasListener(currentModo);
+    // AJUSTE DE CUENTAS y GASTOS/PRÉSTAMOS del dueño (mismo modelo por dominio).
+    try{ await withTimeout(backfillAjustes(currentModo), 15000); }catch(e){ /* no bloquea */ }
+    try{ await withTimeout(backfillGastosPrestamos(currentModo), 15000); }catch(e){ /* no bloquea */ }
+    startAjustesListener(currentModo);
+    startGastosPrestamosListener(currentModo);
   }catch(err){
     console.error('No se pudo conectar a Firebase', err);
     setSyncStatus('error');
@@ -1076,19 +1078,24 @@ async function deleteProductoDoc(p, modo){
      • El celular se quedara en "Conectando a Firebase..." porque el documento
        del invitado tardaba/hangueaba y el estado no avanzaba.
    La solución (igual que el stock):
-   • Cada venta es SU PROPIO documento en la colección compartida
-     "stockferre_ventas_v1". Dueño e invitados escriben y leen la MISMA
-     colección.
-   • Al registrar una venta se sube su documento; al borrarla se borra su
-     documento. Ningún dispositivo puede "resucitar" una venta borrada.
-   • Todos escuchan la colección (onSnapshot) y corrigen su lista local al
-     instante con lo que hay en la nube, igual que con el stock.
+   • Cada venta es SU PROPIO documento en una colección SEPARADA por dominio:
+       "stockferre_ventas_invitado", "stockferre_ventas_manual" y
+       "stockferre_ventas_electrico".
+   • Los TRES dominios están separados: las ventas de INVITADOS no se mezclan
+     con las de MANUALES ni con las de ELÉCTRICAS. Pero dentro de cada dominio
+     TODOS los dispositivos comparten y se actualizan al instante: un invitado
+     en el celular ve las ventas de otros invitados, y manuales/eléctricas
+     hacen lo mismo entre sus propios dispositivos.
+   • Al registrar una venta se sube su documento a la colección de SU dominio;
+     al borrarla se borra su documento. Ningún dispositivo puede "resucitar"
+     una venta borrada.
+   • Todos escuchan la colección de su dominio (onSnapshot) y corrigen su
+     lista local al instante, igual que con el stock.
    ------------------------------------------------------------------------- */
-const FB_VENTAS_COL = 'stockferre_ventas_v1';
 
-function fbVentasCol(){
+function fbVentasCol(modo){
   const fs = fbFirestoreOrNull();
-  return fs ? fs.collection(FB_VENTAS_COL) : null;
+  return fs ? fs.collection('stockferre_ventas_' + (modo || currentModo)) : null;
 }
 
 function ventaDocData(v){
@@ -1111,16 +1118,16 @@ function ventaDocData(v){
 
 // Sube (crea o actualiza) el documento de UNA venta. Si no hay conexión, la
 // persistencia offline lo reenvía solo cuando vuelva la red (como el stock).
-async function syncVentaDoc(v){
-  const col = fbVentasCol();
+async function syncVentaDoc(v, modo){
+  const col = fbVentasCol(modo);
   if(!col || !v || !v.id) return;
   try{
     await col.doc(String(v.id)).set(ventaDocData(v));
   }catch(e){ console.error('Error subiendo venta a la nube', e); }
 }
 
-async function syncVentaDocs(list){
-  const col = fbVentasCol();
+async function syncVentaDocs(list, modo){
+  const col = fbVentasCol(modo);
   if(!col || !list || !list.length) return;
   try{
     const fs = firebase.firestore();
@@ -1134,8 +1141,8 @@ async function syncVentaDocs(list){
   }catch(e){ console.error('Error subiendo ventas a la nube', e); }
 }
 
-async function deleteVentaDocs(ids){
-  const col = fbVentasCol();
+async function deleteVentaDocs(ids, modo){
+  const col = fbVentasCol(modo);
   if(!col || !ids || !ids.length) return;
   try{
     const fs = firebase.firestore();
@@ -1149,11 +1156,11 @@ async function deleteVentaDocs(ids){
   }catch(e){ console.error('Error borrando ventas de la nube', e); }
 }
 
-// Sube a la colección las ventas locales que todavía no tienen documento en
-// la nube (por ejemplo, todo el historial que ya existía antes de este
-// arreglo). Es idempotente: solo crea las que faltan.
-async function backfillVentas(){
-  const col = fbVentasCol();
+// Sube a la colección del dominio las ventas locales que todavía no tienen
+// documento en la nube (por ejemplo, todo el historial que ya existía antes
+// de este arreglo). Es idempotente: solo crea las que faltan.
+async function backfillVentas(modo){
+  const col = fbVentasCol(modo);
   if(!col) return;
   const arr = (db.ventas || []);
   if(!arr.length) return;
@@ -1161,18 +1168,19 @@ async function backfillVentas(){
     const snap = await col.get();
     const existing = new Set(snap.docs.map(d => d.id));
     const missing = arr.filter(v => v && v.id && !existing.has(String(v.id)));
-    if(missing.length) await syncVentaDocs(missing);
+    if(missing.length) await syncVentaDocs(missing, modo);
   }catch(e){ console.error('Error respaldando ventas en la nube', e); }
 }
 
-// Escucha la colección compartida y corrige la lista local de ventas con lo
-// que hay en la nube: las ventas de OTROS dispositivos (incluido el invitado)
-// aparecen al instante, y las que se borraron en otro lado desaparecen.
+// Escucha la colección del dominio (invitado/manual/electrico) y corrige la
+// lista local de ventas con lo que hay en la nube: las ventas de OTROS
+// dispositivos del MISMO dominio aparecen al instante, y las que se borraron
+// en otro lado desaparecen. Los dominios no se mezclan entre sí.
 const ventasStoreCache = {}; // copia de la lista mientras se actualiza
 let fbVentasUnsub = null;
 
-function startVentasListener(){
-  const col = fbVentasCol();
+function startVentasListener(modo){
+  const col = fbVentasCol(modo);
   if(!col) return;
   if(fbVentasUnsub){ try{ fbVentasUnsub(); }catch(e){ /* ignorar */ } }
   ventasStoreCache.list = null;
@@ -1233,18 +1241,19 @@ function stopVentasListeners(){
 }
 
 /* -------------------------------------------------------------------------
-   AJUSTE DE CUENTAS COMPARTIDO: UNA FECHA = UN DOCUMENTO
+   AJUSTE DE CUENTAS COMPARTIDO POR DOMINIO: UNA FECHA = UN DOCUMENTO
    Igual que ventas y stock: cada día de "Ajuste de cuentas" (cambio, dinero
-   real) es su PROPIO documento en una colección compartida. Un ajuste hecho
-   en el celular invitado se ve AL INSTANTE en la compu, y al revés.
+   real) es SU PROPIO documento en una colección SEPARADA por dominio:
+   "stockferre_ajustes_invitado", "stockferre_ajustes_manual" y
+   "stockferre_ajustes_electrico". Los tres dominios no se mezclan, pero
+   dentro de cada uno todos los dispositivos se actualizan al instante.
    ------------------------------------------------------------------------- */
-const FB_AJUSTES_COL = 'stockferre_ajustes_v1';
 let fbAjustesUnsub = null;
 let fbGpUnsub = null;
 
-function fbAjustesCol(){
+function fbAjustesCol(modo){
   const fs = fbFirestoreOrNull();
-  return fs ? fs.collection(FB_AJUSTES_COL) : null;
+  return fs ? fs.collection('stockferre_ajustes_' + (modo || currentModo)) : null;
 }
 
 function ajusteDocData(dia, record){
@@ -1254,8 +1263,8 @@ function ajusteDocData(dia, record){
   return data;
 }
 
-function syncAjusteDay(dia){
-  const col = fbAjustesCol();
+function syncAjusteDay(dia, modo){
+  const col = fbAjustesCol(modo);
   if(!col || !dia) return;
   const rec = (db.ajustes && db.ajustes[dia]) || {};
   try{
@@ -1268,8 +1277,8 @@ function syncAjusteDay(dia){
 }
 
 // Sube las fechas locales que no tengan documento (historias viejas).
-async function backfillAjustes(){
-  const col = fbAjustesCol();
+async function backfillAjustes(modo){
+  const col = fbAjustesCol(modo);
   if(!col) return;
   const local = db.ajustes || {};
   const dias = Object.keys(local).filter(d => local[d] && Object.keys(local[d]).length);
@@ -1289,8 +1298,8 @@ async function backfillAjustes(){
   }catch(e){ console.error('Error respaldando ajustes de cuentas en la nube', e); }
 }
 
-function startAjustesListener(){
-  const col = fbAjustesCol();
+function startAjustesListener(modo){
+  const col = fbAjustesCol(modo);
   if(!col) return;
   if(fbAjustesUnsub){ try{ fbAjustesUnsub(); }catch(e){ /* ignorar */ } }
   let timer = null;
@@ -1337,17 +1346,19 @@ function stopAjustesListeners(){
 }
 
 /* -------------------------------------------------------------------------
-   GASTOS/PRÉSTAMOS COMPARTIDOS: UN GASTO = UN DOCUMENTO
-   Igual que ventas: cada gasto/préstamo es su PROPIO documento en una
-   colección compartida, así lo registrado en el celular invitado aparece al
-   instante en la compu (y al revés). Los gastos "sin color" (modo ninguno)
-   se quedan SOLO en el dispositivo que los creó, como ya funcionaba.
+   GASTOS/PRÉSTAMOS COMPARTIDOS POR DOMINIO: UN GASTO = UN DOCUMENTO
+   Igual que ventas: cada gasto/préstamo es SU PROPIO documento en una
+   colección SEPARADA por dominio: "stockferre_gastosprestamos_invitado",
+   "stockferre_gastosprestamos_manual" y "stockferre_gastosprestamos_electrico".
+   Los tres dominios no se mezclan, pero dentro de cada uno todos los
+   dispositivos se actualizan al instante. En el DUEÑO el dominio del gasto es
+   su color (manual/eléctricas); en el INVITADO todo vive en su propio dominio.
+   Los gastos "sin color" del dueño (modo ninguno) no se envían a ningún modo.
    ------------------------------------------------------------------------- */
-const FB_GP_COL = 'stockferre_gastosprestamos_v1';
 
-function fbGpCol(){
+function fbGpCol(modo){
   const fs = fbFirestoreOrNull();
-  return fs ? fs.collection(FB_GP_COL) : null;
+  return fs ? fs.collection('stockferre_gastosprestamos_' + (modo || currentModo)) : null;
 }
 
 function gpDocData(g){
@@ -1363,23 +1374,42 @@ function gpDocData(g){
   };
 }
 
-// Sube el documento de un gasto. Si el gasto es "sin color" (modo ninguno)
-// se borra de la nube: no se comparte con nadie, solo vive en este dispositivo.
+// Dominio (colección) al que pertenece un gasto:
+//   • Invitado → siempre "invitado" (el color es solo una etiqueta ahí).
+//   • Dueño → el color del gasto ("manual"/"electrico"); si es "sin color"
+//     (ninguno) no vive en la nube (devuelve null).
+function gpHome(g){
+  if(currentModo === 'invitado') return 'invitado';
+  if(g && (g.modo === 'manual' || g.modo === 'electrico')) return g.modo;
+  return null;
+}
+
+// Sube el documento del gasto a SU dominio. En el dueño, si cambió de color
+// se borra la copia vieja de los otros dominios para que no aparezca duplicada
+// en otro dispositivo del mismo color.
 function syncGastoPrestamoDoc(g){
-  const col = fbGpCol();
-  if(!col || !g || !g.id) return;
+  if(!g || !g.id) return;
+  const home = gpHome(g);
+  const cols = fbFirestoreOrNull();
+  if(!cols) return;
   try{
-    const isNeutral = (g.modo === 'ninguno' || g.modo === undefined || g.modo === null);
-    if(isNeutral){
-      col.doc(String(g.id)).delete();
-    }else{
-      col.doc(String(g.id)).set(gpDocData(g));
+    if(currentModo !== 'invitado'){
+      ['manual','electrico'].forEach(cl => {
+        if(cl !== home){
+          const c = fbGpCol(cl);
+          if(c) c.doc(String(g.id)).delete();
+        }
+      });
+    }
+    if(home){
+      const col = fbGpCol(home);
+      if(col) col.doc(String(g.id)).set(gpDocData(g));
     }
   }catch(e){ console.error('Error subiendo gasto/préstamo a la nube', e); }
 }
 
-async function deleteGastoPrestamoDocs(ids){
-  const col = fbGpCol();
+async function deleteGastoPrestamoDocs(ids, modo){
+  const col = fbGpCol(modo);
   if(!col || !ids || !ids.length) return;
   try{
     const fs = firebase.firestore();
@@ -1392,10 +1422,12 @@ async function deleteGastoPrestamoDocs(ids){
 }
 
 // Sube los gastos/préstamos locales que no tengan documento (historia vieja).
-async function backfillGastosPrestamos(){
-  const col = fbGpCol();
+async function backfillGastosPrestamos(modo){
+  const col = fbGpCol(modo);
   if(!col) return;
-  const arr = (db.gastosPrestamos || []).filter(g => g && g.id && g.modo !== 'ninguno');
+  // En el invitado se sube todo (incluidos los "sin color", para que los
+  // dispositivos invitados compartan); en el dueño solo los de su dominio.
+  const arr = (db.gastosPrestamos || []).filter(g => g && g.id && (modo === 'invitado' || g.modo === 'manual' || g.modo === 'electrico'));
   if(!arr.length) return;
   try{
     const snap = await col.get();
@@ -1410,9 +1442,12 @@ async function backfillGastosPrestamos(){
   }catch(e){ console.error('Error respaldando gastos/préstamos en la nube', e); }
 }
 
-function startGastosPrestamosListener(){
-  const col = fbGpCol();
+function startGastosPrestamosListener(modo){
+  const col = fbGpCol(modo);
   if(!col) return;
+  // En el dominio del invitado también se aceptan los "sin color" (los
+  // dispositivos invitados los comparten); en el dueño no deberían existir.
+  const acceptNeutral = (modo === 'invitado');
   if(fbGpUnsub){ try{ fbGpUnsub(); }catch(e){ /* ignorar */ } }
   let timer = null, changed = false;
   const flush = () => {
@@ -1437,7 +1472,7 @@ function startGastosPrestamosListener(){
       if(g){
         Object.assign(g, data);
         changed = true;
-      }else if(data.modo && data.modo !== 'ninguno'){
+      }else if(data.modo && (acceptNeutral || data.modo !== 'ninguno')){
         db.gastosPrestamos = db.gastosPrestamos || [];
         db.gastosPrestamos.push(data);
         changed = true;
@@ -2202,7 +2237,7 @@ function saveVenta(data){
   }
 
   saveDB();
-  syncVentaDoc(venta); // cada venta es su propio documento en la nube (al instante en todos)
+  syncVentaDoc(venta, currentModo); // sube a la colección del dominio actual
   return venta;
 }
 
@@ -2230,7 +2265,7 @@ function guestCommitVenta(venta, data, cantidad){
   db.finanzas = db.finanzas || {};
   db.finanzas.caja = (Number(db.finanzas.caja) || 0) + (venta.total || 0);
   saveDB();
-  syncVentaDoc(venta); // la venta del invitado también sube a la colección compartida
+  syncVentaDoc(venta, 'invitado'); // la venta del invitado vive en su propio dominio
   renderVentas();
   renderProductos();
 }
@@ -2268,7 +2303,7 @@ function deleteVenta(id, mantenerInventario){
   }
   db.ventas = db.ventas.filter(v => v.id !== id);
   marcarBorrado('ventas', id); // el borrado viaja a los otros dispositivos
-  deleteVentaDocs([id]); // borra también el documento de la venta en la nube
+  deleteVentaDocs([id], currentModo); // borra también el documento de la venta en la nube
   db.finanzas = db.finanzas || {};
   db.finanzas.caja = (Number(db.finanzas.caja) || 0) - (venta.total || 0);
   saveDB();
@@ -2315,7 +2350,7 @@ function vaciarVentasConStock(restaurarStock){
   const ventasIds = (db.ventas || []).map(v => v.id);
   ventasIds.forEach(id => marcarBorrado('ventas', id));
   db.ventas = [];
-  deleteVentaDocs(ventasIds);
+  deleteVentaDocs(ventasIds, currentModo);
   saveDB();
   renderVentas();
   renderInventario();
@@ -3238,7 +3273,7 @@ function setCambioBase(v, fechaKey){
     if(!db.ajustes[fecha]) db.ajustes[fecha] = {};
     db.ajustes[fecha].cambio = val;
     saveDB();
-    syncAjusteDay(fecha); // el ajuste viaja a todos los dispositivos
+    syncAjusteDay(fecha, currentModo); // el ajuste viaja a los dispositivos del mismo dominio
   }
 }
 
@@ -3266,7 +3301,7 @@ function setCambioForModo(v, fechaKey, modo){
       if(!db.ajustes[fecha]) db.ajustes[fecha] = {};
       db.ajustes[fecha][cambioModoField(modo)] = val;
       saveDB();
-      syncAjusteDay(fecha); // el ajuste viaja a todos los dispositivos
+      syncAjusteDay(fecha, currentModo); // el ajuste viaja a los dispositivos del mismo dominio
     }
     return;
   }
@@ -3302,7 +3337,7 @@ function setDineroReal(v, fechaKey){
     if(!db.ajustes[fecha]) db.ajustes[fecha] = {};
     db.ajustes[fecha].dineroReal = val;
     saveDB();
-    syncAjusteDay(fecha); // el ajuste viaja a todos los dispositivos
+    syncAjusteDay(fecha, currentModo); // el ajuste viaja a los dispositivos del mismo dominio
   }
 }
 function clearDineroReal(fechaKey){
@@ -3311,7 +3346,7 @@ function clearDineroReal(fechaKey){
   if(db.ajustes && db.ajustes[fecha]){
     delete db.ajustes[fecha].dineroReal;
     saveDB();
-    syncAjusteDay(fecha); // el ajuste viaja a todos los dispositivos
+    syncAjusteDay(fecha, currentModo); // el ajuste viaja a los dispositivos del mismo dominio
   }
 }
 // "Ajuste de cuentas": resume el dinero de las ventas que se están mostrando
@@ -3568,9 +3603,11 @@ function toggleGastoPrestamoAjustar(id){
 }
 
 function deleteGastoPrestamo(id){
+  const g = (db.gastosPrestamos || []).find(x => x.id === id);
   db.gastosPrestamos = (db.gastosPrestamos || []).filter(x => x.id !== id);
   marcarBorrado('gastosPrestamos', id); // el borrado viaja a los otros dispositivos
-  deleteGastoPrestamoDocs([id]); // borra también el documento en la nube
+  const home = gpHome(g);
+  if(home) deleteGastoPrestamoDocs([id], home); // borra también el documento en la nube
   saveGastosPrestamos();
   renderVentas();
   refreshModoDetalleIfOpen();
@@ -4012,7 +4049,7 @@ function purgeVentasAntiguas(){
   const antes = db.ventas.length;
   const borradasAntiguas = db.ventas.filter(v => ventaFechaKey(v.fecha) < corteKey);
   borradasAntiguas.forEach(v => marcarBorrado('ventas', v.id));
-  deleteVentaDocs(borradasAntiguas.map(v => v.id));
+  deleteVentaDocs(borradasAntiguas.map(v => v.id), currentModo);
   db.ventas = db.ventas.filter(v => ventaFechaKey(v.fecha) >= corteKey);
   const borradas = antes - db.ventas.length;
   saveDB();
@@ -7294,7 +7331,7 @@ function importVentasCSV(file){
       }
       db.ventas.sort((a,b)=> new Date(b.fecha) - new Date(a.fecha));
       saveDB();
-      syncVentaDocs(db.ventas); // sube las importadas a la colección compartida
+      syncVentaDocs(db.ventas, currentModo); // sube las importadas a la colección compartida
       renderVentas();
       toast(`Ventas importadas: ${importadas} (no se modificó el stock)`, 'success');
     }catch(err){
@@ -8252,7 +8289,7 @@ function importBackup(file){
         });
         saveDB();
         syncProductoDocs(db.productos, currentModo); // los productos restaurados también van a la nube
-        backfillVentas(); // las ventas restauradas también suben a la colección compartida
+        backfillVentas(currentModo); // las ventas restauradas también suben a la colección compartida
         // Restaura el orden local de inventario ("últimos registrados en este
         // dispositivo") si el backup lo trae.
         if(parsed.invUpdates && typeof parsed.invUpdates === 'object'){
@@ -8283,7 +8320,7 @@ function importBackup(file){
 function factoryReset(){
   confirmDialog('Borrar todos los datos', 'Esto eliminará permanentemente todos los productos y categorías guardados en este dispositivo. ¿Estás seguro?', ()=>{
     const ventasIds = (db.ventas || []).map(v => v.id);
-    deleteVentaDocs(ventasIds); // las ventas borradas también desaparecen de la nube
+    deleteVentaDocs(ventasIds, currentModo); // las ventas borradas también desaparecen de la nube
     db = defaultDB();
     invUpdates = {};
     saveInvUpdates();

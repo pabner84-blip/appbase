@@ -305,7 +305,7 @@ function saveDB(){
     try{
       if(!firebase.apps || !firebase.apps.length){ firebase.initializeApp(firebaseConfig); }
       const ref = fbDocRef || firebase.firestore().collection('stockferre').doc(firebaseDocId());
-      const { historialEscaneos, historialBusquedas, historialInventario, ...syncData } = db;
+      const { historialEscaneos, historialBusquedas, historialInventario, ventas, ...syncData } = db;
       scheduleFirestoreWrite(firebaseDocId(), ref, syncData);
     }catch(err){
       console.error('Error guardando en Firebase', err);
@@ -372,7 +372,7 @@ function persistModoDB(modo, dbObj){
     try{
       if(!firebase.apps || !firebase.apps.length){ firebase.initializeApp(firebaseConfig); }
       const ref = firebase.firestore().collection('stockferre').doc('inventario_' + modo);
-      const { historialEscaneos, historialBusquedas, historialInventario, ...syncData } = dbObj;
+      const { historialEscaneos, historialBusquedas, historialInventario, ventas, ...syncData } = dbObj;
       scheduleFirestoreWrite('inventario_' + modo, ref, syncData);
     }catch(err){
       console.error('Error guardando en Firebase', err);
@@ -485,7 +485,12 @@ function mergeRemoteIntoLocal(local, remote){
     (local.categorias||[]).concat(remote.categorias||[])
       .map(c => String(c||'').trim()).filter(Boolean)
   ));
-  merged.ventas = mergeById(local.ventas, remote.ventas);
+  // Las ventas ya NO viajan en el documento grande: cada venta es su PROPIO
+  // documento en la colección compartida "ventas v1" (mismo modelo que el
+  // stock, un documento por producto). Aquí se conserva la copia local y la
+  // colección la actualiza por separado; así un dispositivo viejo no puede
+  // "resucitar" una venta borrada ni dos celulares pisan ventas a la vez.
+  merged.ventas = (local.ventas || []);
   merged.compras = mergeById(local.compras, remote.compras);
   merged.gastos = mergeById(local.gastos, remote.gastos);
   merged.gastosPrestamos = mergeById(local.gastosPrestamos, remote.gastosPrestamos);
@@ -523,6 +528,7 @@ let guestUnsubs = [];
 function disconnectGuestFirebase(){
   guestUnsubs.forEach(u => { try{ u(); }catch(e){ /* ignorar */ } });
   guestUnsubs = [];
+  stopVentasListeners();
   Object.keys(fbWriteQueues).forEach(k => delete fbWriteQueues[k]);
   fbReady = false;
   fbDocRef = null;
@@ -551,8 +557,8 @@ function connectGuestFirebase(){
     // 1) Escucha documentos de Manuales y Eléctricas (solo para catálogo/productos)
     ['manual','electrico'].forEach(modo => {
       const ref = fbFirestore.collection('stockferre').doc('inventario_' + modo);
-      ref.get().then(snap=>{
-        if(snap.exists){
+      withTimeout(ref.get(), 12000).then(snap=>{
+        if(snap && snap.exists){
           const prev = loadModoDB(modo);
           const remote = normalizeDB(snap.data());
           const merged = mergeRemoteIntoLocal(prev, remote);
@@ -584,8 +590,11 @@ function connectGuestFirebase(){
     const ownRef = fbFirestore.collection('stockferre').doc('inventario_invitado');
     fbDocRef = ownRef;
     fbReady = true;
-    ownRef.get().then(snap=>{
-      if(snap.exists){
+    // Con límite de tiempo: si la red está lenta, el estado no se queda para
+    // siempre en "Conectando a Firebase..." (era lo que pasaba en el celular);
+    // entre tanto, el listener de ventas y los de catálogo ya están activos.
+    withTimeout(ownRef.get(), 12000).then(snap=>{
+      if(snap && snap.exists){
         const prevRaw = localStorage.getItem(storageKey());
         const prev = prevRaw ? normalizeDB(JSON.parse(prevRaw)) : defaultDB();
         const remote = normalizeDB(snap.data());
@@ -612,6 +621,13 @@ function connectGuestFirebase(){
       if(currentModo === 'invitado'){ db = buildGuestDB(); rerenderCurrentView(); }
     }, ()=>{ /* ignorar */ });
     guestUnsubs.push(ownUnsub);
+
+    // VENTAS COMPARTIDAS: el invitado comparte la MISMA colección de ventas
+    // con el dueño. Así una venta registrada en el celular (invitado) llega
+    // al instante a la compu, y las de la compu se ven aquí. Primero sube las
+    // ventas locales que no tengan documento y luego escucha la colección.
+    try{ backfillVentas(); }catch(e){ /* no bloquea */ }
+    startVentasListener();
   }catch(err){
     console.error('No se pudo conectar a Firebase en modo invitado', err);
     setSyncStatus('error');
@@ -635,6 +651,7 @@ function disconnectFirebase(){
   if(fbUnsub){ try{ fbUnsub(); }catch(e){ /* ignorar */ } fbUnsub = null; }
   if(fbOtherUnsub){ try{ fbOtherUnsub(); }catch(e){ /* ignorar */ } fbOtherUnsub = null; }
   stopStockListeners();
+  stopVentasListeners();
   Object.keys(fbWriteQueues).forEach(k => delete fbWriteQueues[k]);
   fbReady = false;
   fbDocRef = null;
@@ -801,7 +818,7 @@ async function connectFirebase(){
       applySnapshot(snap);
     }else if(snap && !snap.exists){
       // Primera vez: sube los datos locales como semilla inicial de la nube
-      const { historialEscaneos, historialBusquedas, historialInventario, ...syncData } = db;
+      const { historialEscaneos, historialBusquedas, historialInventario, ventas, ...syncData } = db;
       try{ await withTimeout(fbDocRef.set(syncData), 12000); }catch(e){ /* el SDK reintenta */ }
     }
 
@@ -827,6 +844,10 @@ async function connectFirebase(){
     try{ await withTimeout(backfillProductos(otherModo), 15000); }catch(e){ /* no bloquea */ }
     startStockListener(currentModo);
     startStockListener(otherModo);
+    // VENTAS COMPARTIDAS: sube a la colección las ventas que no tengan
+    // documento aún y empieza a escuchar la de los demás dispositivos.
+    try{ await withTimeout(backfillVentas(), 15000); }catch(e){ /* no bloquea */ }
+    startVentasListener();
   }catch(err){
     console.error('No se pudo conectar a Firebase', err);
     setSyncStatus('error');
@@ -1029,6 +1050,173 @@ async function deleteProductoDoc(p, modo){
   try{
     await col.doc(p.id).delete();
   }catch(e){ console.error('Error borrando producto de la nube', e); }
+}
+
+/* -------------------------------------------------------------------------
+   VENTAS COMPARTIDAS: UNA VENTA = UN DOCUMENTO (MODELO IDÉNTICO AL DEL STOCK)
+   -------------------------------------------------------------------------
+   El problema que arregla esto:
+   Antes, TODAS las ventas vivían dentro del documento grande de cada modo.
+   Eso hacía que:
+     • Una venta hecha en el CELULAR como "Invitado" se guardara en la base
+       AISLADA del invitado y nunca llegara a la compu del dueño.
+     • El celular se quedara en "Conectando a Firebase..." porque el documento
+       del invitado tardaba/hangueaba y el estado no avanzaba.
+   La solución (igual que el stock):
+   • Cada venta es SU PROPIO documento en la colección compartida
+     "stockferre_ventas_v1". Dueño e invitados escriben y leen la MISMA
+     colección.
+   • Al registrar una venta se sube su documento; al borrarla se borra su
+     documento. Ningún dispositivo puede "resucitar" una venta borrada.
+   • Todos escuchan la colección (onSnapshot) y corrigen su lista local al
+     instante con lo que hay en la nube, igual que con el stock.
+   ------------------------------------------------------------------------- */
+const FB_VENTAS_COL = 'stockferre_ventas_v1';
+
+function fbVentasCol(){
+  const fs = fbFirestoreOrNull();
+  return fs ? fs.collection(FB_VENTAS_COL) : null;
+}
+
+function ventaDocData(v){
+  return {
+    id: v.id,
+    codigo: v.codigo || '',
+    nombre: v.nombre || '',
+    cantidad: Number(v.cantidad) || 0,
+    precioUnitario: Number(v.precioUnitario) || 0,
+    total: Number(v.total) || 0,
+    metodoPago: v.metodoPago || '',
+    qrPersona: v.qrPersona || '',
+    efectivoMonto: Number(v.efectivoMonto) || 0,
+    qrMonto: Number(v.qrMonto) || 0,
+    fecha: v.fecha || todayISO(),
+    modoOrigin: v.modoOrigin || '',
+    _ts: Date.now()
+  };
+}
+
+// Sube (crea o actualiza) el documento de UNA venta. Si no hay conexión, la
+// persistencia offline lo reenvía solo cuando vuelva la red (como el stock).
+async function syncVentaDoc(v){
+  const col = fbVentasCol();
+  if(!col || !v || !v.id) return;
+  try{
+    await col.doc(String(v.id)).set(ventaDocData(v));
+  }catch(e){ console.error('Error subiendo venta a la nube', e); }
+}
+
+async function syncVentaDocs(list){
+  const col = fbVentasCol();
+  if(!col || !list || !list.length) return;
+  try{
+    const fs = firebase.firestore();
+    for(let i = 0; i < list.length; i += 450){
+      const batch = fs.batch();
+      list.slice(i, i + 450).forEach(v => {
+        if(v && v.id) batch.set(col.doc(String(v.id)), ventaDocData(v));
+      });
+      await batch.commit();
+    }
+  }catch(e){ console.error('Error subiendo ventas a la nube', e); }
+}
+
+async function deleteVentaDocs(ids){
+  const col = fbVentasCol();
+  if(!col || !ids || !ids.length) return;
+  try{
+    const fs = firebase.firestore();
+    for(let i = 0; i < ids.length; i += 450){
+      const batch = fs.batch();
+      ids.slice(i, i + 450).forEach(id => {
+        if(id) batch.delete(col.doc(String(id)));
+      });
+      await batch.commit();
+    }
+  }catch(e){ console.error('Error borrando ventas de la nube', e); }
+}
+
+// Sube a la colección las ventas locales que todavía no tienen documento en
+// la nube (por ejemplo, todo el historial que ya existía antes de este
+// arreglo). Es idempotente: solo crea las que faltan.
+async function backfillVentas(){
+  const col = fbVentasCol();
+  if(!col) return;
+  const arr = (db.ventas || []);
+  if(!arr.length) return;
+  try{
+    const snap = await col.get();
+    const existing = new Set(snap.docs.map(d => d.id));
+    const missing = arr.filter(v => v && v.id && !existing.has(String(v.id)));
+    if(missing.length) await syncVentaDocs(missing);
+  }catch(e){ console.error('Error respaldando ventas en la nube', e); }
+}
+
+// Escucha la colección compartida y corrige la lista local de ventas con lo
+// que hay en la nube: las ventas de OTROS dispositivos (incluido el invitado)
+// aparecen al instante, y las que se borraron en otro lado desaparecen.
+const ventasStoreCache = {}; // copia de la lista mientras se actualiza
+let fbVentasUnsub = null;
+
+function startVentasListener(){
+  const col = fbVentasCol();
+  if(!col) return;
+  if(fbVentasUnsub){ try{ fbVentasUnsub(); }catch(e){ /* ignorar */ } }
+  ventasStoreCache.list = null;
+  let timer = null, changed = false;
+
+  const flush = () => {
+    if(!changed) return;
+    changed = false;
+    const store = ventasStoreCache.list;
+    ventasStoreCache.list = null;
+    if(!store) return;
+    try{
+      // Ordena de la más nueva a la más vieja para que la lista se vea igual
+      // tras recibir ventas de otros dispositivos (las nuevas van arriba).
+      db.ventas = store.sort((a,b)=> String(b.fecha || '').localeCompare(String(a.fecha || '')));
+      persistLocalCache();
+    }catch(e){ console.error('Error guardando ventas local', e); }
+    rerenderCurrentView();
+  };
+
+  fbVentasUnsub = col.onSnapshot(snap => {
+    snap.docChanges().forEach(ch => {
+      if(ch.doc.metadata.hasPendingWrites) return; // espera a que la nube confirme lo propio
+      if(ch.type === 'removed'){
+        // Alguien borró la venta: desaparece también aquí (y no vuelve más).
+        if(ventasStoreCache.list === null){
+          try{ ventasStoreCache.list = (db.ventas || []).slice(); }catch(e){ return; }
+        }
+        const i = ventasStoreCache.list.findIndex(v => v && String(v.id) === String(ch.doc.id));
+        if(i !== -1){ ventasStoreCache.list.splice(i, 1); changed = true; }
+        return;
+      }
+      const data = ch.doc.data();
+      if(!data || !data.id) return;
+      if(ventasStoreCache.list === null){
+        try{ ventasStoreCache.list = (db.ventas || []).slice(); }catch(e){ return; }
+      }
+      const i = ventasStoreCache.list.findIndex(v => v && String(v.id) === String(data.id));
+      if(i !== -1){
+        ventasStoreCache.list[i] = Object.assign({}, ventasStoreCache.list[i], data);
+      }else{
+        ventasStoreCache.list.push(data);
+      }
+      changed = true;
+    });
+    if(changed){
+      if(timer) clearTimeout(timer);
+      timer = setTimeout(()=>{ timer = null; flush(); }, 60);
+    }
+  }, err => {
+    console.error('Error escuchando las ventas compartidas', err);
+  });
+}
+
+function stopVentasListeners(){
+  if(fbVentasUnsub){ try{ fbVentasUnsub(); }catch(e){ /* ignorar */ } fbVentasUnsub = null; }
+  ventasStoreCache.list = null;
 }
 
 // Crea los documentos de los productos locales que todavía no tienen uno en
@@ -1777,6 +1965,7 @@ function saveVenta(data){
   }
 
   saveDB();
+  syncVentaDoc(venta); // cada venta es su propio documento en la nube (al instante en todos)
   return venta;
 }
 
@@ -1804,6 +1993,7 @@ function guestCommitVenta(venta, data, cantidad){
   db.finanzas = db.finanzas || {};
   db.finanzas.caja = (Number(db.finanzas.caja) || 0) + (venta.total || 0);
   saveDB();
+  syncVentaDoc(venta); // la venta del invitado también sube a la colección compartida
   renderVentas();
   renderProductos();
 }
@@ -1841,6 +2031,7 @@ function deleteVenta(id, mantenerInventario){
   }
   db.ventas = db.ventas.filter(v => v.id !== id);
   marcarBorrado('ventas', id); // el borrado viaja a los otros dispositivos
+  deleteVentaDocs([id]); // borra también el documento de la venta en la nube
   db.finanzas = db.finanzas || {};
   db.finanzas.caja = (Number(db.finanzas.caja) || 0) - (venta.total || 0);
   saveDB();
@@ -1884,8 +2075,10 @@ function vaciarVentasConStock(restaurarStock){
       }
     });
   }
-  (db.ventas || []).forEach(v => marcarBorrado('ventas', v.id));
+  const ventasIds = (db.ventas || []).map(v => v.id);
+  ventasIds.forEach(id => marcarBorrado('ventas', id));
   db.ventas = [];
+  deleteVentaDocs(ventasIds);
   saveDB();
   renderVentas();
   renderInventario();
@@ -3569,7 +3762,9 @@ function purgeVentasAntiguas(){
   corte.setDate(corte.getDate() - 90);
   const corteKey = localDateKey(corte);
   const antes = db.ventas.length;
-  db.ventas.filter(v => ventaFechaKey(v.fecha) < corteKey).forEach(v => marcarBorrado('ventas', v.id));
+  const borradasAntiguas = db.ventas.filter(v => ventaFechaKey(v.fecha) < corteKey);
+  borradasAntiguas.forEach(v => marcarBorrado('ventas', v.id));
+  deleteVentaDocs(borradasAntiguas.map(v => v.id));
   db.ventas = db.ventas.filter(v => ventaFechaKey(v.fecha) >= corteKey);
   const borradas = antes - db.ventas.length;
   saveDB();
@@ -6851,6 +7046,7 @@ function importVentasCSV(file){
       }
       db.ventas.sort((a,b)=> new Date(b.fecha) - new Date(a.fecha));
       saveDB();
+      syncVentaDocs(db.ventas); // sube las importadas a la colección compartida
       renderVentas();
       toast(`Ventas importadas: ${importadas} (no se modificó el stock)`, 'success');
     }catch(err){
@@ -7808,6 +8004,7 @@ function importBackup(file){
         });
         saveDB();
         syncProductoDocs(db.productos, currentModo); // los productos restaurados también van a la nube
+        backfillVentas(); // las ventas restauradas también suben a la colección compartida
         // Restaura el orden local de inventario ("últimos registrados en este
         // dispositivo") si el backup lo trae.
         if(parsed.invUpdates && typeof parsed.invUpdates === 'object'){
@@ -7837,6 +8034,8 @@ function importBackup(file){
 
 function factoryReset(){
   confirmDialog('Borrar todos los datos', 'Esto eliminará permanentemente todos los productos y categorías guardados en este dispositivo. ¿Estás seguro?', ()=>{
+    const ventasIds = (db.ventas || []).map(v => v.id);
+    deleteVentaDocs(ventasIds); // las ventas borradas también desaparecen de la nube
     db = defaultDB();
     invUpdates = {};
     saveInvUpdates();

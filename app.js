@@ -142,7 +142,8 @@ function defaultDB(){
     gastos: [],
     gastosPrestamos: [],
     finanzas: { caja: 0, retiros: [], deudas: [] },
-    ajustes: {}
+    ajustes: {},
+    tombstones: {}
   };
 }
 
@@ -165,6 +166,7 @@ function normalizeDB(obj){
   obj.finanzas.retiros = obj.finanzas.retiros || [];
   obj.finanzas.deudas = obj.finanzas.deudas || [];
   obj.ajustes = obj.ajustes || {};
+  obj.tombstones = obj.tombstones || {};
   obj.productos.forEach(p=>{
     p.codigoBarras = p.codigoBarras || '';
     p.stock = typeof p.stock === 'number' ? p.stock : 0;
@@ -420,6 +422,56 @@ function mergeById(localArr, remoteArr, timestampField){
   return Array.from(map.values());
 }
 
+/* -------------------------------------------------------------------------
+   BORRADOS SINCRONIZADOS ("tumbas")
+   Cuando un dispositivo borra algo (una venta, un producto, etc.) ESE borrado
+   tiene que llegar a los demás. Con la sincronización por documento completo,
+   si la PC todavía tenía la venta, su próxima escritura la volvía a subir, y
+   el celular que la había borrado la volvía a ver aparecer. Para evitarlo,
+   cada borrado se anota en db.tombstones y, al fusionar, las tumbas de AMBOS
+   lados eliminan esos registros donde sea que estén (mientras exista la tumba
+   no vuelven más). Las tumbas se limpian solas después de 90 días.
+   ------------------------------------------------------------------------- */
+function marcarBorrado(tipo, id){
+  if(!id || id === null || id === undefined) return;
+  try{
+    db.tombstones = db.tombstones || {};
+    db.tombstones[tipo] = db.tombstones[tipo] || {};
+    db.tombstones[tipo][String(id)] = Date.now();
+    podarTombstones();
+  }catch(e){ /* ignorar */ }
+}
+
+function podarTombstones(){
+  try{
+    const tope = Date.now() - 90 * 24 * 3600 * 1000;
+    const ts = db.tombstones || {};
+    Object.keys(ts).forEach(tipo => {
+      const m = ts[tipo] || {};
+      Object.keys(m).forEach(id => {
+        if(m[id] < tope) delete m[id];
+      });
+    });
+  }catch(e){ /* ignorar */ }
+}
+
+function unionTombstones(a, b){
+  const out = {};
+  a = a || {};
+  b = b || {};
+  Object.keys(a).forEach(id => { out[id] = a[id]; });
+  Object.keys(b).forEach(id => {
+    if(!out[id]) out[id] = b[id];
+    else out[id] = Math.max(out[id], b[id]);
+  });
+  return out;
+}
+
+function applyTombstones(list, map){
+  if(!map) return list;
+  return (list || []).filter(item => item && !map[item.id]);
+}
+
 // Fusiona la base LOCAL (lo que tenemos en memoria/LocalStorage, que puede
 // incluir cambios recién hechos aquí) con una copia REMOTA que acaba de
 // llegar de Firebase. Devuelve una base combinada que no pierde datos de
@@ -453,6 +505,17 @@ function mergeRemoteIntoLocal(local, remote){
     (local.ajustes || {}),
     (remote.ajustes || {})
   );
+  // Los borrados viajan y se aplican en AMBOS lados: si alguien borró una
+  // venta/producto/etc. en cualquier dispositivo, desaparece también aquí y
+  // no vuelve a "resucitar" en la próxima escritura del otro dispositivo.
+  merged.tombstones = unionTombstones(local.tombstones, remote.tombstones);
+  merged.productos = applyTombstones(merged.productos, merged.tombstones.productos);
+  merged.ventas = applyTombstones(merged.ventas, merged.tombstones.ventas);
+  merged.compras = applyTombstones(merged.compras, merged.tombstones.compras);
+  merged.gastos = applyTombstones(merged.gastos, merged.tombstones.gastos);
+  merged.gastosPrestamos = applyTombstones(merged.gastosPrestamos, merged.tombstones.gastosPrestamos);
+  merged.finanzas.retiros = applyTombstones(merged.finanzas.retiros, merged.tombstones.retiros);
+  merged.finanzas.deudas = applyTombstones(merged.finanzas.deudas, merged.tombstones.deudas);
   return normalizeDB(merged);
 }
 
@@ -1653,6 +1716,7 @@ function deleteProducto(id){
   confirmDialog('Eliminar producto', '¿Seguro que quieres eliminar este producto? Esta acción no se puede deshacer.', ()=>{
     const p = getProductoById(id);
     db.productos = db.productos.filter(x => x.id !== id);
+    marcarBorrado('productos', id); // el borrado viaja a los otros dispositivos
     saveDB();
     removeImageLocal(id); // también quita su imagen local
     if(p) deleteProductoDoc(p); // también lo quita de la nube
@@ -1776,6 +1840,7 @@ function deleteVenta(id, mantenerInventario){
     }
   }
   db.ventas = db.ventas.filter(v => v.id !== id);
+  marcarBorrado('ventas', id); // el borrado viaja a los otros dispositivos
   db.finanzas = db.finanzas || {};
   db.finanzas.caja = (Number(db.finanzas.caja) || 0) - (venta.total || 0);
   saveDB();
@@ -1819,6 +1884,7 @@ function vaciarVentasConStock(restaurarStock){
       }
     });
   }
+  (db.ventas || []).forEach(v => marcarBorrado('ventas', v.id));
   db.ventas = [];
   saveDB();
   renderVentas();
@@ -3064,6 +3130,7 @@ function toggleGastoPrestamoAjustar(id){
 
 function deleteGastoPrestamo(id){
   db.gastosPrestamos = (db.gastosPrestamos || []).filter(x => x.id !== id);
+  marcarBorrado('gastosPrestamos', id); // el borrado viaja a los otros dispositivos
   saveGastosPrestamos();
   renderVentas();
   refreshModoDetalleIfOpen();
@@ -3502,6 +3569,7 @@ function purgeVentasAntiguas(){
   corte.setDate(corte.getDate() - 90);
   const corteKey = localDateKey(corte);
   const antes = db.ventas.length;
+  db.ventas.filter(v => ventaFechaKey(v.fecha) < corteKey).forEach(v => marcarBorrado('ventas', v.id));
   db.ventas = db.ventas.filter(v => ventaFechaKey(v.fecha) >= corteKey);
   const borradas = antes - db.ventas.length;
   saveDB();
@@ -4084,6 +4152,7 @@ function deleteCompra(id, mantenerInventario){
     }
   }
   db.compras = db.compras.filter(c => c.id !== id);
+  marcarBorrado('compras', id); // el borrado viaja a los otros dispositivos
   saveDB();
   renderCompras();
   renderInventario();
@@ -4447,6 +4516,7 @@ function deleteRetiro(id){
     if(!r) return;
     db.finanzas.caja = (Number(db.finanzas.caja) || 0) + r.monto;
     db.finanzas.retiros = db.finanzas.retiros.filter(x => x.id !== id);
+    marcarBorrado('retiros', id); // el borrado viaja a los otros dispositivos
     saveDB();
     renderRetiros();
     renderDeudas();
@@ -4674,6 +4744,7 @@ function handleDeudaSubmit(e){
 function deleteDeuda(id){
   confirmDialog('Eliminar deuda', '¿Eliminar esta deuda?', ()=>{
     db.finanzas.deudas = db.finanzas.deudas.filter(x => x.id !== id);
+    marcarBorrado('deudas', id); // el borrado viaja a los otros dispositivos
     saveDB();
     renderDeudas();
     toast('Deuda eliminada', 'success');
@@ -4834,6 +4905,7 @@ function handleGastoSubmit(e){
 function deleteGasto(id){
   confirmDialog('Eliminar gasto', '¿Eliminar este gasto?', ()=>{
     db.gastos = (db.gastos || []).filter(x => x.id !== id);
+    marcarBorrado('gastos', id); // el borrado viaja a los otros dispositivos
     saveDB();
     renderGastos();
     toast('Gasto eliminado', 'success');

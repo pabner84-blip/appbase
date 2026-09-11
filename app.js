@@ -2497,6 +2497,9 @@ function updateVenta(id, oldModo, data){
   if(currentModo === 'invitado') v.modoOrigin = newModo;
 
   saveDB();
+  // La venta editada también debe actualizarse en su colección de Firestore
+  // para que los demás dispositivos del mismo dominio vean los cambios.
+  syncVentaDoc(v, oldModo === 'invitado' || currentModo === 'invitado' ? 'invitado' : (currentModo || oldModo));
   renderVentas();
   renderInventario();
   renderProductos();

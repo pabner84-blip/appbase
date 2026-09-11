@@ -127,7 +127,7 @@
         <div class="inicio-modos">
           <button class="inicio-modo-btn inicio-modo-manual" id="btnModoManual">🛠️ Herramientas Manuales</button>
           <button class="inicio-modo-btn inicio-modo-electrico" id="btnModoElectrico">⚡ Herramientas Eléctricas</button>
-          <button class="inicio-modo-btn inicio-modo-invitado" id="btnModoInvitado">👤 INGRESAR</button>
+          <button class="inicio-modo-btn inicio-modo-invitado" id="btnModoInvitado">🛠️ HERRAMIENTAS MANUALES Y ELÉCTRICAS</button>
         </div>
       </div>
       <div class="inicio-footer">Creado por Abner Pérez</div>
@@ -217,9 +217,9 @@
       <div class="toolbar">
         <button class="btn btn-primary" id="btnNuevaVenta">➕ Nueva venta</button>
         <input type="text" id="ventaSearch" class="input" placeholder="🔍 Buscar por código o nombre..." style="flex:1; min-width:180px;">
-        <button class="btn btn-secondary" id="btnExportVentas">📤 Exportar CSV</button>
+        <button class="btn btn-secondary" id="btnExportVentas">📤 Exportar Excel</button>
         <button class="btn btn-secondary" id="btnExportVentasPDF">📄 Exportar PDF</button>
-        <button class="btn btn-secondary admin-only" id="btnImportVentas">📥 Importar CSV</button>
+        <button class="btn btn-secondary admin-only" id="btnImportVentas">📥 Importar Excel</button>
         <button class="btn btn-secondary admin-only" id="btnPurgeVentas">🧹 Borrar antiguas</button>
         <button class="btn btn-danger admin-only" id="btnVaciarVentas">🧹 Vaciar historial</button>
       </div>
@@ -312,8 +312,8 @@
       <div class="toolbar">
         <button class="btn btn-primary" id="btnNuevaCompra">➕ Nuevo ingreso</button>
         <button class="btn btn-secondary" id="btnFacturaOCR">📷 Subir factura</button>
-        <button class="btn btn-secondary" id="btnExportCompras">📤 Exportar CSV</button>
-        <button class="btn btn-secondary" id="btnImportCompras">📥 Importar CSV</button>
+        <button class="btn btn-secondary" id="btnExportCompras">📤 Exportar Excel</button>
+        <button class="btn btn-secondary" id="btnImportCompras">📥 Importar Excel</button>
         <button class="btn btn-secondary" id="btnPurgeCompras">🧹 Borrar antiguas</button>
         <button class="btn btn-danger" id="btnVaciarCompras">🧹 Vaciar historial</button>
       </div>
@@ -371,7 +371,7 @@
           </div>
           <div style="margin-top:14px;">
             <button class="btn btn-secondary" id="btnEditarCaja">✏️ Editar efectivo</button>
-            <button class="btn btn-secondary" id="btnExportFinanzas">📤 Exportar CSV</button>
+            <button class="btn btn-secondary" id="btnExportFinanzas">📤 Exportar Excel</button>
           </div>
         </div>
       </div>
@@ -381,7 +381,7 @@
     <section class="view" id="view-retiros">
       <div class="toolbar">
         <button class="btn btn-danger" id="btnNuevoRetiro">➖ Nuevo pago</button>
-        <button class="btn btn-secondary" id="btnExportRetiros">📤 Exportar CSV</button>
+        <button class="btn btn-secondary" id="btnExportRetiros">📤 Exportar Excel</button>
       </div>
       <div class="mes-filtro">
         <label for="retirosMes">Mes:</label>
@@ -406,7 +406,7 @@
     <section class="view" id="view-deudas">
       <div class="toolbar">
         <button class="btn btn-primary" id="btnNuevaDeuda">➕ Nueva deuda</button>
-        <button class="btn btn-secondary" id="btnExportDeudas">📤 Exportar CSV</button>
+        <button class="btn btn-secondary" id="btnExportDeudas">📤 Exportar Excel</button>
       </div>
       <div class="mes-filtro">
         <label for="deudasMes">Mes:</label>
@@ -456,8 +456,8 @@
             <option value="">Todo el año</option>
           </select>
         </div>
-        <button class="btn btn-secondary" id="btnExportTopVentas">📤 Exportar CSV</button>
-        <button class="btn btn-secondary" id="btnImportTopVentas">📥 Importar CSV</button>
+        <button class="btn btn-secondary" id="btnExportTopVentas">📤 Exportar Excel</button>
+        <button class="btn btn-secondary" id="btnImportTopVentas">📥 Importar Excel</button>
       </div>
       <p class="hint" id="topVentasSummary" style="margin-bottom:12px;">0 productos</p>
       <div class="table-wrap">
@@ -470,7 +470,7 @@
           <tbody></tbody>
         </table>
       </div>
-      <p class="hint" style="margin-top:10px;">⭐ Los 20 primeros son los más vendidos. El stock mínimo se edita escribiendo el número en su casilla. "Importar CSV" solo actualiza el stock mínimo (columna STOCK_MINIMO).</p>
+      <p class="hint" style="margin-top:10px;">⭐ Los 20 primeros son los más vendidos. El stock mínimo se edita escribiendo el número en su casilla. "Importar Excel" solo actualiza el stock mínimo (columna STOCK_MINIMO).</p>
     </section>
 
     <!-- ---------- PEDIDOS / REPOSICIÓN (solo dueño) ---------- -->
@@ -479,8 +479,8 @@
         <select id="pedidoMarcaFilter" class="input" title="Filtrar por marca">
           <option value="">Todas las marcas</option>
         </select>
-        <button class="btn btn-secondary" id="btnExportPedidos">📤 Exportar CSV</button>
-        <button class="btn btn-secondary" id="btnImportPedidos">📥 Importar CSV</button>
+        <button class="btn btn-secondary" id="btnExportPedidos">📤 Exportar Excel</button>
+        <button class="btn btn-secondary" id="btnImportPedidos">📥 Importar Excel</button>
       </div>
       <p class="hint" id="pedidoSummary" style="margin-bottom:12px;">0 productos · 0 unidades · Bs 0.00</p>
       <div class="table-wrap">
@@ -493,7 +493,7 @@
           <tbody></tbody>
         </table>
       </div>
-      <p class="hint" style="margin-top:10px;">Ordenados de menor a mayor stock (primero los agotados, después stock 1, 2, etc. hasta el último). La cantidad a pedir viene prellenada con lo que falta para alcanzar el stock mínimo, y puedes editarla escribiendo el número. "Importar CSV" actualiza stock mínimo (en la base) y cantidades a pedir.</p>
+      <p class="hint" style="margin-top:10px;">Ordenados de menor a mayor stock (primero los agotados, después stock 1, 2, etc. hasta el último). La cantidad a pedir viene prellenada con lo que falta para alcanzar el stock mínimo, y puedes editarla escribiendo el número. "Importar Excel" actualiza stock mínimo (en la base) y cantidades a pedir.</p>
     </section>
 
     <!-- ---------- INVENTARIO ---------- -->
@@ -501,8 +501,8 @@
       <div class="toolbar">
         <input type="text" id="invSearch" class="input" placeholder="🔍 Buscar por nombre o código...">
         <button class="btn btn-primary" id="btnRegistroInventario">📋 Registro de cantidad de inventario</button>
-        <button class="btn btn-secondary" id="btnExportInventario">📤 Exportar CSV</button>
-        <button class="btn btn-secondary" id="btnImportInventario">📥 Importar CSV</button>
+        <button class="btn btn-secondary" id="btnExportInventario">📤 Exportar Excel</button>
+        <button class="btn btn-secondary" id="btnImportInventario">📥 Importar Excel</button>
       </div>
       <div class="table-wrap">
         <table class="table" id="inventarioTable">
@@ -1317,11 +1317,11 @@
 
 <!-- Hidden file inputs -->
 <input type="file" id="fileImportProducts" accept=".csv,.xls,.xlsx" hidden>
-<input type="file" id="fileImportInventario" accept=".csv" hidden>
-<input type="file" id="fileImportVentas" accept=".csv" hidden>
-<input type="file" id="fileImportCompras" accept=".csv" hidden>
-<input type="file" id="fileImportTopVentas" accept=".csv" hidden>
-<input type="file" id="fileImportPedidos" accept=".csv" hidden>
+<input type="file" id="fileImportInventario" accept=".csv,.xls,.xlsx" hidden>
+<input type="file" id="fileImportVentas" accept=".csv,.xls,.xlsx" hidden>
+<input type="file" id="fileImportCompras" accept=".csv,.xls,.xlsx" hidden>
+<input type="file" id="fileImportTopVentas" accept=".csv,.xls,.xlsx" hidden>
+<input type="file" id="fileImportPedidos" accept=".csv,.xls,.xlsx" hidden>
 <input type="file" id="fileImportBackup" accept=".json" hidden>
 <input type="file" id="fileImgCamera" accept="image/*" capture="environment" hidden>
 <input type="file" id="fileImgGallery" accept="image/*" hidden>

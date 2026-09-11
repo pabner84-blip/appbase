@@ -2664,6 +2664,7 @@ function scrollToScanResult(elementId){
 }
 
 function renderScanResult(codigo){
+  saveSessionScanResult(codigo);
   renderScanResultInto('scanResult', codigo, 'lookup');
 }
 
@@ -4044,7 +4045,7 @@ function renderVentas(){
 }
 
 // Borra ventas de hace más de 3 meses para que la base no crezca sin límite
-// (se recomienda exportarlas antes con "Exportar CSV").
+// (se recomienda exportarlas antes con "Exportar Excel").
 function purgeVentasAntiguas(){
   const corte = new Date();
   corte.setDate(corte.getDate() - 90);
@@ -4164,10 +4165,11 @@ function exportTopVentasCSV(){
   const rows = productosMasVendidos();
   if(rows.length === 0){ toast('No hay productos para exportar', 'error'); return; }
   const header = ['POSICION','CODIGO','PRODUCTO','VENDIDOS','STOCK','STOCK_MINIMO'];
-  const data = rows.map((r, i) => [i + 1, csvText(r.p.codigo), r.p.nombre, csvNumber(r.vendidos, 0), csvNumber(r.p.stock, 0), csvNumber(r.p.stockMin || 0, 0)]);
+  const types = ['number','text','text','number','number','number'];
+  const data = rows.map((r, i) => [i + 1, r.p.codigo, r.p.nombre, Number(r.vendidos)||0, Number(r.p.stock)||0, Number(r.p.stockMin)||0]);
   const sufijo = topVentasMesFilter ? topVentasMesFilter : 'todo_el_ano';
-  downloadCSV(`stockferre_mas_vendidos_${sufijo}.csv`, header, data);
-  toast('Top de más vendidos exportado', 'success');
+  downloadXLSX(`stockferre_mas_vendidos_${sufijo}.xlsx`, [{ name: 'Más vendidos', header, rows: data, types }]);
+  toast('Top de más vendidos exportado a Excel', 'success');
 }
 
 // Historial de ventas de un producto específico (del modo actual + invitado).
@@ -4210,22 +4212,16 @@ function openHistorialVentaProducto(codigo){
   openModal('modalHistorialVentaProducto');
 }
 
-// Importa solo la columna STOCK_MINIMO (por CODIGO) de un CSV exportado,
-// y actualiza el stock mínimo de cada producto.
+// Importa solo la columna STOCK_MINIMO (por CODIGO) de un archivo Excel/CSV
+// exportado, y actualiza el stock mínimo de cada producto.
 function importTopVentasCSV(file){
-  const reader = new FileReader();
-  reader.onload = (e)=>{
+  readTableFile(file, (rows)=>{
     try{
-      const rows = parseCSV(e.target.result);
-      if(rows.length < 2){
-        toast('El archivo CSV no tiene datos', 'error');
-        return;
-      }
       const headers = rows[0].map(normalizeHeader);
       const idxCodigo = headers.indexOf('CODIGO');
       const idxMin = headers.findIndex(h => h.includes('STOCK_MINIMO') || h.includes('STOCK MINIMO') || h.includes('STOCK MIN'));
       if(idxCodigo === -1 || idxMin === -1){
-        toast('El CSV debe tener columnas CODIGO y STOCK_MINIMO', 'error');
+        toast('El archivo debe tener columnas CODIGO y STOCK_MINIMO', 'error');
         return;
       }
       let aplicados = 0;
@@ -4245,11 +4241,9 @@ function importTopVentasCSV(file){
       toast(`Stock mínimo actualizado para ${aplicados} producto(s)`, 'success');
     }catch(err){
       console.error(err);
-      toast('No se pudo leer el archivo CSV. Verifica el formato.', 'error');
+      toast('No se pudo leer el archivo Excel/CSV. Verifica el formato.', 'error');
     }
-  };
-  reader.onerror = ()=> toast('Error al leer el archivo', 'error');
-  reader.readAsText(file, 'UTF-8');
+  });
 }
 
 /* -------------------------------------------------------------------------
@@ -4340,29 +4334,24 @@ function renderPedidos(){
 function exportPedidosCSV(){
   if(pedidoRows.length === 0){ toast('No hay productos para exportar', 'error'); return; }
   const header = ['POSICION','MARCA','CODIGO','PRODUCTO','STOCK','STOCK_MINIMO','CANTIDAD_PEDIR'];
+  const types = ['number','text','text','text','number','number','number'];
   const data = pedidoRows.map(({ p }, i) => [
-    i + 1, p.marca || '', csvText(p.codigo), p.nombre,
-    csvNumber(p.stock, 0), csvNumber(p.stockMin || 0, 0), csvNumber(pedidoCant(p), 0)
+    i + 1, p.marca || '', p.codigo, p.nombre,
+    Number(p.stock)||0, Number(p.stockMin)||0, Number(pedidoCant(p))||0
   ]);
-  downloadCSV(`stockferre_pedidos_${todayISO().slice(0,10)}.csv`, header, data);
-  toast('Pedido exportado', 'success');
+  downloadXLSX(`stockferre_pedidos_${todayISO().slice(0,10)}.xlsx`, [{ name: 'Pedido', header, rows: data, types }]);
+  toast('Pedido exportado a Excel', 'success');
 }
 
-// Importa un CSV del pedido: actualiza el stock mínimo (en la base) por CODIGO
-// y las cantidades a pedir (en memoria, para esta sesión).
+// Importa un archivo Excel/CSV del pedido: actualiza el stock mínimo (en la base)
+// por CODIGO y las cantidades a pedir (en memoria, para esta sesión).
 function importPedidosCSV(file){
-  const reader = new FileReader();
-  reader.onload = (e)=>{
+  readTableFile(file, (rows)=>{
     try{
-      const rows = parseCSV(e.target.result);
-      if(rows.length < 2){
-        toast('El archivo CSV no tiene datos', 'error');
-        return;
-      }
       const headers = rows[0].map(normalizeHeader);
       const idxCodigo = headers.indexOf('CODIGO');
       if(idxCodigo === -1){
-        toast('El CSV debe tener la columna CODIGO', 'error');
+        toast('El archivo debe tener la columna CODIGO', 'error');
         return;
       }
       const idxMin = headers.findIndex(h => h.includes('STOCK_MINIMO') || h.includes('STOCK MINIMO') || h.includes('STOCK MIN'));
@@ -4399,11 +4388,9 @@ function importPedidosCSV(file){
       toast(`Importado: stock mínimo ${mins} · cantidades a pedir ${cantidades}`, 'success');
     }catch(err){
       console.error(err);
-      toast('No se pudo leer el archivo CSV. Verifica el formato.', 'error');
+      toast('No se pudo leer el archivo Excel/CSV. Verifica el formato.', 'error');
     }
-  };
-  reader.onerror = ()=> toast('Error al leer el archivo', 'error');
-  reader.readAsText(file, 'UTF-8');
+  });
 }
 
 /* -------------------------------------------------------------------------
@@ -4718,25 +4705,20 @@ function exportComprasCSV(){
     return;
   }
   const header = ['FECHA','CODIGO','PRODUCTO','PROVEEDOR','CANTIDAD','PRECIO UNITARIO','TOTAL','METODO DE PAGO','OBSERVACIONES'];
+  const types = ['text','text','text','text','number','number','number','text','text'];
   const rows = db.compras.map(c => [
-    c.fecha, csvText(c.codigo), c.nombre, c.proveedor || '', csvNumber(c.cantidad), csvNumber(c.precioUnitario, 2), csvNumber(c.total, 2), c.metodoPago, c.observaciones || ''
+    c.fecha, c.codigo, c.nombre, c.proveedor || '', Number(c.cantidad)||0, Number(c.precioUnitario)||0, Number(c.total)||0, c.metodoPago, c.observaciones || ''
   ]);
-  downloadCSV(`stockferre_ingresos_${todayISO().slice(0,10)}.csv`, header, rows);
-  toast('Ingresos exportados', 'success');
+  downloadXLSX(`stockferre_ingresos_${todayISO().slice(0,10)}.xlsx`, [{ name: 'Ingresos', header, rows, types }]);
+  toast('Ingresos exportados a Excel', 'success');
 }
 
-// Importa compras desde un CSV (un respaldo exportado antes). Se agregan como
-// registros al historial de compras; NO modifica el stock (para no sumarlo
-// dos veces si esa compra ya afectó el inventario al registrarse).
+// Importa compras desde un archivo Excel/CSV (un respaldo exportado antes).
+// Se agregan como registros al historial de compras; NO modifica el stock
+// (para no sumarlo dos veces si esa compra ya afectó el inventario).
 function importComprasCSV(file){
-  const reader = new FileReader();
-  reader.onload = (e)=>{
+  readTableFile(file, (rows)=>{
     try{
-      const rows = parseCSV(e.target.result);
-      if(rows.length < 2){
-        toast('El archivo CSV no tiene datos', 'error');
-        return;
-      }
       const headers = rows[0].map(normalizeHeader);
       const idx = {
         fecha: headers.indexOf('FECHA'),
@@ -4750,7 +4732,7 @@ function importComprasCSV(file){
         observaciones: headers.findIndex(h => h.includes('OBSERVACION') || h.includes('NOTA'))
       };
       if(idx.codigo === -1 || idx.nombre === -1 || idx.total === -1){
-        toast('El CSV debe tener al menos columnas CODIGO, PRODUCTO y TOTAL', 'error');
+        toast('El archivo debe tener al menos columnas CODIGO, PRODUCTO y TOTAL', 'error');
         return;
       }
       let importadas = 0;
@@ -4786,11 +4768,9 @@ function importComprasCSV(file){
       toast(`Ingresos importados: ${importadas} (no se modificó el stock)`, 'success');
     }catch(err){
       console.error(err);
-      toast('No se pudo leer el archivo CSV. Verifica el formato.', 'error');
+      toast('No se pudo leer el archivo Excel/CSV. Verifica el formato.', 'error');
     }
-  };
-  reader.onerror = ()=> toast('Error al leer el archivo', 'error');
-  reader.readAsText(file, 'UTF-8');
+  });
 }
 
 /* -------------------------------------------------------------------------
@@ -4837,14 +4817,15 @@ function exportFinanzasCSV(){
   const capital = capitalEnProductos();
   const caja = Number(db.finanzas.caja) || 0;
   const header = ['FECHA','CONCEPTO','MONTO'];
+  const types = ['text','text','number'];
   const rows = [
-    [todayISO(), 'Capital en productos (stock x precio de compra)', csvNumber(capital, 2)],
-    [todayISO(), 'Efectivo actual', csvNumber(caja, 2)],
-    [todayISO(), 'Deuda pendiente (deudas - pagos)', csvNumber(deudaPendienteTotal(), 2)],
-    [todayISO(), 'Patrimonio total (productos + efectivo)', csvNumber(capital + caja, 2)]
+    [todayISO(), 'Capital en productos (stock x precio de compra)', capital],
+    [todayISO(), 'Efectivo actual', caja],
+    [todayISO(), 'Deuda pendiente (deudas - pagos)', deudaPendienteTotal()],
+    [todayISO(), 'Patrimonio total (productos + efectivo)', capital + caja]
   ];
-  downloadCSV(`stockferre_finanzas_${todayISO().slice(0,10)}.csv`, header, rows);
-  toast('Estado financiero exportado', 'success');
+  downloadXLSX(`stockferre_finanzas_${todayISO().slice(0,10)}.xlsx`, [{ name: 'Finanzas', header, rows, types }]);
+  toast('Estado financiero exportado a Excel', 'success');
 }
 
 /* ---------- RETIROS DE DINERO ---------- */
@@ -5012,9 +4993,10 @@ function exportRetirosCSV(){
   const list = db.finanzas.retiros || [];
   if(list.length === 0){ toast('No hay pagos para exportar', 'error'); return; }
   const header = ['FECHA','MONTO','MARCA','OBSERVACION'];
-  const rows = list.map(r => [r.fecha, csvNumber(r.monto, 2), retiroMarca(r), r.obs || '']);
-  downloadCSV(`stockferre_pagos_${todayISO().slice(0,10)}.csv`, header, rows);
-  toast('Pagos exportados', 'success');
+  const types = ['text','number','text','text'];
+  const rows = list.map(r => [r.fecha, Number(r.monto)||0, retiroMarca(r), r.obs || '']);
+  downloadXLSX(`stockferre_pagos_${todayISO().slice(0,10)}.xlsx`, [{ name: 'Pagos', header, rows, types }]);
+  toast('Pagos exportados a Excel', 'success');
 }
 
 /* ---------- DEUDAS ---------- */
@@ -5238,9 +5220,10 @@ function exportDeudasCSV(){
   const list = db.finanzas.deudas || [];
   if(list.length === 0){ toast('No hay deudas para exportar', 'error'); return; }
   const header = ['FECHA','MARCA','MONTO','VENCIMIENTO','OBSERVACION'];
-  const rows = list.map(d => [d.fecha, d.marca || '', csvNumber(d.monto, 2), d.vencimiento || '', d.obs || '']);
-  downloadCSV(`stockferre_deudas_${todayISO().slice(0,10)}.csv`, header, rows);
-  toast('Deudas exportadas', 'success');
+  const types = ['text','text','number','text','text'];
+  const rows = list.map(d => [d.fecha, d.marca || '', Number(d.monto)||0, d.vencimiento || '', d.obs || '']);
+  downloadXLSX(`stockferre_deudas_${todayISO().slice(0,10)}.xlsx`, [{ name: 'Deudas', header, rows, types }]);
+  toast('Deudas exportadas a Excel', 'success');
 }
 
 /* ---------- GASTOS DEL DÍA (solo dueño) ---------- */
@@ -6791,19 +6774,13 @@ function exportProductosExcel(){
   toast('Productos exportados a Excel (las fotos se respaldan con "Exportar backup")', 'success');
 }
 
-// Importa un CSV de inventario (CODIGO, DESCRIPCION, ..., STOCK) para
+// Importa un archivo Excel/CSV de inventario (CODIGO, DESCRIPCION, ..., STOCK) para
 // actualizar el stock y el código de barras de productos que YA existen.
 // No crea productos nuevos (para eso está la importación de Productos, que
 // sí incluye precios).
 function importInventarioCSV(file){
-  const reader = new FileReader();
-  reader.onload = (e)=>{
+  readTableFile(file, (rows)=>{
     try{
-      const rows = parseCSV(e.target.result);
-      if(rows.length < 2){
-        toast('El archivo CSV no tiene datos', 'error');
-        return;
-      }
       const headers = rows[0].map(normalizeHeader);
       const idx = {
         codigo: headers.indexOf('CODIGO'),
@@ -6811,7 +6788,7 @@ function importInventarioCSV(file){
         stock: headers.findIndex(h => h.includes('STOCK') || h.includes('CANTIDAD'))
       };
       if(idx.codigo === -1 || idx.stock === -1){
-        toast('El CSV debe tener al menos columnas CODIGO y STOCK', 'error');
+        toast('El archivo debe tener al menos columnas CODIGO y STOCK', 'error');
         return;
       }
       let actualizados = 0, noEncontrados = 0;
@@ -6831,7 +6808,7 @@ function importInventarioCSV(file){
         }
         touchProducto(p);
         markInventarioActualizado(p.id);
-        logInventarioHistorial(p, p.stock - stockAnterior, 'importación CSV');
+        logInventarioHistorial(p, p.stock - stockAnterior, 'importación Excel');
         actualizadosList.push(p);
         actualizados++;
       }
@@ -6843,11 +6820,9 @@ function importInventarioCSV(file){
       toast(`Inventario importado: ${actualizados} actualizados${noEncontrados ? ', ' + noEncontrados + ' no encontrados' : ''}`, 'success');
     }catch(err){
       console.error(err);
-      toast('No se pudo leer el archivo CSV. Verifica el formato.', 'error');
+      toast('No se pudo leer el archivo Excel/CSV. Verifica el formato.', 'error');
     }
-  };
-  reader.onerror = ()=> toast('Error al leer el archivo', 'error');
-  reader.readAsText(file, 'UTF-8');
+  });
 }
 
 function exportVentasCSV(){
@@ -6856,12 +6831,13 @@ function exportVentasCSV(){
     return;
   }
   const header = ['FECHA','CODIGO','PRODUCTO','CANTIDAD','PRECIO UNITARIO','TOTAL','METODO DE PAGO','EFECTIVO','QR','QR PERSONA'];
+  const types = ['text','text','text','number','number','number','text','number','number','text'];
   const rows = db.ventas.map(v => [
-    v.fecha, csvText(v.codigo), v.nombre, csvNumber(v.cantidad), csvNumber(v.precioUnitario, 2), csvNumber(v.total, 2), v.metodoPago,
-    csvNumber(efectivoMontoDeVenta(v), 2), csvNumber(qrMontoDeVenta(v), 2), csvText(v.qrPersona || '')
+    v.fecha, v.codigo, v.nombre, Number(v.cantidad)||0, Number(v.precioUnitario)||0, Number(v.total)||0, v.metodoPago,
+    Number(efectivoMontoDeVenta(v))||0, Number(qrMontoDeVenta(v))||0, v.qrPersona || ''
   ]);
-  downloadCSV(`stockferre_ventas_${todayISO().slice(0,10)}.csv`, header, rows);
-  toast('Ventas exportadas', 'success');
+  downloadXLSX(`stockferre_ventas_${todayISO().slice(0,10)}.xlsx`, [{ name: 'Ventas', header, rows, types }]);
+  toast('Ventas exportadas a Excel', 'success');
 }
 
 // Devuelve las ventas de un arreglo que corresponden al día/filtro visible en
@@ -7268,19 +7244,13 @@ function exportVentasPDF(){
   win.document.close();
 }
 
-// Importa ventas desde un CSV (por ejemplo, un backup exportado antes). Se
-// agregan como nuevos registros al historial de ventas; NO vuelve a
+// Importa ventas desde un archivo Excel/CSV (por ejemplo, un backup exportado
+// antes). Se agregan como nuevos registros al historial de ventas; NO vuelve a
 // descontar del stock (para evitar descontarlo dos veces si esas ventas ya
 // habían afectado el stock cuando se registraron originalmente).
 function importVentasCSV(file){
-  const reader = new FileReader();
-  reader.onload = (e)=>{
+  readTableFile(file, (rows)=>{
     try{
-      const rows = parseCSV(e.target.result);
-      if(rows.length < 2){
-        toast('El archivo CSV no tiene datos', 'error');
-        return;
-      }
       const headers = rows[0].map(normalizeHeader);
       const idx = {
         fecha: headers.indexOf('FECHA'),
@@ -7295,7 +7265,7 @@ function importVentasCSV(file){
         qrPersona: headers.findIndex(h => h.includes('PERSONA'))
       };
       if(idx.codigo === -1 || idx.nombre === -1 || idx.total === -1){
-        toast('El CSV debe tener al menos columnas CODIGO, PRODUCTO y TOTAL', 'error');
+        toast('El archivo debe tener al menos columnas CODIGO, PRODUCTO y TOTAL', 'error');
         return;
       }
       let importadas = 0;
@@ -7339,11 +7309,9 @@ function importVentasCSV(file){
       toast(`Ventas importadas: ${importadas} (no se modificó el stock)`, 'success');
     }catch(err){
       console.error(err);
-      toast('No se pudo leer el archivo CSV. Verifica el formato.', 'error');
+      toast('No se pudo leer el archivo Excel/CSV. Verifica el formato.', 'error');
     }
-  };
-  reader.onerror = ()=> toast('Error al leer el archivo', 'error');
-  reader.readAsText(file, 'UTF-8');
+  });
 }
 
 function exportInventarioCSV(){
@@ -7352,11 +7320,12 @@ function exportInventarioCSV(){
     return;
   }
   const header = ['CODIGO','DESCRIPCION','MARCA','CATEGORIA','CODIGO DE BARRAS','STOCK'];
+  const types = ['text','text','text','text','text','number'];
   const rows = db.productos.map(p => [
-    csvText(p.codigo), p.nombre, p.marca||'', p.categoria||'', csvText(p.codigoBarras||''), csvNumber(p.stock)
+    p.codigo, p.nombre, p.marca||'', p.categoria||'', p.codigoBarras||'', Number(p.stock)||0
   ]);
-  downloadCSV(`stockferre_inventario_${todayISO().slice(0,10)}.csv`, header, rows);
-  toast('Inventario exportado', 'success');
+  downloadXLSX(`stockferre_inventario_${todayISO().slice(0,10)}.xlsx`, [{ name: 'Inventario', header, rows, types }]);
+  toast('Inventario exportado a Excel', 'success');
 }
 
 /* -------------------------------------------------------------------------
@@ -8120,6 +8089,47 @@ function parsePrecio(raw){
   return isNaN(n) ? 0 : n;
 }
 
+// Lee cualquier archivo de tabla (CSV, .xls viejo o .xlsx real exportado por la
+// app o re-guardado por Excel) y entrega las filas como arreglos de texto.
+// Es el mismo lector que usa "Importar Excel" de Productos.
+function readTableFile(file, cb){
+  const reader = new FileReader();
+  reader.onload = (e)=>{
+    const u8 = new Uint8Array(e.target.result);
+    try{
+      let rows = null;
+      if(u8.length > 30 && u8[0] === 0x50 && u8[1] === 0x4b && u8[2] === 0x03 && u8[3] === 0x04){
+        const files = unzipEntries(e.target.result);
+        let sheet = null;
+        for(const k in files){
+          if(/^xl\/worksheets\/sheet\d+\.xml$/.test(k)){ sheet = files[k]; break; }
+        }
+        if(!sheet){
+          toast('El archivo .xlsx no tiene una hoja de cálculo válida', 'error');
+          return;
+        }
+        const shared = files['xl/sharedStrings.xml']
+          ? parseSharedStringsXML(decText(files['xl/sharedStrings.xml']))
+          : null;
+        rows = parseSheetXML(decText(sheet), shared);
+      }else{
+        const text = decText(u8).replace(/^\uFEFF/, '');
+        rows = isExcelXMLFile(file, text) ? parseExcelXML(text) : parseCSV(text);
+      }
+      if(!rows || rows.length < 2){
+        toast('El archivo no tiene datos', 'error');
+        return;
+      }
+      cb(rows);
+    }catch(err){
+      console.error(err);
+      toast('No se pudo leer el archivo. Verifica el formato.', 'error');
+    }
+  };
+  reader.onerror = ()=> toast('Error al leer el archivo', 'error');
+  reader.readAsArrayBuffer(file);
+}
+
 function importProductsCSV(file){
   const reader = new FileReader();
   reader.onload = (e)=>{
@@ -8149,7 +8159,7 @@ function importProductsCSV(file){
         rows = isExcelXMLFile(file, text) ? parseExcelXML(text) : parseCSV(text);
       }
       if(rows.length < 2){
-        toast('El archivo CSV no tiene datos', 'error');
+        toast('El archivo no tiene datos', 'error');
         return;
       }
       const headers = rows[0].map(normalizeHeader);
@@ -8169,7 +8179,7 @@ function importProductsCSV(file){
         imagen: headers.findIndex(h => h.includes('IMAGEN') || h.includes('FOTO'))
       };
       if(idx.codigo === -1 || idx.nombre === -1){
-        toast('El CSV debe tener al menos columnas CODIGO y DESCRIPCION', 'error');
+        toast('El archivo debe tener al menos columnas CODIGO y DESCRIPCION', 'error');
         return;
       }
       if(idx.precioCompra === -1 || idx.precioVenta === -1){
@@ -8247,7 +8257,7 @@ function importProductsCSV(file){
       toast(`Importación completa: ${creados} nuevos, ${actualizados} actualizados`, 'success');
     }catch(err){
       console.error(err);
-      toast('No se pudo leer el archivo CSV o Excel. Verifica el formato.', 'error');
+      toast('No se pudo leer el archivo Excel/CSV. Verifica el formato.', 'error');
     }
   };
   reader.onerror = ()=> toast('Error al leer el archivo', 'error');
@@ -8414,6 +8424,7 @@ function showView(name){
   }else{
     stopActiveScanner();
   }
+  saveSessionViewState(name);
 }
 
 function closeSidebarMobile(){
@@ -8442,6 +8453,27 @@ const REMEMBER_KEY = 'stockferre_remember_v1';
 const NOTIF_KEY = 'stockferre_notif_v1';
 const FIREBASE_KEY = 'stockferre_firebase_v1';
 const MODO_LABELS = { manual: 'Herramientas Manuales', electrico: 'Herramientas Eléctricas', invitado: 'Modo Invitado' };
+
+// "Dónde quedó la app": la última vista activa se guarda en sessionStorage, que
+// solo se borra al CERRAR Chrome o la pestaña. Así, si la pestaña sigue viva
+// (por ejemplo al volver de otra app y el navegador recargó la página), la app
+// vuelve a la misma vista en vez de empezar desde Inicio. Al cerrar Chrome o la
+// pestaña, sessionStorage se vacía solo y la app abre de nuevo desde Inicio.
+const SESSION_VIEW_KEY = 'stockferre_session_view_v1';
+function saveSessionViewState(viewName){
+  try{ sessionStorage.setItem(SESSION_VIEW_KEY, JSON.stringify({ view: viewName || currentView, t: Date.now() })); }catch(e){}
+}
+function readSessionViewState(){
+  try{ return JSON.parse(sessionStorage.getItem(SESSION_VIEW_KEY)) || null; }catch(e){ return null; }
+}
+function saveSessionScanResult(codigo){
+  try{
+    let st = JSON.parse(sessionStorage.getItem(SESSION_VIEW_KEY)) || {};
+    st.view = 'escaner';
+    st.lastCodigo = codigo;
+    sessionStorage.setItem(SESSION_VIEW_KEY, JSON.stringify(st));
+  }catch(e){}
+}
 
 let pendingGateModo = null;
 
@@ -9996,7 +10028,7 @@ function setupEventListeners(){
     e.target.value = '';
   });
   document.getElementById('btnPurgeVentas').addEventListener('click', ()=>{
-    confirmDialog('Borrar ventas antiguas', '¿Borrar las ventas de hace más de 3 meses? Se recomienda exportarlas antes con "Exportar CSV". El stock de los productos no se modifica.', ()=>{
+    confirmDialog('Borrar ventas antiguas', '¿Borrar las ventas de hace más de 3 meses? Se recomienda exportarlas antes con "Exportar Excel". El stock de los productos no se modifica.', ()=>{
       purgeVentasAntiguas();
     });
   });
@@ -10225,7 +10257,7 @@ function setupEventListeners(){
     e.target.value = '';
   });
   document.getElementById('btnPurgeCompras').addEventListener('click', ()=>{
-    confirmDialog('Borrar ingresos antiguos', '¿Borrar los ingresos de hace más de 3 meses? Se recomienda exportarlos antes con "Exportar CSV". El stock de los productos no se modifica.', ()=>{
+    confirmDialog('Borrar ingresos antiguos', '¿Borrar los ingresos de hace más de 3 meses? Se recomienda exportarlos antes con "Exportar Excel". El stock de los productos no se modifica.', ()=>{
       purgeComprasAntiguas();
     });
   });
@@ -10507,14 +10539,25 @@ function init(){
   updateSidebarProductCount();
   updateSidebarBrand();
   updatePasswordButtonLabel();
-  // Si en este dispositivo se dejó la sesión abierta para el modo guardado,
-  // vuelve directo a la app sin pedir contraseña ni pasar por Inicio.
+  // ¿La pestaña sigue viva? Si solo se recargó (p. ej. al volver de otra app y
+  // el navegador refrescó la página), la app vuelve a la vista donde se quedó
+  // en vez de empezar desde Inicio. Al CERRAR Chrome o la pestaña, sessionStorage
+  // se borra solo y la app abre de nuevo desde Inicio.
+  const sessionState = readSessionViewState();
   let savedMode = null;
   try{ savedMode = localStorage.getItem(MODO_KEY); }catch(e){}
-  if(savedMode && savedMode !== 'invitado' && isRemembered(savedMode)){
+  if(sessionState && sessionState.view && sessionState.view !== 'inicio' && VIEW_TITLES[sessionState.view]){
+    connectFirebase(); // sigue con el modo que restoreModo ya eligió
+    showView(sessionState.view);
+    if(sessionState.view === 'escaner' && sessionState.lastCodigo){
+      renderScanResult(sessionState.lastCodigo);
+    }
+  }else if(savedMode && savedMode !== 'invitado' && isRemembered(savedMode)){
+    // "Mantener sesión abierta": no pide contraseña para este modo, pero igual
+    // muestra la pantalla de Inicio (antes saltaba directo al Escáner).
     switchModoData(savedMode); // ya conecta Firebase para ese modo
     applyRoleUI();
-    showView('escaner');
+    showView('inicio');
   }else{
     showView('inicio');
     connectFirebase(); // no bloquea el arranque; si no está configurado, sigue todo local

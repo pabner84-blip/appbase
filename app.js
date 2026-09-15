@@ -111,11 +111,73 @@ function loadInvUpdates(){
 }
 
 function saveInvUpdates(){
-  try{
-    localStorage.setItem(invUpdatesKey(), JSON.stringify(invUpdates));
-  }catch(e){
-    console.error('Error guardando actualizaciones de inventario', e);
-  }
+  persistBlob(invUpdatesKey(), invUpdates);
+}
+
+/* =========================================================================
+   GUARDADO AMPLIADO (IndexedDB)
+   -------------------------------------------------------------------------
+   El localStorage del navegador solo admite unos 5-10 MB por dominio. Con el
+   tiempo, entre productos (2000+), ventas, gastos, préstamos y historiales, la
+   base supera ese límite y el guardado local fallaba ("No se pudo guardar en
+   el almacenamiento local") y se perdía la copia en este equipo.
+
+   Ahora cada dato grande se guarda SIEMPRE en dos sitios:
+     - localStorage  -> arranque instantáneo (lectura síncrona).
+     - IndexedDB     -> respaldo con capacidad de cientos de MB (asíncrono).
+   Al abrir la app se carga la copia rápida y, en cuanto IndexedDB responde,
+   se usa la copia más reciente si el localStorage estaba lleno.
+   ========================================================================= */
+const KV_DB = 'stockferre_kv_v1';
+const KV_STORE = 'kv';
+let kvDbPromise = null;
+
+function openKV(){
+  if(kvDbPromise) return kvDbPromise;
+  kvDbPromise = new Promise((resolve, reject) => {
+    try{
+      const req = indexedDB.open(KV_DB, 1);
+      req.onupgradeneeded = () => {
+        const d = req.result;
+        if(!d.objectStoreNames.contains(KV_STORE)) d.createObjectStore(KV_STORE);
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    }catch(e){ reject(e); }
+  });
+  return kvDbPromise;
+}
+
+function kvSet(key, json){
+  return openKV().then(d => new Promise((resolve, reject) => {
+    try{
+      const tx = d.transaction(KV_STORE, 'readwrite');
+      tx.objectStore(KV_STORE).put(json, key);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    }catch(e){ reject(e); }
+  })).catch(err => { console.warn('No se pudo guardar en IndexedDB', err); });
+}
+
+function kvGet(key){
+  return openKV().then(d => new Promise((resolve, reject) => {
+    try{
+      const tx = d.transaction(KV_STORE, 'readonly');
+      const req = tx.objectStore(KV_STORE).get(key);
+      req.onsuccess = () => resolve(req.result || null);
+      req.onerror = () => reject(req.error);
+    }catch(e){ reject(e); }
+  })).catch(() => null);
+}
+
+function persistBlob(key, obj, quiet){
+  let json;
+  try{ json = JSON.stringify(obj); }catch(e){ return false; }
+  let lsOk = true;
+  try{ localStorage.setItem(key, json); }
+  catch(e){ lsOk = false; }
+  kvSet(key, json);
+  return lsOk;
 }
 
 function markInventarioActualizado(productoId){
@@ -195,18 +257,35 @@ function loadDB(){
     if(!raw && currentModo === 'manual'){
       raw = localStorage.getItem(LEGACY_STORAGE_KEY); // migración única
     }
-    if(raw){ db = normalizeDB(JSON.parse(raw)); persistLocalCache(); return; }
-  }catch(e){ console.error('Error leyendo LocalStorage', e); }
-  db = defaultDB();
-  persistLocalCache();
+    if(raw){ db = normalizeDB(JSON.parse(raw)); persistLocalCache(); }
+    else { db = defaultDB(); persistLocalCache(); }
+  }catch(e){ console.error('Error leyendo LocalStorage', e); db = defaultDB(); persistLocalCache(); }
+
+  // Si el localStorage estaba lleno, la copia real quedó en IndexedDB; cuando
+  // esta esté disponible se aplica la más reciente de las dos.
+  try{
+    kvGet(storageKey()).then(big => {
+      if(!big) return;
+      try{
+        const parsed = JSON.parse(big);
+        const a = typeof parsed._savedAt === 'number' ? parsed._savedAt : 0;
+        const b = db && typeof db._savedAt === 'number' ? db._savedAt : 0;
+        if(a > b){
+          db = normalizeDB(parsed);
+          persistLocalCache();
+          if(typeof rerenderCurrentView === 'function') rerenderCurrentView();
+        }
+      }catch(e){ /* se conserva la copia de arranque */ }
+    });
+  }catch(e){}
 }
 
 function persistLocalCache(){
-  try{
-    localStorage.setItem(storageKey(), JSON.stringify(db));
-  }catch(e){
-    console.error('Error guardando en LocalStorage', e);
-    toast('No se pudo guardar en el almacenamiento local (¿espacio lleno?)', 'error');
+  try{ if(db) db._savedAt = Date.now(); }catch(e){}
+  const lsOk = persistBlob(storageKey(), db ? db : {});
+  if(!lsOk && !window.__stockferreLsFullWarned){
+    window.__stockferreLsFullWarned = true;
+    toast('⚠️ El espacio local del navegador se llenó. La copia se guarda en el almacén ampliado automáticamente; no se pierden datos.', 'warning');
   }
 }
 
@@ -367,7 +446,7 @@ function findProductoInDB(dbObj, codigo){
 // del modo actual. Lo usa el invitado para que sus ventas queden en la base
 // correcta (Manuales o Eléctricas).
 function persistModoDB(modo, dbObj){
-  try{ localStorage.setItem('stockferre_catalogo_v1_' + modo, JSON.stringify(dbObj)); }catch(e){}
+  persistBlob('stockferre_catalogo_v1_' + modo, dbObj);
   if(firebaseToggleOn() && typeof firebase !== 'undefined' && typeof firebaseConfig !== 'undefined' && firebaseConfig.apiKey){
     try{
       if(!firebase.apps || !firebase.apps.length){ firebase.initializeApp(firebaseConfig); }
@@ -565,7 +644,7 @@ function connectGuestFirebase(){
           merged.historialEscaneos = prev.historialEscaneos;
           merged.historialBusquedas = prev.historialBusquedas;
           merged.historialInventario = prev.historialInventario;
-          try{ localStorage.setItem('stockferre_catalogo_v1_' + modo, JSON.stringify(merged)); }catch(e){}
+          persistBlob('stockferre_catalogo_v1_' + modo, merged);
           if(currentModo === 'invitado'){ db = buildGuestDB(); rerenderCurrentView(); }
         }
       }).catch(()=>{ /* local sigue funcionando */ });
@@ -578,7 +657,7 @@ function connectGuestFirebase(){
         merged.historialEscaneos = prev.historialEscaneos;
         merged.historialBusquedas = prev.historialBusquedas;
         merged.historialInventario = prev.historialInventario;
-        try{ localStorage.setItem('stockferre_catalogo_v1_' + modo, JSON.stringify(merged)); }catch(e){}
+        persistBlob('stockferre_catalogo_v1_' + modo, merged);
         if(currentModo === 'invitado'){ db = buildGuestDB(); rerenderCurrentView(); }
       }, ()=>{ /* ignorar */ });
       guestUnsubs.push(unsub);
@@ -602,7 +681,7 @@ function connectGuestFirebase(){
         merged.historialEscaneos = guestSessionScans;
         merged.historialBusquedas = guestSessionSearches;
         merged.historialInventario = guestSessionInventory;
-        try{ localStorage.setItem(storageKey(), JSON.stringify(merged)); }catch(e){}
+        persistBlob(storageKey(), merged);
         if(currentModo === 'invitado'){ db = buildGuestDB(); rerenderCurrentView(); }
       }
       setSyncStatus('synced');
@@ -617,7 +696,7 @@ function connectGuestFirebase(){
       merged.historialEscaneos = guestSessionScans;
       merged.historialBusquedas = guestSessionSearches;
       merged.historialInventario = guestSessionInventory;
-      try{ localStorage.setItem(storageKey(), JSON.stringify(merged)); }catch(e){}
+      persistBlob(storageKey(), merged);
       if(currentModo === 'invitado'){ db = buildGuestDB(); rerenderCurrentView(); }
     }, ()=>{ /* ignorar */ });
     guestUnsubs.push(ownUnsub);
@@ -913,7 +992,7 @@ function cacheRemoteModo(data, modo){
     merged.historialEscaneos = prev.historialEscaneos;
     merged.historialBusquedas = prev.historialBusquedas;
     merged.historialInventario = prev.historialInventario;
-    localStorage.setItem('stockferre_catalogo_v1_' + modo, JSON.stringify(merged));
+    persistBlob('stockferre_catalogo_v1_' + modo, merged);
   }catch(e){ /* ignorar */ }
 }
 
@@ -1162,14 +1241,26 @@ async function deleteVentaDocs(ids, modo){
 async function backfillVentas(modo){
   const col = fbVentasCol(modo);
   if(!col) return;
+  // Una sola vez por dominio: releer TODA la colección de ventas en cada
+  // apertura también quema el cupo de lecturas (una lectura por venta).
+  const markKey = 'fs_backfill_ventas_' + (modo || DOMAIN);
+  let done = false;
+  try{ done = localStorage.getItem(markKey) === '1'; }catch(e){}
+  if(done) return;
   const arr = (db.ventas || []);
-  if(!arr.length) return;
+  if(!arr.length){
+    try{ localStorage.setItem(markKey, '1'); }catch(e){}
+    return;
+  }
   try{
     const snap = await col.get();
     const existing = new Set(snap.docs.map(d => d.id));
     const missing = arr.filter(v => v && v.id && !existing.has(String(v.id)));
-    if(missing.length) await syncVentaDocs(missing, modo);
-  }catch(e){ console.error('Error respaldando ventas en la nube', e); }
+    if(missing.length){
+      await syncVentaDocs(missing, modo);
+    }
+    try{ localStorage.setItem(markKey, '1'); }catch(e){}
+  }catch(e){ if(e && e.code !== 'permission-denied') console.error('Error respaldando ventas en la nube', e); }
 }
 
 // Escucha la colección del dominio (invitado/manual/electrico) y corrige la
@@ -1425,10 +1516,19 @@ async function deleteGastoPrestamoDocs(ids, modo){
 async function backfillGastosPrestamos(modo){
   const col = fbGpCol(modo);
   if(!col) return;
+  // Una sola vez por dominio (igual que ventas/productos) para no releer la
+  // colección entera en cada apertura y agotar el cupo gratuito de lecturas.
+  const markKey = 'fs_backfill_gastos_' + (modo || DOMAIN);
+  let done = false;
+  try{ done = localStorage.getItem(markKey) === '1'; }catch(e){}
+  if(done) return;
   // En el invitado se sube todo (incluidos los "sin color", para que los
   // dispositivos invitados compartan); en el dueño solo los de su dominio.
   const arr = (db.gastosPrestamos || []).filter(g => g && g.id && (modo === 'invitado' || g.modo === 'manual' || g.modo === 'electrico'));
-  if(!arr.length) return;
+  if(!arr.length){
+    try{ localStorage.setItem(markKey, '1'); }catch(e){}
+    return;
+  }
   try{
     const snap = await col.get();
     const existing = new Set(snap.docs.map(d => d.id));
@@ -1439,7 +1539,8 @@ async function backfillGastosPrestamos(modo){
       missing.slice(i, i + 450).forEach(g => batch.set(col.doc(String(g.id)), gpDocData(g)));
       await batch.commit();
     }
-  }catch(e){ console.error('Error respaldando gastos/préstamos en la nube', e); }
+    try{ localStorage.setItem(markKey, '1'); }catch(e){}
+  }catch(e){ if(e && e.code !== 'permission-denied') console.error('Error respaldando gastos/préstamos en la nube', e); }
 }
 
 function startGastosPrestamosListener(modo){
@@ -1497,14 +1598,32 @@ function stopGastosPrestamosListeners(){
 async function backfillProductos(modo){
   const col = fbProductsCol(modo);
   if(!col) return;
+  // Una sola vez por modo: releer la colección entera en cada apertura quema
+  // miles de lecturas del cupo gratis de Firestore (eso dejaba el celular sin
+  // poder ver los productos nuevos). Una vez migrado, los productos nuevos y
+  // editados se suben solos con syncProductoDoc/startStockListener.
+  const markKey = 'fs_backfill_prod_' + modo;
+  let done = false;
+  try{ done = localStorage.getItem(markKey) === '1'; }catch(e){}
+  if(done) return;
   const local = modo === currentModo ? db : loadModoDB(modo);
   const arr = (local && local.productos) || [];
-  if(arr.length === 0) return;
+  if(arr.length === 0){
+    // Nada local que respaldar: se marca igual para no releer la colección
+    // en cada apertura (los productos nuevos se suben solos al crearse).
+    try{ localStorage.setItem(markKey, '1'); }catch(e){}
+    return;
+  }
   try{
     const snap = await col.get();
     const existing = new Set(snap.docs.map(d => d.id));
     const missing = arr.filter(p => p && p.id && !existing.has(p.id));
-    if(missing.length === 0) return;
+    // Nada que respaldar: todo el catálogo local ya tiene documento. Se marca
+    // como hecho para no volver a releer la colección entera.
+    if(missing.length === 0){
+      try{ localStorage.setItem(markKey, '1'); }catch(e){}
+      return;
+    }
     const fs = firebase.firestore();
     for(let i = 0; i < missing.length; i += 450){
       const batch = fs.batch();
@@ -1515,7 +1634,8 @@ async function backfillProductos(modo){
       });
       await batch.commit();
     }
-  }catch(e){ console.error('Error respaldando productos en la nube', e); }
+    try{ localStorage.setItem(markKey, '1'); }catch(e){}
+  }catch(e){ if(e && e.code !== 'permission-denied') console.error('Error respaldando productos en la nube', e); }
 }
 
 // Escribe los documentos de una lista de productos (para importaciones CSV).
@@ -1547,6 +1667,16 @@ function startStockListener(modo){
   if(fbProductosUnsubs[modo]){ try{ fbProductosUnsubs[modo](); }catch(e){ /* ignorar */ } }
   stockStoreCache[modo] = null;
   let timer = null, changed = false;
+  let sinceKey = 'fs_laststock_' + modo;
+
+  // IMPORTANTE (quema de lecturas): antes se escuchaba la colección COMPLETA
+  // de productos en cada apertura (miles de documentos = miles de lecturas del
+  // cupo gratis, que se agotaba y le quitaba al celular la vista de los
+  // productos nuevos). Ahora se escucha SOLO lo que cambió en las últimas 24 h
+  // (_updatedAt > ahora - 24h). Es barato (unas decenas de lecturas por
+  // apertura), es a prueba de relojes desincronizados entre dispositivos y
+  // nunca se pierde un cambio. La primera vez igual queda cubierta porque el
+  // propio catálogo base se mantiene en la copia local de este dispositivo.
 
   const flush = () => {
     if(!changed) return;
@@ -1557,7 +1687,7 @@ function startStockListener(modo){
         if(modo === currentModo){
           persistLocalCache();
         }else{
-          localStorage.setItem('stockferre_catalogo_v1_' + modo, JSON.stringify(store));
+          persistBlob('stockferre_catalogo_v1_' + modo, store);
         }
       }catch(e){ console.error('Error guardando stock local', e); }
     }
@@ -1570,11 +1700,13 @@ function startStockListener(modo){
     }
   };
 
-  fbProductosUnsubs[modo] = col.onSnapshot(snap => {
+  const query = col.where('_updatedAt', '>', Date.now() - 24 * 3600 * 1000);
+  fbProductosUnsubs[modo] = query.onSnapshot(snap => {
     snap.docChanges().forEach(ch => {
       if(ch.type === 'removed' || ch.doc.metadata.hasPendingWrites) return;
       const data = ch.doc.data();
       if(!data || !data.id) return;
+      try{ localStorage.setItem(sinceKey, String(Date.now())); }catch(e){}
       if(!stockStoreCache[modo]){
         try{
           stockStoreCache[modo] = modo === currentModo ? db : loadModoDB(modo);
@@ -1583,14 +1715,53 @@ function startStockListener(modo){
       const store = stockStoreCache[modo];
       if(!store) return;
       const p = store.productos.find(x => x && x.id === data.id);
-      if(!p) return;
       let touched = false;
-      if(typeof data.stock === 'number' && data.stock !== p.stock){
-        p.stock = data.stock;
-        touched = true;
-      }
-      if(typeof data.codigoBarras === 'string' && data.codigoBarras && data.codigoBarras !== p.codigoBarras){
-        p.codigoBarras = data.codigoBarras;
+      if(p){
+        // Producto ya conocido: actualiza stock y código de barras y, si el doc
+        // que llegó es igual o más reciente, también los datos editables (nombre,
+        // precios, categoría, etc.): un cambio hecho en otro dispositivo (la
+        // compu) se refleja solo en este.
+        if(typeof data.stock === 'number' && data.stock !== p.stock){
+          p.stock = data.stock;
+          touched = true;
+        }
+        if(typeof data.codigoBarras === 'string' && data.codigoBarras && data.codigoBarras !== p.codigoBarras){
+          p.codigoBarras = data.codigoBarras;
+          touched = true;
+        }
+        const remoteTs = typeof data._updatedAt === 'number' ? data._updatedAt : 0;
+        if(remoteTs >= (p._updatedAt || 0)){
+          ['codigo','nombre','marca','categoria','precioCompra','precioMarca','precioVenta','stockMin'].forEach(f => {
+            if(data[f] !== undefined && String(data[f]) !== String(p[f])){
+              p[f] = typeof data[f] === 'number' ? Number(data[f]) : data[f];
+              touched = true;
+            }
+          });
+        }
+      }else{
+        // Producto NUEVO (lo registró otro dispositivo): se agrega al catálogo
+        // local salvo que esté borrado (tumba). Así un producto registrado en la
+        // compu aparece solo en el celular aunque el documento grande pese mucho
+        // o tarde en llegar.
+        const tbs = (store.tombstones && store.tombstones.productos) || (db.tombstones || {}).productos;
+        if(tbs && tbs[String(data.id)]) return;
+        const nuevo = {
+          id: data.id,
+          codigo: data.codigo || '',
+          nombre: data.nombre || '',
+          marca: data.marca || '',
+          categoria: data.categoria || '',
+          codigoBarras: data.codigoBarras || '',
+          precioCompra: Number(data.precioCompra) || 0,
+          precioMarca: Number(data.precioMarca) || 0,
+          precioVenta: Number(data.precioVenta) || 0,
+          stock: Number(data.stock) || 0,
+          stockMin: Number(data.stockMin) || 0,
+          caracteristicas: '',
+          fechaCreacion: todayISO(),
+          _updatedAt: typeof data._updatedAt === 'number' ? data._updatedAt : Date.now()
+        };
+        store.productos.push(nuevo);
         touched = true;
       }
       if(touched) changed = true;
@@ -1601,6 +1772,9 @@ function startStockListener(modo){
     }
   }, err => {
     console.error('Error escuchando stock de productos (' + modo + ')', err);
+    // Degrada con seguridad: si la consulta incremental fallara (p.ej. sin
+    // índice automático), se reintenta completo en la próxima reconexión.
+    try{ localStorage.removeItem(sinceKey); }catch(e){}
   });
 }
 
@@ -7859,73 +8033,246 @@ function handleImgUrl(){
 // Si todo falla, abre Google Imágenes para búsqueda manual.
 const LOCAL_PROXY = 'http://localhost:8765';
 let localServerOk = null; // null = no probado, true/false = resultado del test
+let localServerVersion = 0; // versión del servidor local (2 = verificación estricta)
+
+// Verifica el servidor local y su versión. Los servidores viejos (que no tienen
+// /api/product-page) hacen que el autollenado verificdo no funcione.
+async function chequearServidorLocal(){
+  try{
+    const resp = await fetch(LOCAL_PROXY + '/api/ping', {signal: AbortSignal.timeout(3000)});
+    const data = await resp.json();
+    localServerOk = !!(data && data.ok);
+    localServerVersion = (data && data.version) || 1;
+  }catch(e){
+    localServerOk = false;
+    localServerVersion = 0;
+  }
+  return localServerOk;
+}
+
+// Arma las consultas de búsqueda para un producto. La primera (código + marca
+// + nombre) es la que mejores resultados da en Bing/Google; las demás son
+// respaldos por si la primera no encuentra nada.
+function queriesParaProducto(p){
+  const qs = [];
+  if(!p) return qs;
+  const codigo = String(p.codigo || '').trim();
+  const marca = String(p.marca || '').trim();
+  const nombre = String(p.nombre || '').trim();
+  if(codigo && marca && nombre) qs.push([codigo, marca, nombre].join(' '));
+  if(codigo && nombre) qs.push([codigo, nombre].join(' '));
+  if(codigo && marca) qs.push([codigo, marca].join(' '));
+  if(codigo) qs.push(codigo);
+  return qs.filter(Boolean);
+}
+
+// Normaliza un texto para comparar (minúsculas, sin acentos, solo letras y
+// números, colapsando los espacios).
+function normToken(s){
+  return String(s || '').toLowerCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+// true si el token aparece como PALABRA COMPLETA en el texto (no como parte
+// de otra palabra). Es clave para códigos numéricos: "12399" NO debe contar
+// como coincidencia dentro de "512399" ni "123990".
+function tokenEnTexto(texto, token){
+  if(!token) return false;
+  const t = ' ' + String(texto || '') + ' ';
+  return t.indexOf(' ' + token + ' ') !== -1;
+}
+
+// Puntúa qué tan probable es que una imagen candidata sea la foto real del
+// producto: pesa muchísimo que el CÓDIGO aparezca en la página/título/URL de
+// la imagen, luego la marca y las palabras del nombre. Las fichas técnicas,
+// catálogos y manuales se penalizan.
+function puntuarCandidato(c, p){
+  const texto = normToken((c.page || '') + ' ' + (c.title || '') + ' ' + (c.image || ''));
+  let s = 0;
+  const codigo = normToken(p.codigo);
+  const marca = normToken(p.marca);
+  const nombre = normToken(p.nombre);
+  if(codigo && tokenEnTexto(texto, codigo)) s += 15;
+  if(marca && marca.length >= 3 && tokenEnTexto(texto, marca)) s += 4;
+  if(nombre){
+    for(const w of nombre.split(' ')){
+      if(w.length >= 3 && tokenEnTexto(texto, w)) s += 1;
+    }
+  }
+  // Penaliza si en la página/título aparece OTRO código parecido (ej. CT13506
+  // en vez de CT13316): suele ser otro producto de la misma marca.
+  if(codigo && /\D/.test(codigo)){
+    const codes = texto.match(/\b(?:ct|ztr|m6t|li-)[a-z0-9-]*/g) || [];
+    for(const c2 of codes){
+      if(c2 !== codigo && c2.startsWith(codigo.slice(0, 2)) && Math.abs(c2.length - codigo.length) <= 3){
+        s -= 8;
+      }
+    }
+  }
+  // Las imágenes sin página de producto (solo URL de foto) suelen ser menos
+  // confiables que las que vienen de una página de tienda.
+  if((c.page || '').length > 8) s += 1;
+  if(/ficha|spec|manual|caracter|document|pdf|xlsx/.test(texto)) s -= 6;
+  return s;
+}
+
+// Descarga (por el servidor local) la página candidata y extrae sus metadatos.
+async function obtenerPaginaProducto(pageUrl, codigo){
+  const sep = codigo ? '&codigo=' + encodeURIComponent(codigo) : '';
+  const resp = await fetch(LOCAL_PROXY + '/api/product-page?url=' + encodeURIComponent(pageUrl) + sep, { signal: AbortSignal.timeout(20000) });
+  const data = await resp.json();
+  if(data.error) throw new Error(data.error);
+  return data;
+}
+
+// Confirmación ESTRICTA, solo 2 niveles de evidencia (ninguno acepta "parecido",
+// solo el producto exacto):
+//   Nivel 1: el código aparece como palabra completa en el título/URL visible Y
+//            la página muestra la marca o una palabra del nombre.
+//   Nivel 2: el sku/mpn EXACTO de la página (datos JSON-LD del producto) ES el
+//            código Y la página muestra la marca o una palabra del nombre.
+// Se excluyen páginas de otros productos de la misma familia (CT13506 vs CT13316).
+// NOTA: NO se usa "código en el <head>" como evidencia: en sitios como Truper
+// el <head> incluye listas de varios productos (con todos sus códigos) y eso
+// confirmaba páginas de productos DISTINTOS al buscado.
+async function paginaConfirmaProducto(info, p){
+  if(!info || !info.url) return false;
+  const verText = normToken((info.ogTitle || '') + ' ' + (info.title || '') + ' ' + (info.url || ''));
+  const codigo = normToken(p.codigo);
+  if(!codigo) return false;
+
+  const marca = normToken(p.marca);
+  const nombre = normToken(p.nombre);
+  const tienePalabra = () => {
+    let w = 0;
+    if(marca && marca.length >= 3 && tokenEnTexto(verText, marca)) w += 2;
+    if(nombre){
+      for(const t of nombre.split(' ')){
+        if(t.length >= 3 && tokenEnTexto(verText, t)) w++;
+      }
+    }
+    return w >= 1;
+  };
+  const codeVisible = tokenEnTexto(verText, codigo);
+  const sku = normToken(info.sku || info.mpn || info.modelo);
+  const skuExacto = !!(sku && sku === codigo);
+
+  if(/\D/.test(codigo)){
+    const codes = verText.match(/\b(?:ct|ztr|m6t|li-)[a-z0-9-]*/g) || [];
+    const conflicto = codes.some(c2 => c2 !== codigo && c2.startsWith(codigo.slice(0, 2)) && Math.abs(c2.length - codigo.length) <= 3);
+    if(conflicto) return false;
+  }
+
+  if(codeVisible && tienePalabra()) return true;
+  if(skuExacto && tienePalabra()) return true;
+  return false;
+}
+
+// Busca la foto de un producto PERO solo guarda imágenes verificadas: consulta
+// por consulta (empieza por la más completa), descarga las páginas candidatas
+// y exige que confirmen el código exacto del producto. Si ninguna lo confirma,
+// NO pone ninguna imagen (mejor vacío que equivocado).
+// Devuelve { ok, reason } con el motivo si no se pudo:
+//   'sin-servidor'  el server local no responde
+//   'sin-busqueda'  los buscadores no respondieron/entregaron nada (red/firewall)
+//   'sin-paginas'   la búsqueda dio fotos pero ninguna con página de producto
+//   'sin-confirma'  había páginas pero ninguna confirmó el código exacto
+async function buscarYGuardarImagen(productId, p, queries){
+  if(!localServerOk) return { ok:false, reason:'sin-servidor' };
+  let huboCandidatos = false;
+  let huboPaginas = false;
+  let huboErrorRed = false;
+  for(const q of queries){
+    let cands = [];
+    try{
+      const data = await localSearchImages(q);
+      cands = data.results || [];
+      if(data.sources && (String(data.sources.bing).indexOf('error') === 0 || String(data.sources.yandex).indexOf('error') === 0)){
+        huboErrorRed = true;
+      }
+    }catch(e){ cands = []; }
+    if(cands.length) huboCandidatos = true;
+    const conPagina = cands.filter(c => c.page);
+    if(conPagina.length) huboPaginas = true;
+    if(!conPagina.length) continue;
+    conPagina.sort((a, b) => puntuarCandidato(b, p) - puntuarCandidato(a, p));
+
+    let verificadas = 0;
+    for(const cand of conPagina){
+      let info = null;
+      try{ info = await obtenerPaginaProducto(cand.page, p.codigo); }catch(e){ continue; }
+      if(!info || !info.url) continue;
+      let confirmada = false;
+      try{ confirmada = await paginaConfirmaProducto(info, p); }catch(e){}
+      if(!confirmada) continue;
+      verificadas++;
+      const imgs = [info.ogImage || '', ...(info.images || [])].filter(Boolean);
+      for(const img of imgs){
+        try{
+          await fetchAndSaveImage(productId, img, true);
+          return { ok:true };
+        }catch(e){
+          // Esta foto no se pudo descargar: probar otra imagen de la misma página.
+        }
+      }
+      if(verificadas >= 3) break;
+    }
+    // Ninguna página de esta consulta confirmó y dio imagen descargable:
+    // pasar a la siguiente consulta.
+  }
+  if(huboPaginas) return { ok:false, reason:'sin-confirma' };
+  if(huboCandidatos) return { ok:false, reason:'sin-paginas' };
+  if(huboErrorRed) return { ok:false, reason:'red-bloqueada' };
+  return { ok:false, reason:'sin-busqueda' };
+}
 
 async function autoFillProductImage(productId){
   const p = getProductoById(productId);
   if(!p) return;
   if(getImages(productId).length >= MAX_IMGS){ toast('Este producto ya tiene 3 fotos', 'error'); return; }
-  const query = [p.codigo, p.marca, p.nombre].filter(Boolean).join(' ');
-  if(!query){ toast('El producto no tiene datos para buscar', 'error'); return; }
-
+  const queries = queriesParaProducto(p);
+  if(!queries.length){ toast('El producto no tiene datos para buscar', 'error'); return; }
   const btn = document.querySelector('[data-auto-img="'+productId+'"]');
   const origText = btn ? btn.textContent : '';
   if(btn){ btn.disabled = true; btn.textContent = '⏳ Buscando...'; }
 
   try{
-    // Estrategia 1: Servidor local (más rápido y confiable)
     if(localServerOk === null){
-      try{
-        const test = await fetch(LOCAL_PROXY + '/api/ping', {signal: AbortSignal.timeout(3000)});
-        localServerOk = test.ok;
-      }catch(e){ localServerOk = false; }
+      await chequearServidorLocal();
     }
-    if(localServerOk){
-      const results = await localSearchImages(query);
-      if(results.length > 0){
-        await fetchAndSaveImage(productId, results[0]);
-        toast('✅ Imagen autollenada', 'success');
-        if(btn){ btn.disabled = false; btn.textContent = origText; }
-        return;
-      }
+    if(localServerOk && localServerVersion < 2){
+      toast('⚠️ El servidor local está desactualizado. Cierra la app y ábrela con "Iniciar StockFerre.bat".', 'error');
+      if(btn){ btn.disabled = false; btn.textContent = origText; }
+      return;
     }
-  }catch(e){ console.warn('Servidor local falló:', e); }
-
-  try{
-    // Estrategia 2: DuckDuckGo Instant Answer API (CORS-friendly directo)
-    const ddgInstant = await ddgInstantImage(query);
-    if(ddgInstant){
-      await fetchAndSaveImage(productId, ddgInstant);
+    const res = await buscarYGuardarImagen(productId, p, queries);
+    if(res && res.ok){
+      renderProductos();
       toast('✅ Imagen autollenada', 'success');
       if(btn){ btn.disabled = false; btn.textContent = origText; }
       return;
     }
-  }catch(e){ console.warn('DDG Instant falló:', e); }
+  }catch(e){ console.warn('AutoFill falló:', e); }
 
-  try{
-    // Estrategia 3: DuckDuckGo image search via proxies CORS
-    const ddgImg = await ddgImageSearchProxy(query);
-    if(ddgImg){
-      await fetchAndSaveImage(productId, ddgImg);
-      toast('✅ Imagen autollenada', 'success');
-      if(btn){ btn.disabled = false; btn.textContent = origText; }
-      return;
-    }
-  }catch(e){ console.warn('DDG proxy search falló:', e); }
-
-  // Estrategia 4: Abrir Google Imágenes para búsqueda manual
-  window.open('https://www.google.com/search?q='+encodeURIComponent(query)+'&tbm=isch', '_blank', 'noopener');
-  toast('⚠️ No se encontró automáticamente. Busca la imagen y cópiala.', 'warning');
+  // No se encontró una página que confirme el código exacto: abre Google
+  // Imágenes para pegar el link manualmente (así nunca ponemos foto de otro).
+  window.open('https://www.google.com/search?q='+encodeURIComponent(queries[0])+'&tbm=isch', '_blank', 'noopener');
+  toast('⚠️ No se confirmó el código del producto en ninguna página. Copia la dirección de la imagen correcta y pégala en la caja de link.', 'warning');
   if(btn){ btn.disabled = false; btn.textContent = origText; }
 }
 
 // Búsqueda de imágenes via servidor local (sin CORS).
 async function localSearchImages(query){
-  const resp = await fetch(LOCAL_PROXY + '/api/search-images?q='+encodeURIComponent(query), {signal: AbortSignal.timeout(10000)});
+  const resp = await fetch(LOCAL_PROXY + '/api/search-images?q='+encodeURIComponent(query), {signal: AbortSignal.timeout(20000)});
   const data = await resp.json();
   if(data.error) throw new Error(data.error);
-  return (data.results || [])
-    .filter(r => r.image && (!r.width || r.width >= 80) && (!r.height || r.height >= 80))
-    .map(r => r.image);
+  return {
+    sources: data.sources || {},
+    results: (data.results || [])
+      .filter(r => r.image && (!r.width || r.width >= 80) && (!r.height || r.height >= 80))
+      .map(r => ({ image: r.image, page: r.page || '', title: r.title || '' }))
+  };
 }
 
 // Búsqueda de imágenes DuckDuckGo via proxies CORS externos (fallback).
@@ -7963,7 +8310,35 @@ async function ddgImageSearchProxy(query){
   return null;
 }
 
-// Busca imagen en la API Instant Answer de DuckDuckGo (CORS-friendly, sin proxy).
+// Búsqueda de imágenes en BING vía proxies CORS (fallback desde el navegador,
+// sin depender del servidor local). Bing es útil cuando DuckDuckGo está
+// bloqueado o lento en la red del local.
+async function bingImageSearchProxy(query){
+  const proxies = [
+    'https://api.allorigins.win/raw?url=',
+    'https://corsproxy.io/?url='
+  ];
+  let html = null;
+  for(const proxy of proxies){
+    try{
+      const pageUrl = 'https://www.bing.com/images/search?q='+encodeURIComponent(query)+'&qft=%2Bfilterui%3aphoto-photo&form=HDRSC2';
+      const resp = await fetch(proxy + encodeURIComponent(pageUrl), {signal: AbortSignal.timeout(12000)});
+      if(resp.ok){ html = await resp.text(); break; }
+    }catch(e){ continue; }
+  }
+  if(!html) throw new Error('No se pudo acceder a Bing');
+  const urls = [];
+  const re = /murl&quot;:&quot;([^&]+)/g;
+  let m;
+  while((m = re.exec(html)) !== null){
+    const decoded = m[1].replace(/\\u0026/g,'&').replace(/&amp;/g,'&');
+    if(!/^https?:\/\//i.test(decoded)) continue;
+    if(!/\.(jpe?g|png|webp|gif|avif)(\?|$)/i.test(decoded)) continue;
+    if(!urls.includes(decoded)) urls.push(decoded);
+    if(urls.length >= 5) break;
+  }
+  return urls;
+}
 async function ddgInstantImage(query){
   const url = 'https://api.duckduckgo.com/?q='+encodeURIComponent(query)+'&format=json';
   const resp = await fetch(url, {signal: AbortSignal.timeout(5000)});
@@ -7975,10 +8350,26 @@ async function ddgInstantImage(query){
   return null;
 }
 
+// Mide las dimensiones reales de un dataURL (para descartar iconos/logos).
+function imageDimsDataURL(dataURL){
+  return new Promise(res => {
+    const img = new Image();
+    img.onload = () => res({ w: img.naturalWidth, h: img.naturalHeight });
+    img.onerror = () => res(null);
+    img.src = dataURL;
+  });
+}
+
 // Descarga una imagen desde URL y la guarda como foto del producto.
-async function fetchAndSaveImage(productId, url){
+// skipRender=true evita redibujar todo el listado (se usa en "Autollenar
+// todos", que procesa cientos de productos seguidos).
+async function fetchAndSaveImage(productId, url, skipRender){
   const data = await fetchImageAsDataURL(url);
   const compressed = await compressDataURL(data);
+  const dims = await imageDimsDataURL(compressed);
+  if(!dims || Math.max(dims.w, dims.h) < 200){
+    throw new Error('Imagen demasiado pequeña (posible logo o icono)');
+  }
   const ok = await saveImageLocal(productId, compressed, url);
   if(!ok) throw new Error('No se pudo guardar');
   if(imgTargetId === productId){
@@ -7986,73 +8377,86 @@ async function fetchAndSaveImage(productId, url){
     if(imgInput) imgInput.value = '';
     renderImgCarousel();
   }
-  renderProductos();
+  if(!skipRender) renderProductos();
 }
 
-// Autollenar todos: recorre los productos sin imagen y les busca una foto.
+// Autollenar todos: recorre los productos sin imagen y les busca una foto,
+// procesando varios a la vez. Solo guarda imágenes VERIFICADAS (la página del
+// producto confirma el código exacto); los que no se puedan confirmar quedan
+// sin foto para no mezclarlos con otros productos.
 async function autoFillAllProducts(){
+  // LOS PRODUCTOS QUE YA TIENEN FOTO NO SE TOCAN NUNCA: solo se procesan los
+  // que están 100% sin foto. (Esto asegura que el modo Manuales —que ya tiene
+  // sus fotos— no se modifica de ninguna forma aunque se pulse el botón.)
   const sinFoto = db.productos.filter(p => getImages(p.id).length === 0);
   if(!sinFoto.length){ toast('Todos los productos ya tienen foto', 'info'); return; }
 
-  // Verificar servidor local antes de empezar
   if(localServerOk === null){
-    try{
-      const test = await fetch(LOCAL_PROXY + '/api/ping', {signal: AbortSignal.timeout(3000)});
-      localServerOk = test.ok;
-    }catch(e){ localServerOk = false; }
+    await chequearServidorLocal();
   }
   if(!localServerOk){
-    const esFile = location.protocol === 'file:';
-    const msg = esFile
-      ? '⚠️ Abre la app desde el servidor: haz doble clic en "Iniciar StockFerre.bat" y usa http://localhost:8765'
-      : '⚠️ El servidor local no está corriendo. Abre "Iniciar StockFerre.bat" primero.';
-    toast(msg, 'error');
+    toast('⚠️ El autollenado necesita el servidor local. Cierra la app y ábrela con "Iniciar StockFerre.bat".', 'error');
+    return;
+  }
+  if(localServerVersion < 2){
+    toast('⚠️ El servidor local está desactualizado. Cierra la app y ábrela con "Iniciar StockFerre.bat" para cargar el nuevo.', 'error');
     return;
   }
 
-  if(!confirm('Se buscarán imágenes para ' + sinFoto.length + ' producto(s) sin foto.\nEsto tardará unos minutos.\n\n¿Continuar?')) return;
+  const lista = sinFoto.filter(p => queriesParaProducto(p).length > 0);
+
+  if(!confirm('Se buscarán imágenes VERIFICADAS para ' + lista.length + ' producto(s) SIN FOTO.\n' +
+    'Los que ya tienen foto NO se tocan (ej. todo el modo Manuales).\n' +
+    'Solo se guardará la foto si la página del producto confirma su código exacto.\n' +
+    'Los que no se confirmen quedarán sin foto (para no equivocarse).\n\nTardará unos minutos. ¿Continuar?')) return;
 
   const btn = document.getElementById('btnAutoFillAll');
   const origText = btn ? btn.textContent : '';
   if(btn){ btn.disabled = true; }
 
-  let ok = 0, fail = 0, total = sinFoto.length;
+  let ok = 0, fail = 0, hechas = 0, total = lista.length;
+  const motivos = { 'sin-confirma': 0, 'sin-paginas': 0, 'sin-busqueda': 0, 'red-bloqueada': 0, 'sin-servidor': 0 };
+  const CONC = 5;
+  let idx = 0;
 
-  for(let i = 0; i < sinFoto.length; i++){
-    const p = sinFoto[i];
-    const query = [p.codigo, p.marca, p.nombre].filter(Boolean).join(' ');
-    if(!query){ fail++; continue; }
+  const actualizarBoton = () => {
+    if(btn) btn.textContent = '⏳ ' + (hechas) + '/' + total + ' · ✅ ' + ok + ' · ⚠️ ' + fail;
+  };
 
-    if(btn) btn.textContent = '⏳ ' + (i+1) + '/' + total + ' — ' + p.codigo;
-
-    try{
-      // 1. Servidor local (DuckDuckGo images + Wikipedia)
-      const results = await localSearchImages(query);
-      if(results.length > 0){
-        await fetchAndSaveImage(p.id, results[0]);
-        ok++;
-        await new Promise(r => setTimeout(r, 500));
-        continue;
+  async function worker(){
+    while(idx < total){
+      const i = idx++;
+      const p = lista[i];
+      const queries = queriesParaProducto(p);
+      let res;
+      try{
+        res = await buscarYGuardarImagen(p.id, p, queries);
+      }catch(e){
+        console.warn('AutoFill error para ' + p.codigo + ':', e);
+        res = { ok:false, reason:'sin-busqueda' };
       }
-      // 2. DuckDuckGo Instant Answer (CORS directo)
-      const img = await ddgInstantImage(query);
-      if(img){
-        await fetchAndSaveImage(p.id, img);
-        ok++;
-        await new Promise(r => setTimeout(r, 500));
-        continue;
+      if(res && res.ok) ok++;
+      else{
+        fail++;
+        if(res && motivos.hasOwnProperty(res.reason)) motivos[res.reason]++;
+        else motivos['sin-busqueda']++;
       }
-      fail++;
-    }catch(e){
-      console.warn('AutoFill error para ' + p.codigo + ':', e);
-      fail++;
+      hechas++;
+      actualizarBoton();
     }
-    await new Promise(r => setTimeout(r, 400));
   }
+
+  actualizarBoton();
+  await Promise.all(Array.from({ length: CONC }, worker));
 
   if(btn){ btn.disabled = false; btn.textContent = origText; }
   renderProductos();
-  toast('✅ ' + ok + ' productos auto-rellenados · ⚠️ ' + fail + ' sin resultado', ok > 0 ? 'success' : 'warning');
+  const partes = [];
+  if(motivos['sin-confirma']) partes.push('sin página que confirme: ' + motivos['sin-confirma']);
+  if(motivos['sin-paginas']) partes.push('sin página de producto: ' + motivos['sin-paginas']);
+  if(motivos['sin-busqueda']) partes.push('buscadores sin respuesta: ' + motivos['sin-busqueda']);
+  if(motivos['red-bloqueada']) partes.push('red/buscadores bloqueados: ' + motivos['red-bloqueada']);
+  toast('✅ ' + ok + ' con foto verificada · ⚠️ ' + fail + ' sin foto' + (partes.length ? ' — ' + partes.join(' · ') : ''), ok > 0 ? 'success' : 'warning');
 }
 
 function removeCurrentImage(){
@@ -8400,6 +8804,46 @@ function importBackup(file){
     }
   };
   reader.readAsText(file, 'UTF-8');
+}
+
+// Vacía el catálogo SOLO del modo actual (Manuales o Eléctricas): quita todos
+// los productos y categorías de ese modo, tanto localmente como de la nube.
+// Se usa antes de reimportar el Excel de ese modo, para que no queden
+// mezclados productos del otro modo. Ventas, compras, gastos e historial NO
+// se tocan.
+function vaciarCatalogo(){
+  if(currentRole === 'guest'){ toast('Los invitados no pueden vaciar el catálogo', 'error'); return; }
+  const nombre = currentModo === 'electrico' ? 'Eléctricas' : 'Manuales';
+  confirmDialog('Vaciar catálogo del modo ' + nombre,
+    '¿Estás seguro de vaciar todos los productos de ' + nombre + '?\n\nSe eliminarán TODOS los productos y categorías de ' + nombre + ' (en este dispositivo y en la nube). Ventas, compras, gastos e historial NO se tocan. Esta acción no se puede deshacer.',
+    ()=>{
+      const ids = (db.productos || []).map(p => p.id);
+      ids.forEach(id => marcarBorrado('productos', id)); // el vaciado viaja a los otros dispositivos
+      db.productos = [];
+      db.categorias = [];
+      saveDB(); // sube el catálogo vacío (con las tumbas) a la nube
+      vaciarProductosNube(ids); // borra también los documentos de producto de la nube
+      ids.forEach(id => removeImageLocal(id)); // quita las fotos locales de esos productos
+      renderProductos();
+      renderCategorias();
+      renderInventario();
+      document.getElementById('scanResult').innerHTML = '';
+      toast('Catálogo de ' + nombre + ' vaciado. Reimporta el Excel de ' + nombre, 'success');
+    });
+}
+
+// Borra de la nube los documentos de producto del modo actual (en lotes).
+async function vaciarProductosNube(ids){
+  const col = fbProductsCol(currentModo);
+  if(!col || !fbConfigOk() || !ids || !ids.length) return;
+  try{
+    const fs = firebase.firestore();
+    for(let i = 0; i < ids.length; i += 450){
+      const batch = fs.batch();
+      ids.slice(i, i + 450).forEach(id => { batch.delete(col.doc(id)); });
+      await batch.commit();
+    }
+  }catch(e){ console.error('Error vaciando productos de la nube', e); }
 }
 
 function factoryReset(){
@@ -10579,6 +11023,7 @@ function setupEventListeners(){
   // Importaciones CSV (desde Productos y desde Configuración)
   document.getElementById('btnImportProducts').addEventListener('click', ()=> document.getElementById('fileImportProducts').click());
   document.getElementById('btnImportProductsConfig').addEventListener('click', ()=> document.getElementById('fileImportProducts').click());
+  document.getElementById('btnVaciarProductos').addEventListener('click', vaciarCatalogo);
   // Autollenar todos los productos
   document.getElementById('btnAutoFillAll').addEventListener('click', autoFillAllProducts);
   document.getElementById('fileImportProducts').addEventListener('change', (e)=>{
@@ -10594,6 +11039,7 @@ function setupEventListeners(){
     e.target.value = '';
   });
   document.getElementById('btnManualSync').addEventListener('click', manualSync);
+  document.getElementById('btnVaciarCatalogo').addEventListener('click', vaciarCatalogo);
   document.getElementById('btnFactoryReset').addEventListener('click', factoryReset);
 }
 

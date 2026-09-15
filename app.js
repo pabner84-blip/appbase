@@ -324,9 +324,30 @@ const fbWriteQueues = {}; // docId -> { inFlight: bool, latestData: object, atte
 const FB_WRITE_MAX_ATTEMPTS = 7; // 2+4+8+16+32+64+60 ≈ 3 minutos de reintentos
 const fbWriteRetryTimers = {};   // docId -> timeout id
 
+// ANTIRREBOTE: hash estable del contenido que se sube a Firebase. Ignora los
+// campos volátiles (_savedAt, _syncedAt, _passEnc) que cambian con cada guardado
+// local aunque el contenido REAL no haya cambiado. Dos payloads con el mismo
+// hash son el mismo estado (viene de otro dispositivo o es un reintento sin
+// cambios reales).
+function fbPayloadHash(data){
+  try{
+    const d = JSON.parse(JSON.stringify(data || {}));
+    delete d._savedAt;
+    delete d._syncedAt;
+    delete d._passEnc;
+    return JSON.stringify(d);
+  }catch(e){ return null; }
+}
+
 function scheduleFirestoreWrite(docId, ref, data){
   let q = fbWriteQueues[docId];
   if(!q){ q = fbWriteQueues[docId] = { inFlight: false, latestData: null, attempt: 0 }; }
+  // ANTIRREBOTE: si el contenido es idéntico al último que este dispositivo ya
+  // subió con éxito a Firebase, es un "eco" (lo recibió de otro dispositivo o
+  // se reintenta sin cambios reales) y NO se sube de nuevo. Así dos dispositivos
+  // no se rebotan la misma copia infinitamente gastando lecturas/escrituras.
+  const phash = fbPayloadHash(data);
+  if(q.lastSentHash && phash && phash === q.lastSentHash){ return; }
   q.latestData = data; // siempre nos quedamos con la versión más reciente conocida
   if(q.inFlight) return; // ya hay una escritura en camino; cuando termine, tomará latestData
   runQueuedWrite(docId, ref);
@@ -342,6 +363,7 @@ function runQueuedWrite(docId, ref){
   ref.set(toSend).then(()=>{
     q.attempt = 0;
     setSyncStatus('synced');
+    q.lastSentHash = fbPayloadHash(toSend); // antirrebote: marca lo último subido con éxito
     finishQueuedWrite(docId, ref, toSend);
   }).catch(err=>{
     console.error('Error guardando en Firebase', err);
@@ -963,10 +985,13 @@ function startSyncWatchdog(){
     if(typeof firebase === 'undefined' || typeof firebaseConfig === 'undefined') return;
     if(!fbConfigOk() || !firebaseToggleOn()) return;
     if(fbReconnecting) return;
-    const stEl = document.getElementById('sidebarSyncStatus');
-    const statusTxt = stEl ? (stEl.textContent || '') : '';
-    const looksError = statusTxt.indexOf('Error') !== -1;
-    if(!fbReady || looksError){
+    // ANTIRREBOTE: NO se reconecta solo porque el cartel diga "Error". Cuando la
+    // cuota gratuita de Firestore está llena, las escrituras fallan y cada
+    // reconexión vuelve a leer las colecciones enteras de ventas/ajustes/gastos
+    // (miles de lecturas en un bucle que agota el cupo). El SDK de Firebase ya
+    // se reconecta solo al volver la red; aquí solo reintentamos si perdimos por
+    // completo la conexión inicial (fbReady en false).
+    if(!fbReady){
       fbReconnecting = true;
       setTimeout(()=>{ fbReconnecting = false; }, 8000);
       if(currentModo === 'invitado'){

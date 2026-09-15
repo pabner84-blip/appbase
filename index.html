@@ -188,6 +188,7 @@
         <button class="btn btn-primary admin-only" id="btnNewProduct">+ Nuevo producto</button>
         <button class="btn btn-secondary admin-only" id="btnExportProducts">📤 Exportar Excel</button>
         <button class="btn btn-secondary admin-only" id="btnImportProducts">📥 Importar Excel</button>
+        <button class="btn btn-danger admin-only" id="btnVaciarProductos">🗑️ Vaciar productos</button>
         <button class="btn btn-primary admin-only" id="btnAutoFillAll">🖼️ Autollenar todos</button>
       </div>
       <div class="table-wrap">
@@ -333,7 +334,7 @@
         <table class="table" id="comprasTable">
           <thead>
             <tr>
-              <th></th><th>Código</th><th>Producto</th><th>Ingresos</th><th>Unidades</th>
+              <th></th><th>Código</th><th>Producto</th><th>Obs.</th><th>Ingresos</th><th>Unidades</th>
               <th>Último precio</th><th>Última fecha</th><th>Total invertido</th><th>Historial</th>
             </tr>
           </thead>
@@ -571,6 +572,14 @@
           <div class="panel-body">
             <p class="hint">Acepta un CSV exportado antes (coma, punto y coma o tabulador), el .xls viejo o el archivo .xlsx que genera "Exportar Excel". Si lo editas en Excel y lo guardas, impórtalo de vuelta igual. Formato: <code>CODIGO,DESCRIPCION,MARCA,CATEGORIA,CODIGO DE BARRAS,PRECIO COMPRA,PRECIO VENTA</code> (código de barras es opcional).</p>
             <button class="btn btn-secondary" id="btnImportProductsConfig">📥 Elegir archivo CSV o Excel</button>
+          </div>
+        </div>
+
+        <div class="panel admin-only">
+          <div class="panel-header"><h3>🗑️ Vaciar catálogo</h3></div>
+          <div class="panel-body">
+            <p class="hint">Elimina TODOS los productos y categorías del modo actual (🛠️ Manuales o ⚡ Eléctricas), también de la nube. Úsalo antes de reimportar el Excel de ese modo para que no queden mezclados productos del otro modo. <strong>No borra ventas, compras, gastos ni historial.</strong></p>
+            <button class="btn btn-danger" id="btnVaciarCatalogo">🗑️ Vaciar catálogo del modo actual</button>
           </div>
         </div>
 

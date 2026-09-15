@@ -1162,14 +1162,26 @@ async function deleteVentaDocs(ids, modo){
 async function backfillVentas(modo){
   const col = fbVentasCol(modo);
   if(!col) return;
+  // Una sola vez por dominio: releer TODA la colección de ventas en cada
+  // apertura también quema el cupo de lecturas (una lectura por venta).
+  const markKey = 'fs_backfill_ventas_' + (modo || DOMAIN);
+  let done = false;
+  try{ done = localStorage.getItem(markKey) === '1'; }catch(e){}
+  if(done) return;
   const arr = (db.ventas || []);
-  if(!arr.length) return;
+  if(!arr.length){
+    try{ localStorage.setItem(markKey, '1'); }catch(e){}
+    return;
+  }
   try{
     const snap = await col.get();
     const existing = new Set(snap.docs.map(d => d.id));
     const missing = arr.filter(v => v && v.id && !existing.has(String(v.id)));
-    if(missing.length) await syncVentaDocs(missing, modo);
-  }catch(e){ console.error('Error respaldando ventas en la nube', e); }
+    if(missing.length){
+      await syncVentaDocs(missing, modo);
+    }
+    try{ localStorage.setItem(markKey, '1'); }catch(e){}
+  }catch(e){ if(e && e.code !== 'permission-denied') console.error('Error respaldando ventas en la nube', e); }
 }
 
 // Escucha la colección del dominio (invitado/manual/electrico) y corrige la
@@ -1425,10 +1437,19 @@ async function deleteGastoPrestamoDocs(ids, modo){
 async function backfillGastosPrestamos(modo){
   const col = fbGpCol(modo);
   if(!col) return;
+  // Una sola vez por dominio (igual que ventas/productos) para no releer la
+  // colección entera en cada apertura y agotar el cupo gratuito de lecturas.
+  const markKey = 'fs_backfill_gastos_' + (modo || DOMAIN);
+  let done = false;
+  try{ done = localStorage.getItem(markKey) === '1'; }catch(e){}
+  if(done) return;
   // En el invitado se sube todo (incluidos los "sin color", para que los
   // dispositivos invitados compartan); en el dueño solo los de su dominio.
   const arr = (db.gastosPrestamos || []).filter(g => g && g.id && (modo === 'invitado' || g.modo === 'manual' || g.modo === 'electrico'));
-  if(!arr.length) return;
+  if(!arr.length){
+    try{ localStorage.setItem(markKey, '1'); }catch(e){}
+    return;
+  }
   try{
     const snap = await col.get();
     const existing = new Set(snap.docs.map(d => d.id));
@@ -1439,7 +1460,8 @@ async function backfillGastosPrestamos(modo){
       missing.slice(i, i + 450).forEach(g => batch.set(col.doc(String(g.id)), gpDocData(g)));
       await batch.commit();
     }
-  }catch(e){ console.error('Error respaldando gastos/préstamos en la nube', e); }
+    try{ localStorage.setItem(markKey, '1'); }catch(e){}
+  }catch(e){ if(e && e.code !== 'permission-denied') console.error('Error respaldando gastos/préstamos en la nube', e); }
 }
 
 function startGastosPrestamosListener(modo){
@@ -1497,14 +1519,32 @@ function stopGastosPrestamosListeners(){
 async function backfillProductos(modo){
   const col = fbProductsCol(modo);
   if(!col) return;
+  // Una sola vez por modo: releer la colección entera en cada apertura quema
+  // miles de lecturas del cupo gratis de Firestore (eso dejaba el celular sin
+  // poder ver los productos nuevos). Una vez migrado, los productos nuevos y
+  // editados se suben solos con syncProductoDoc/startStockListener.
+  const markKey = 'fs_backfill_prod_' + modo;
+  let done = false;
+  try{ done = localStorage.getItem(markKey) === '1'; }catch(e){}
+  if(done) return;
   const local = modo === currentModo ? db : loadModoDB(modo);
   const arr = (local && local.productos) || [];
-  if(arr.length === 0) return;
+  if(arr.length === 0){
+    // Nada local que respaldar: se marca igual para no releer la colección
+    // en cada apertura (los productos nuevos se suben solos al crearse).
+    try{ localStorage.setItem(markKey, '1'); }catch(e){}
+    return;
+  }
   try{
     const snap = await col.get();
     const existing = new Set(snap.docs.map(d => d.id));
     const missing = arr.filter(p => p && p.id && !existing.has(p.id));
-    if(missing.length === 0) return;
+    // Nada que respaldar: todo el catálogo local ya tiene documento. Se marca
+    // como hecho para no volver a releer la colección entera.
+    if(missing.length === 0){
+      try{ localStorage.setItem(markKey, '1'); }catch(e){}
+      return;
+    }
     const fs = firebase.firestore();
     for(let i = 0; i < missing.length; i += 450){
       const batch = fs.batch();
@@ -1515,7 +1555,8 @@ async function backfillProductos(modo){
       });
       await batch.commit();
     }
-  }catch(e){ console.error('Error respaldando productos en la nube', e); }
+    try{ localStorage.setItem(markKey, '1'); }catch(e){}
+  }catch(e){ if(e && e.code !== 'permission-denied') console.error('Error respaldando productos en la nube', e); }
 }
 
 // Escribe los documentos de una lista de productos (para importaciones CSV).
@@ -1547,6 +1588,16 @@ function startStockListener(modo){
   if(fbProductosUnsubs[modo]){ try{ fbProductosUnsubs[modo](); }catch(e){ /* ignorar */ } }
   stockStoreCache[modo] = null;
   let timer = null, changed = false;
+  let sinceKey = 'fs_laststock_' + modo;
+
+  // IMPORTANTE (quema de lecturas): antes se escuchaba la colección COMPLETA
+  // de productos en cada apertura (miles de documentos = miles de lecturas del
+  // cupo gratis, que se agotaba y le quitaba al celular la vista de los
+  // productos nuevos). Ahora se escucha SOLO lo que cambió en las últimas 24 h
+  // (_updatedAt > ahora - 24h). Es barato (unas decenas de lecturas por
+  // apertura), es a prueba de relojes desincronizados entre dispositivos y
+  // nunca se pierde un cambio. La primera vez igual queda cubierta porque el
+  // propio catálogo base se mantiene en la copia local de este dispositivo.
 
   const flush = () => {
     if(!changed) return;
@@ -1570,11 +1621,13 @@ function startStockListener(modo){
     }
   };
 
-  fbProductosUnsubs[modo] = col.onSnapshot(snap => {
+  const query = col.where('_updatedAt', '>', Date.now() - 24 * 3600 * 1000);
+  fbProductosUnsubs[modo] = query.onSnapshot(snap => {
     snap.docChanges().forEach(ch => {
       if(ch.type === 'removed' || ch.doc.metadata.hasPendingWrites) return;
       const data = ch.doc.data();
       if(!data || !data.id) return;
+      try{ localStorage.setItem(sinceKey, String(Date.now())); }catch(e){}
       if(!stockStoreCache[modo]){
         try{
           stockStoreCache[modo] = modo === currentModo ? db : loadModoDB(modo);
@@ -1601,6 +1654,9 @@ function startStockListener(modo){
     }
   }, err => {
     console.error('Error escuchando stock de productos (' + modo + ')', err);
+    // Degrada con seguridad: si la consulta incremental fallara (p.ej. sin
+    // índice automático), se reintenta completo en la próxima reconexión.
+    try{ localStorage.removeItem(sinceKey); }catch(e){}
   });
 }
 

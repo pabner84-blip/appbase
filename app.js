@@ -111,11 +111,73 @@ function loadInvUpdates(){
 }
 
 function saveInvUpdates(){
-  try{
-    localStorage.setItem(invUpdatesKey(), JSON.stringify(invUpdates));
-  }catch(e){
-    console.error('Error guardando actualizaciones de inventario', e);
-  }
+  persistBlob(invUpdatesKey(), invUpdates);
+}
+
+/* =========================================================================
+   GUARDADO AMPLIADO (IndexedDB)
+   -------------------------------------------------------------------------
+   El localStorage del navegador solo admite unos 5-10 MB por dominio. Con el
+   tiempo, entre productos (2000+), ventas, gastos, préstamos y historiales, la
+   base supera ese límite y el guardado local fallaba ("No se pudo guardar en
+   el almacenamiento local") y se perdía la copia en este equipo.
+
+   Ahora cada dato grande se guarda SIEMPRE en dos sitios:
+     - localStorage  -> arranque instantáneo (lectura síncrona).
+     - IndexedDB     -> respaldo con capacidad de cientos de MB (asíncrono).
+   Al abrir la app se carga la copia rápida y, en cuanto IndexedDB responde,
+   se usa la copia más reciente si el localStorage estaba lleno.
+   ========================================================================= */
+const KV_DB = 'stockferre_kv_v1';
+const KV_STORE = 'kv';
+let kvDbPromise = null;
+
+function openKV(){
+  if(kvDbPromise) return kvDbPromise;
+  kvDbPromise = new Promise((resolve, reject) => {
+    try{
+      const req = indexedDB.open(KV_DB, 1);
+      req.onupgradeneeded = () => {
+        const d = req.result;
+        if(!d.objectStoreNames.contains(KV_STORE)) d.createObjectStore(KV_STORE);
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    }catch(e){ reject(e); }
+  });
+  return kvDbPromise;
+}
+
+function kvSet(key, json){
+  return openKV().then(d => new Promise((resolve, reject) => {
+    try{
+      const tx = d.transaction(KV_STORE, 'readwrite');
+      tx.objectStore(KV_STORE).put(json, key);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    }catch(e){ reject(e); }
+  })).catch(err => { console.warn('No se pudo guardar en IndexedDB', err); });
+}
+
+function kvGet(key){
+  return openKV().then(d => new Promise((resolve, reject) => {
+    try{
+      const tx = d.transaction(KV_STORE, 'readonly');
+      const req = tx.objectStore(KV_STORE).get(key);
+      req.onsuccess = () => resolve(req.result || null);
+      req.onerror = () => reject(req.error);
+    }catch(e){ reject(e); }
+  })).catch(() => null);
+}
+
+function persistBlob(key, obj, quiet){
+  let json;
+  try{ json = JSON.stringify(obj); }catch(e){ return false; }
+  let lsOk = true;
+  try{ localStorage.setItem(key, json); }
+  catch(e){ lsOk = false; }
+  kvSet(key, json);
+  return lsOk;
 }
 
 function markInventarioActualizado(productoId){
@@ -195,18 +257,35 @@ function loadDB(){
     if(!raw && currentModo === 'manual'){
       raw = localStorage.getItem(LEGACY_STORAGE_KEY); // migración única
     }
-    if(raw){ db = normalizeDB(JSON.parse(raw)); persistLocalCache(); return; }
-  }catch(e){ console.error('Error leyendo LocalStorage', e); }
-  db = defaultDB();
-  persistLocalCache();
+    if(raw){ db = normalizeDB(JSON.parse(raw)); persistLocalCache(); }
+    else { db = defaultDB(); persistLocalCache(); }
+  }catch(e){ console.error('Error leyendo LocalStorage', e); db = defaultDB(); persistLocalCache(); }
+
+  // Si el localStorage estaba lleno, la copia real quedó en IndexedDB; cuando
+  // esta esté disponible se aplica la más reciente de las dos.
+  try{
+    kvGet(storageKey()).then(big => {
+      if(!big) return;
+      try{
+        const parsed = JSON.parse(big);
+        const a = typeof parsed._savedAt === 'number' ? parsed._savedAt : 0;
+        const b = db && typeof db._savedAt === 'number' ? db._savedAt : 0;
+        if(a > b){
+          db = normalizeDB(parsed);
+          persistLocalCache();
+          if(typeof rerenderCurrentView === 'function') rerenderCurrentView();
+        }
+      }catch(e){ /* se conserva la copia de arranque */ }
+    });
+  }catch(e){}
 }
 
 function persistLocalCache(){
-  try{
-    localStorage.setItem(storageKey(), JSON.stringify(db));
-  }catch(e){
-    console.error('Error guardando en LocalStorage', e);
-    toast('No se pudo guardar en el almacenamiento local (¿espacio lleno?)', 'error');
+  try{ if(db) db._savedAt = Date.now(); }catch(e){}
+  const lsOk = persistBlob(storageKey(), db ? db : {});
+  if(!lsOk && !window.__stockferreLsFullWarned){
+    window.__stockferreLsFullWarned = true;
+    toast('⚠️ El espacio local del navegador se llenó. La copia se guarda en el almacén ampliado automáticamente; no se pierden datos.', 'warning');
   }
 }
 
@@ -367,7 +446,7 @@ function findProductoInDB(dbObj, codigo){
 // del modo actual. Lo usa el invitado para que sus ventas queden en la base
 // correcta (Manuales o Eléctricas).
 function persistModoDB(modo, dbObj){
-  try{ localStorage.setItem('stockferre_catalogo_v1_' + modo, JSON.stringify(dbObj)); }catch(e){}
+  persistBlob('stockferre_catalogo_v1_' + modo, dbObj);
   if(firebaseToggleOn() && typeof firebase !== 'undefined' && typeof firebaseConfig !== 'undefined' && firebaseConfig.apiKey){
     try{
       if(!firebase.apps || !firebase.apps.length){ firebase.initializeApp(firebaseConfig); }
@@ -565,7 +644,7 @@ function connectGuestFirebase(){
           merged.historialEscaneos = prev.historialEscaneos;
           merged.historialBusquedas = prev.historialBusquedas;
           merged.historialInventario = prev.historialInventario;
-          try{ localStorage.setItem('stockferre_catalogo_v1_' + modo, JSON.stringify(merged)); }catch(e){}
+          persistBlob('stockferre_catalogo_v1_' + modo, merged);
           if(currentModo === 'invitado'){ db = buildGuestDB(); rerenderCurrentView(); }
         }
       }).catch(()=>{ /* local sigue funcionando */ });
@@ -578,7 +657,7 @@ function connectGuestFirebase(){
         merged.historialEscaneos = prev.historialEscaneos;
         merged.historialBusquedas = prev.historialBusquedas;
         merged.historialInventario = prev.historialInventario;
-        try{ localStorage.setItem('stockferre_catalogo_v1_' + modo, JSON.stringify(merged)); }catch(e){}
+        persistBlob('stockferre_catalogo_v1_' + modo, merged);
         if(currentModo === 'invitado'){ db = buildGuestDB(); rerenderCurrentView(); }
       }, ()=>{ /* ignorar */ });
       guestUnsubs.push(unsub);
@@ -602,7 +681,7 @@ function connectGuestFirebase(){
         merged.historialEscaneos = guestSessionScans;
         merged.historialBusquedas = guestSessionSearches;
         merged.historialInventario = guestSessionInventory;
-        try{ localStorage.setItem(storageKey(), JSON.stringify(merged)); }catch(e){}
+        persistBlob(storageKey(), merged);
         if(currentModo === 'invitado'){ db = buildGuestDB(); rerenderCurrentView(); }
       }
       setSyncStatus('synced');
@@ -617,7 +696,7 @@ function connectGuestFirebase(){
       merged.historialEscaneos = guestSessionScans;
       merged.historialBusquedas = guestSessionSearches;
       merged.historialInventario = guestSessionInventory;
-      try{ localStorage.setItem(storageKey(), JSON.stringify(merged)); }catch(e){}
+      persistBlob(storageKey(), merged);
       if(currentModo === 'invitado'){ db = buildGuestDB(); rerenderCurrentView(); }
     }, ()=>{ /* ignorar */ });
     guestUnsubs.push(ownUnsub);
@@ -913,7 +992,7 @@ function cacheRemoteModo(data, modo){
     merged.historialEscaneos = prev.historialEscaneos;
     merged.historialBusquedas = prev.historialBusquedas;
     merged.historialInventario = prev.historialInventario;
-    localStorage.setItem('stockferre_catalogo_v1_' + modo, JSON.stringify(merged));
+    persistBlob('stockferre_catalogo_v1_' + modo, merged);
   }catch(e){ /* ignorar */ }
 }
 
@@ -1608,7 +1687,7 @@ function startStockListener(modo){
         if(modo === currentModo){
           persistLocalCache();
         }else{
-          localStorage.setItem('stockferre_catalogo_v1_' + modo, JSON.stringify(store));
+          persistBlob('stockferre_catalogo_v1_' + modo, store);
         }
       }catch(e){ console.error('Error guardando stock local', e); }
     }

@@ -170,9 +170,34 @@ function kvGet(key){
   })).catch(() => null);
 }
 
+const blobCache = {}; // espejo en memoria de las bases guardadas (útil cuando el LocalStorage está lleno)
+
+// Al arrancar, precarga en memoria (blobCache) todo lo de IndexedDB. Así
+// loadModoDB/loadBaseDB pueden volver a leer las bases de los otros modos aunque
+// el LocalStorage chico esté lleno (donde solo quedó el almacén ampliado).
+function primeKVCache(){
+  try{
+    openKV().then(d => new Promise((resolve) => {
+      try{
+        const tx = d.transaction(KV_STORE, 'readonly');
+        const req = tx.objectStore(KV_STORE).openCursor();
+        req.onsuccess = () => {
+          const cur = req.result;
+          if(cur){
+            try{ if(typeof cur.value === 'string') blobCache[cur.key] = JSON.parse(cur.value); }catch(e){}
+            cur.continue();
+          }else{ resolve(); }
+        };
+        req.onerror = () => resolve();
+      }catch(e){ resolve(); }
+    })).catch(()=>{});
+  }catch(e){}
+}
+
 function persistBlob(key, obj, quiet){
   let json;
   try{ json = JSON.stringify(obj); }catch(e){ return false; }
+  blobCache[key] = obj;
   let lsOk = true;
   try{ localStorage.setItem(key, json); }
   catch(e){ lsOk = false; }
@@ -412,6 +437,13 @@ function loadModoDB(modo){
   try{ raw = localStorage.getItem('stockferre_catalogo_v1_' + modo); }catch(e){}
   if(!raw && modo === 'manual'){ try{ raw = localStorage.getItem(LEGACY_STORAGE_KEY); }catch(e){} }
   if(raw){ try{ return normalizeDB(JSON.parse(raw)); }catch(e){ return defaultDB(); } }
+  // LocalStorage lleno o vacío: la copia real puede estar en el almacén ampliado
+  // (IndexedDB), precargada en memoria por primeKVCache() al arrancar.
+  const cached = blobCache['stockferre_catalogo_v1_' + modo];
+  if(cached){ try{ return normalizeDB(cached); }catch(e){} }
+  if(modo === 'manual' && blobCache[LEGACY_STORAGE_KEY]){
+    try{ return normalizeDB(blobCache[LEGACY_STORAGE_KEY]); }catch(e){}
+  }
   return defaultDB();
 }
 
@@ -663,6 +695,7 @@ function connectGuestFirebase(){
       guestUnsubs.push(unsub);
       backfillProductos(modo);
       startStockListener(modo);
+      assimilateCatalogFromCloud(modo);
     });
     // 2) Escucha el documento PROPIO del invitado (ventas/gastos/finanzas)
     //    y habilita escritura para que saveDB() suba ventas/gastos a Firebase.
@@ -932,6 +965,11 @@ async function connectFirebase(){
     try{ await withTimeout(backfillProductos(otherModo), 15000); }catch(e){ /* no bloquea */ }
     startStockListener(currentModo);
     startStockListener(otherModo);
+    // Sin esperar: adopta en este dispositivo los productos que le falten de la
+    // colección (una sola vez por modo). Así el catálogo completo llega aunque la
+    // base local esté llena o el documento consolidado pese demasiado.
+    assimilateCatalogFromCloud(currentModo);
+    assimilateCatalogFromCloud(otherModo);
     // VENTAS COMPARTIDAS del dueño: cada modo (manual/electrico) tiene su
     // PROPIA colección y sus propios dispositivos. Solo se escucha el dominio
     // del modo actual; al cambiar de modo se re-conecta con su colección.
@@ -1783,6 +1821,76 @@ function stopStockListeners(){
     try{ fbProductosUnsubs[modo](); }catch(e){ /* ignorar */ }
   });
   Object.keys(stockStoreCache).forEach(k => { stockStoreCache[k] = null; });
+}
+
+// Convierte el documento de producto de la nube (delgado) a un producto local
+// completo, para agregarlo al catálogo cuando llega desde otro dispositivo.
+function cloudProductoToDB(data){
+  return {
+    id: data.id,
+    codigo: data.codigo || '',
+    nombre: data.nombre || '',
+    marca: data.marca || '',
+    categoria: data.categoria || '',
+    codigoBarras: data.codigoBarras || '',
+    precioCompra: Number(data.precioCompra) || 0,
+    precioMarca: Number(data.precioMarca) || 0,
+    precioVenta: Number(data.precioVenta) || 0,
+    stock: Number(data.stock) || 0,
+    stockMin: Number(data.stockMin) || 0,
+    caracteristicas: '',
+    fechaCreacion: todayISO(),
+    _updatedAt: typeof data._updatedAt === 'number' ? data._updatedAt : Date.now()
+  };
+}
+
+// UNA vez por dispositivo, relee la colección completa de productos de un modo y
+// agrega los que a este dispositivo le faltan (p. ej. los registrados en la compu
+// con una base que quedó grande). El marcador se guarda en IndexedDB para que
+// funcione aunque el LocalStorage esté lleno.
+async function assimilateCatalogFromCloud(modo){
+  const col = fbProductsCol(modo);
+  if(!col) return;
+  const markKey = 'fs_catalog_pull_' + modo;
+  // Marca con tiempo: se re-asimila una vez por semana para que los productos
+  // registrados mientras este dispositivo estuvo apagado (más de 24 h) también
+  // lleguen aunque ya hayan salido de la ventana del listener.
+  try{
+    const done = await kvGet(markKey);
+    if(done){
+      const parts = String(done).split('@');
+      if(parts[0] === '1'){
+        const doneAt = Number(parts[1] || 0);
+        if(!doneAt || (Date.now() - doneAt) < 7 * 24 * 3600 * 1000) return;
+      }
+    }
+  }catch(e){}
+  try{
+    const snap = await col.get();
+    const store = modo === currentModo ? db : loadModoDB(modo);
+    if(!store || !Array.isArray(store.productos)) return;
+    const present = new Set(store.productos.map(p => p && p.id));
+    const tbs = (store.tombstones && store.tombstones.productos) || (db.tombstones || {}).productos;
+    const add = [];
+    snap.docs.forEach(doc => {
+      const data = doc.data();
+      if(!data || !data.id) return;
+      if(present.has(data.id)) return;
+      if(tbs && tbs[String(data.id)]) return;
+      add.push(cloudProductoToDB(data));
+    });
+    if(add.length){
+      store.productos = store.productos.concat(add);
+      if(modo === currentModo){
+        persistLocalCache();
+        rerenderCurrentView();
+      }else{
+        persistBlob('stockferre_catalogo_v1_' + modo, store);
+        if(currentModo === 'invitado'){ db = buildGuestDB(); rerenderCurrentView(); }
+      }
+    }
+    try{ await kvSet(markKey, '1@' + Date.now()); }catch(e){}
+  }catch(e){ if(e && e.code !== 'permission-denied') console.error('Error asimilando catálogo de la nube (' + modo + ')', e); }
 }
 
 // Activa la persistencia offline UNA sola vez por sesión: las escrituras que
@@ -11045,6 +11153,7 @@ function setupEventListeners(){
 
 function init(){
   restoreModo(); // decide qué modo/rol estaba activo ANTES de cargar datos
+  primeKVCache(); // si el LocalStorage está lleno, recupera las bases de IndexedDB en memoria
   loadDB();
   loadInvUpdates();
   loadImagesForModo(currentModo).then(()=> rerenderCurrentView()); // imágenes locales de este dispositivo

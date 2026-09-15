@@ -694,6 +694,7 @@ function connectGuestFirebase(){
       }, ()=>{ /* ignorar */ });
       guestUnsubs.push(unsub);
       backfillProductos(modo);
+      syncCaracteristicasCloud(modo);
       startStockListener(modo);
       assimilateCatalogFromCloud(modo);
     });
@@ -963,6 +964,8 @@ async function connectFirebase(){
     // stock local al día con el valor EXACTO de la nube.
     try{ await withTimeout(backfillProductos(currentModo), 15000); }catch(e){ /* no bloquea */ }
     try{ await withTimeout(backfillProductos(otherModo), 15000); }catch(e){ /* no bloquea */ }
+    try{ await withTimeout(syncCaracteristicasCloud(currentModo), 15000); }catch(e){ /* no bloquea */ }
+    try{ await withTimeout(syncCaracteristicasCloud(otherModo), 15000); }catch(e){ /* no bloquea */ }
     startStockListener(currentModo);
     startStockListener(otherModo);
     // Sin esperar: adopta en este dispositivo los productos que le falten de la
@@ -1105,6 +1108,7 @@ function productoDocData(p){
     precioVenta: Number(p.precioVenta) || 0,
     stock: Number(p.stock) || 0,
     stockMin: Number(p.stockMin) || 0,
+    caracteristicas: String(p.caracteristicas || ''),
     _updatedAt: typeof p._updatedAt === 'number' ? p._updatedAt : Date.now()
   };
 }
@@ -1676,6 +1680,51 @@ async function backfillProductos(modo){
   }catch(e){ if(e && e.code !== 'permission-denied') console.error('Error respaldando productos en la nube', e); }
 }
 
+// UNA vez por modo: reenvía a la nube las CARACTERÍSTICAS de los productos
+// locales que la documentación individual todavía no tiene (los documentos de
+// producto se crearon antes de que existiera ese campo). Así el celular que
+// las recibe por listener vuelve a ver "Características" sin reimportar nada.
+async function syncCaracteristicasCloud(modo){
+  const col = fbProductsCol(modo);
+  if(!col) return;
+  const markKey = 'fs_caract_sync_' + modo;
+  // La marca va en IndexedDB (no LocalStorage): puede que el LocalStorage esté
+  // lleno, y si fallara no se marcaría y nos quemaríamos lecturas cada apertura.
+  try{ if(await kvGet(markKey) === '1') return; }catch(e){}
+  const local = modo === currentModo ? db : loadModoDB(modo);
+  const arr = (local && local.productos) || [];
+  if(arr.length === 0){
+    try{ await kvSet(markKey, '1'); }catch(e){}
+    return;
+  }
+  try{
+    const snap = await col.get();
+    const batched = [];
+    const docsById = {};
+    snap.docs.forEach(d => { docsById[d.id] = d.data() || {}; });
+    arr.forEach(p => {
+      if(!p || !p.id) return;
+      const localCar = String(p.caracteristicas || '');
+      const cloudCar = String(docsById[p.id] ? docsById[p.id].caracteristicas || '' : '');
+      if(localCar && localCar !== cloudCar) batched.push(p);
+    });
+    if(batched.length){
+      const fs = firebase.firestore();
+      for(let i = 0; i < batched.length; i += 450){
+        const batch = fs.batch();
+        batched.slice(i, i + 450).forEach(p => {
+          batch.set(col.doc(p.id), {
+            caracteristicas: String(p.caracteristicas || ''),
+            _updatedAt: Date.now()
+          }, { merge: true });
+        });
+        await batch.commit();
+      }
+    }
+    try{ await kvSet(markKey, '1'); }catch(e){}
+  }catch(e){ if(e && e.code !== 'permission-denied') console.error('Error sincronizando características a la nube', e); }
+}
+
 // Escribe los documentos de una lista de productos (para importaciones CSV).
 async function syncProductoDocs(list, modo){
   const col = fbProductsCol(modo);
@@ -1769,7 +1818,7 @@ function startStockListener(modo){
         }
         const remoteTs = typeof data._updatedAt === 'number' ? data._updatedAt : 0;
         if(remoteTs >= (p._updatedAt || 0)){
-          ['codigo','nombre','marca','categoria','precioCompra','precioMarca','precioVenta','stockMin'].forEach(f => {
+          ['codigo','nombre','marca','categoria','precioCompra','precioMarca','precioVenta','stockMin','caracteristicas'].forEach(f => {
             if(data[f] !== undefined && String(data[f]) !== String(p[f])){
               p[f] = typeof data[f] === 'number' ? Number(data[f]) : data[f];
               touched = true;
@@ -1795,7 +1844,7 @@ function startStockListener(modo){
           precioVenta: Number(data.precioVenta) || 0,
           stock: Number(data.stock) || 0,
           stockMin: Number(data.stockMin) || 0,
-          caracteristicas: '',
+          caracteristicas: data.caracteristicas || '',
           fechaCreacion: todayISO(),
           _updatedAt: typeof data._updatedAt === 'number' ? data._updatedAt : Date.now()
         };
@@ -1838,7 +1887,7 @@ function cloudProductoToDB(data){
     precioVenta: Number(data.precioVenta) || 0,
     stock: Number(data.stock) || 0,
     stockMin: Number(data.stockMin) || 0,
-    caracteristicas: '',
+    caracteristicas: data.caracteristicas || '',
     fechaCreacion: todayISO(),
     _updatedAt: typeof data._updatedAt === 'number' ? data._updatedAt : Date.now()
   };
@@ -1869,18 +1918,31 @@ async function assimilateCatalogFromCloud(modo){
     const snap = await col.get();
     const store = modo === currentModo ? db : loadModoDB(modo);
     if(!store || !Array.isArray(store.productos)) return;
-    const present = new Set(store.productos.map(p => p && p.id));
+    const byId = new Map(store.productos.filter(p => p && p.id).map(p => [p.id, p]));
     const tbs = (store.tombstones && store.tombstones.productos) || (db.tombstones || {}).productos;
     const add = [];
+    let refilled = false;
     snap.docs.forEach(doc => {
       const data = doc.data();
       if(!data || !data.id) return;
-      if(present.has(data.id)) return;
       if(tbs && tbs[String(data.id)]) return;
+      const existing = byId.get(data.id);
+      if(existing){
+        // Producto ya presente: si este dispositivo quedó sin características
+        // (por ej. las trajo antes de que existiera el campo), se rellenan con
+        // las de la nube sin pisar las que ya estén.
+        const localCar = String(existing.caracteristicas || '');
+        const cloudCar = String(data.caracteristicas || '');
+        if(cloudCar && !localCar){
+          existing.caracteristicas = cloudCar;
+          refilled = true;
+        }
+        return;
+      }
       add.push(cloudProductoToDB(data));
     });
-    if(add.length){
-      store.productos = store.productos.concat(add);
+    if(add.length || refilled){
+      if(add.length) store.productos = store.productos.concat(add);
       if(modo === currentModo){
         persistLocalCache();
         rerenderCurrentView();

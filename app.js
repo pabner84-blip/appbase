@@ -264,7 +264,77 @@ function normalizeDB(obj){
     // termine de guardar último" borre silenciosamente al otro.
     p._updatedAt = typeof p._updatedAt === 'number' ? p._updatedAt : 0;
   });
+  // Deduplicación por CÓDIGO: si la nube quedó con dos documentos del mismo
+  // producto (por reimportar el mismo Excel en otro dispositivo, que genera
+  // ids nuevos), aquí se conserva SOLO el ejemplar más útil (con stock, con
+  // características o el más reciente) y se descartan las copias extra. Sin
+  // esto, cada dispositivo terminaría mostrando el producto duplicado.
+  dedupeProductosByCode(obj.productos);
   return obj;
+}
+
+// Elimina del arreglo los productos que comparten el MISMO código. Modifica el
+// arreglo en el lugar; los que no tienen código no se tocan (no hay forma de
+// saber si son duplicados).
+function dedupeProductosByCode(list){
+  if(!Array.isArray(list)) return list;
+  const seen = Object.create(null); // código normalizado -> índice en `keep`
+  const keep = [];
+  for(let i = 0; i < list.length; i++){
+    const p = list[i];
+    if(!p || p.id == null){ keep.push(p); continue; }
+    const code = normalize(p.codigo);
+    if(!code){ keep.push(p); continue; }
+    if(!(code in seen)){
+      seen[code] = keep.length;
+      keep.push(p);
+      continue;
+    }
+    const idx = seen[code];
+    keep[idx] = mejorProducto(keep[idx], p);
+  }
+  list.length = 0;
+  Array.prototype.push.apply(list, keep);
+  return list;
+}
+
+// De dos productos con el mismo código, elige cuál se queda: primero el que
+// tenga stock (no 0), después el que tenga características, después el más
+// reciente y, si todo es igual, el primero. Es DETERMINISTA: todos los
+// dispositivos eligen al mismo ganador y el catálogo converge a uno por código.
+function mejorProducto(a, b){
+  const aCar = String(a.caracteristicas || '').length > 0 ? 1 : 0;
+  const bCar = String(b.caracteristicas || '').length > 0 ? 1 : 0;
+  if(aCar !== bCar) return aCar ? a : b;
+  const aStock = (typeof a.stock === 'number' && a.stock > 0) ? 1 : 0;
+  const bStock = (typeof b.stock === 'number' && b.stock > 0) ? 1 : 0;
+  if(aStock !== bStock) return aStock ? a : b;
+  const at = typeof a._updatedAt === 'number' ? a._updatedAt : 0;
+  const bt = typeof b._updatedAt === 'number' ? b._updatedAt : 0;
+  if(at !== bt) return at > bt ? a : b;
+  return a;
+}
+
+// Trae de la nube el mapa código -> id de los documentos de producto de un
+// modo. Se usa justo antes de crear productos (imports, backfill) para
+// REUTILIZAR el documento que ya existe con ese código y no crear duplicados.
+async function buildCloudCodeMap(modo){
+  try{
+    const col = fbProductsCol(modo);
+    if(!col) return null;
+    const snap = await col.get();
+    const map = new Map(); // codigo normalizado -> id del documento canónico
+    snap.docs.forEach(d => {
+      const data = d.data() || {};
+      if(!data || !data.id) return;
+      const code = normalize(data.codigo);
+      if(code) map.set(code, String(data.id));
+    });
+    return map;
+  }catch(e){
+    if(e && e.code !== 'permission-denied') console.error('Error leyendo códigos de la nube', e);
+    return null;
+  }
 }
 
 // Se llama SIEMPRE que se modifica un producto (stock, precio, datos) para
@@ -1287,11 +1357,11 @@ async function backfillVentas(modo){
   // apertura también quema el cupo de lecturas (una lectura por venta).
   const markKey = 'fs_backfill_ventas_' + (modo || DOMAIN);
   let done = false;
-  try{ done = localStorage.getItem(markKey) === '1'; }catch(e){}
+  try{ done = await kvGet(markKey) === '1'; }catch(e){}
   if(done) return;
   const arr = (db.ventas || []);
   if(!arr.length){
-    try{ localStorage.setItem(markKey, '1'); }catch(e){}
+    try{ await kvSet(markKey, '1'); }catch(e){}
     return;
   }
   try{
@@ -1301,7 +1371,7 @@ async function backfillVentas(modo){
     if(missing.length){
       await syncVentaDocs(missing, modo);
     }
-    try{ localStorage.setItem(markKey, '1'); }catch(e){}
+    try{ await kvSet(markKey, '1'); }catch(e){}
   }catch(e){ if(e && e.code !== 'permission-denied') console.error('Error respaldando ventas en la nube', e); }
 }
 
@@ -1562,13 +1632,13 @@ async function backfillGastosPrestamos(modo){
   // colección entera en cada apertura y agotar el cupo gratuito de lecturas.
   const markKey = 'fs_backfill_gastos_' + (modo || DOMAIN);
   let done = false;
-  try{ done = localStorage.getItem(markKey) === '1'; }catch(e){}
+  try{ done = await kvGet(markKey) === '1'; }catch(e){}
   if(done) return;
   // En el invitado se sube todo (incluidos los "sin color", para que los
   // dispositivos invitados compartan); en el dueño solo los de su dominio.
   const arr = (db.gastosPrestamos || []).filter(g => g && g.id && (modo === 'invitado' || g.modo === 'manual' || g.modo === 'electrico'));
   if(!arr.length){
-    try{ localStorage.setItem(markKey, '1'); }catch(e){}
+    try{ await kvSet(markKey, '1'); }catch(e){}
     return;
   }
   try{
@@ -1581,7 +1651,7 @@ async function backfillGastosPrestamos(modo){
       missing.slice(i, i + 450).forEach(g => batch.set(col.doc(String(g.id)), gpDocData(g)));
       await batch.commit();
     }
-    try{ localStorage.setItem(markKey, '1'); }catch(e){}
+    try{ await kvSet(markKey, '1'); }catch(e){}
   }catch(e){ if(e && e.code !== 'permission-denied') console.error('Error respaldando gastos/préstamos en la nube', e); }
 }
 
@@ -1645,38 +1715,53 @@ async function backfillProductos(modo){
   // poder ver los productos nuevos). Una vez migrado, los productos nuevos y
   // editados se suben solos con syncProductoDoc/startStockListener.
   const markKey = 'fs_backfill_prod_' + modo;
+  // La marca va en IndexedDB: el LocalStorage puede estar lleno y, si fallara,
+  // no se marcaría y se releería toda la colección en cada apertura (agota las
+  // lecturas gratis de Firestore y deja a otros dispositivos sin productos).
   let done = false;
-  try{ done = localStorage.getItem(markKey) === '1'; }catch(e){}
+  try{ done = await kvGet(markKey) === '1'; }catch(e){}
   if(done) return;
   const local = modo === currentModo ? db : loadModoDB(modo);
   const arr = (local && local.productos) || [];
   if(arr.length === 0){
     // Nada local que respaldar: se marca igual para no releer la colección
     // en cada apertura (los productos nuevos se suben solos al crearse).
-    try{ localStorage.setItem(markKey, '1'); }catch(e){}
+    try{ await kvSet(markKey, '1'); }catch(e){}
     return;
   }
   try{
     const snap = await col.get();
     const existing = new Set(snap.docs.map(d => d.id));
+    const existingByCode = new Map(); // código -> id del documento canónico
+    snap.docs.forEach(d => {
+      const data = d.data() || {};
+      if(data && data.id){
+        const c = normalize(data.codigo);
+        if(c) existingByCode.set(c, String(data.id));
+      }
+    });
     const missing = arr.filter(p => p && p.id && !existing.has(p.id));
     // Nada que respaldar: todo el catálogo local ya tiene documento. Se marca
     // como hecho para no volver a releer la colección entera.
     if(missing.length === 0){
-      try{ localStorage.setItem(markKey, '1'); }catch(e){}
+      try{ await kvSet(markKey, '1'); }catch(e){}
       return;
     }
+    // Los productos LOCALES que ya tienen su código en la nube (bajo OTRO id,
+    // por reimportar el mismo Excel en otro dispositivo) NO crean un documento
+    // duplicado: se fusionan en el documento canónico que ya existe.
     const fs = firebase.firestore();
     for(let i = 0; i < missing.length; i += 450){
       const batch = fs.batch();
       missing.slice(i, i + 450).forEach(p => {
         const data = productoDocData(p);
         delete data.stock; // el stock se sincroniza después con incrementos
-        batch.set(col.doc(p.id), data, { merge: true });
+        const canonicalId = existingByCode.get(normalize(p.codigo));
+        batch.set(col.doc(canonicalId ? canonicalId : p.id), data, { merge: true });
       });
       await batch.commit();
     }
-    try{ localStorage.setItem(markKey, '1'); }catch(e){}
+    try{ await kvSet(markKey, '1'); }catch(e){}
   }catch(e){ if(e && e.code !== 'permission-denied') console.error('Error respaldando productos en la nube', e); }
 }
 
@@ -1771,6 +1856,9 @@ function startStockListener(modo){
     const store = stockStoreCache[modo];
     if(store){
       try{
+        // Si en la nube hay DOS documentos del mismo código (duplicados de un
+        // re-import), el listener pudo haberlos recibido: se deja solo uno.
+        dedupeProductosByCode(store.productos);
         if(modo === currentModo){
           persistLocalCache();
         }else{
@@ -1943,6 +2031,8 @@ async function assimilateCatalogFromCloud(modo){
     });
     if(add.length || refilled){
       if(add.length) store.productos = store.productos.concat(add);
+      // Si la nube tenía DOS documentos del mismo código, se deja solo uno.
+      dedupeProductosByCode(store.productos);
       if(modo === currentModo){
         persistLocalCache();
         rerenderCurrentView();
@@ -8778,7 +8868,7 @@ function readTableFile(file, cb){
 
 function importProductsCSV(file){
   const reader = new FileReader();
-  reader.onload = (e)=>{
+  reader.onload = async (e)=>{
     try{
       // Acepta tres formatos:
       //  - .xlsx real (ZIP): exportado por la app o re-guardado por Excel
@@ -8832,6 +8922,13 @@ function importProductsCSV(file){
         toast('No se encontraron las columnas de precio (se importarán los productos, pero revisa los precios manualmente)', 'warning');
       }
 
+      // RAÍZ del problema de duplicados: reimportar el mismo Excel en otro
+      // dispositivo generaba ids NUEVOS y subía documentos duplicados. Ahora,
+      // antes de importar, se consultan los códigos que YA existen en la nube:
+      // si el código ya tiene documento, el producto local adopta ESE id y la
+      // importación actualiza el documento existente en vez de duplicarlo.
+      let cloudCodeMap = null;
+      try{ if(firebaseToggleOn() && typeof firebase !== 'undefined') cloudCodeMap = await buildCloudCodeMap(currentModo); }catch(e){ cloudCodeMap = null; }
       let creados = 0, actualizados = 0;
       const importadosList = [];
       for(let i = 1; i < rows.length; i++){
@@ -8870,7 +8967,7 @@ function importProductsCSV(file){
           actualizados++;
         }else{
           const p = {
-            id: uid(),
+            id: (cloudCodeMap && cloudCodeMap.get(normalize(codigo))) || uid(),
             codigo, codigoBarras, nombre, marca, categoria,
             precioCompra, precioMarca, precioVenta,
             caracteristicas,

@@ -517,6 +517,23 @@ function loadModoDB(modo){
   return defaultDB();
 }
 
+// Lee la base PROPIA del invitado (ventas/gastos/finanzas). Prioriza el estado
+// ACTUAL en memoria: cuando el LocalStorage está lleno, ahí queda una copia
+// ANTERIOR y reconstruir desde ella borra las ventas de hoy ("aparecen, luego
+// desaparecen"). Si no hay estado en memoria, cae a LocalStorage y al almacén
+// ampliado (IndexedDB), que siempre tiene la copia más reciente.
+function loadOwnGuestBase(){
+  if(currentModo === 'invitado' && db && Array.isArray(db.ventas)){
+    return db;
+  }
+  let raw = null;
+  try{ raw = localStorage.getItem(storageKey()); }catch(e){}
+  if(raw){
+    try{ return JSON.parse(raw); }catch(e){}
+  }
+  return blobCache[storageKey()] || null;
+}
+
 // Arma la vista del invitado: productos de ambos modos (para el catálogo)
 // + ventas/gastos/finanzas de la base PROPIA del invitado (aislados de los
 // modos del dueño). Las ventas/gastos del invitado NUNCA se mezclan con
@@ -524,8 +541,10 @@ function loadModoDB(modo){
 function buildGuestDB(){
   const m = loadModoDB('manual');
   const e = loadModoDB('electrico');
-  const ownRaw = localStorage.getItem(storageKey());
-  const own = normalizeDB(ownRaw ? JSON.parse(ownRaw) : defaultDB());
+  // La base propia se toma del estado EN MEMORIA (no de una copia vieja del
+  // LocalStorage): así una venta de hoy que apenas cupo en memoria no se
+  // pierde cuando llega un snapshot de Firebase y se reconstruye la vista.
+  const own = normalizeDB(Object.assign({}, loadOwnGuestBase() || defaultDB()));
   own.productos = [
     ...m.productos.map(p => Object.assign({}, p, { modoOrigin: 'manual' })),
     ...e.productos.map(p => Object.assign({}, p, { modoOrigin: 'electrico' }))
@@ -778,8 +797,7 @@ function connectGuestFirebase(){
     // entre tanto, el listener de ventas y los de catálogo ya están activos.
     withTimeout(ownRef.get(), 12000).then(snap=>{
       if(snap && snap.exists){
-        const prevRaw = localStorage.getItem(storageKey());
-        const prev = prevRaw ? normalizeDB(JSON.parse(prevRaw)) : defaultDB();
+        const prev = loadOwnGuestBase() || defaultDB();
         const remote = normalizeDB(snap.data());
         const merged = mergeRemoteIntoLocal(prev, remote);
         merged.historialEscaneos = guestSessionScans;
@@ -793,8 +811,7 @@ function connectGuestFirebase(){
     const ownUnsub = ownRef.onSnapshot(snap=>{
       if(snap.metadata.hasPendingWrites) return;
       if(!snap.exists) return;
-      const prevRaw = localStorage.getItem(storageKey());
-      const prev = prevRaw ? normalizeDB(JSON.parse(prevRaw)) : defaultDB();
+      const prev = loadOwnGuestBase() || defaultDB();
       const remote = normalizeDB(snap.data());
       const merged = mergeRemoteIntoLocal(prev, remote);
       merged.historialEscaneos = guestSessionScans;

@@ -838,6 +838,7 @@ function connectGuestFirebase(){
   }catch(err){
     console.error('No se pudo conectar a Firebase en modo invitado', err);
     fbLastErrorCode = (err && err.code) || 'error';
+    fbLastErrorMessage = (err && err.message) || String(err);
     setSyncStatus('error');
   }
 }
@@ -854,8 +855,44 @@ let fbOtherUnsub = null; // suscripción al OTRO modo (mantiene su contraseña/d
 // agota la cuota gratis, o 'permission-denied'). El vigía lo usa para NO
 // reintentar en bucle cuando el problema no se arregla reintentando.
 let fbLastErrorCode = null;
+// Último MENSAJE de error de Firebase (para mostrarlo en pantalla sin consola).
+let fbLastErrorMessage = null;
 // Instante del último intento de reconexión del vigía (para espaciarlos).
 let fbLastAttempt = 0;
+
+// --- DIAGNÓSTICO EN PANTALLA -------------------------------------------------
+// Muestra el error real (código y mensaje) en un recuadro fijo abajo, para poder
+// leerlo desde el celular sin abrir la consola. Se toca para cerrarlo.
+function showDiagnostic(msg){
+  try{
+    if(!document.body) return;
+    let el = document.getElementById('fbDiagBox');
+    if(!el){
+      el = document.createElement('div');
+      el.id = 'fbDiagBox';
+      el.style.cssText = 'position:fixed;left:0;right:0;bottom:0;z-index:99999;' +
+        'background:#7f1d1d;color:#fff;font:12px/1.4 monospace;padding:8px 10px;' +
+        'white-space:pre-wrap;word-break:break-word;max-height:45vh;overflow:auto;' +
+        'box-shadow:0 -2px 8px rgba(0,0,0,.4);cursor:pointer';
+      el.addEventListener('click', function(){ el.remove(); });
+      document.body.appendChild(el);
+    }
+    el.textContent = 'DIAGNÓSTICO (toca para cerrar)\n' + msg;
+  }catch(e){ /* el diagnóstico nunca debe romper la app */ }
+}
+window.addEventListener('error', function(ev){
+  try{
+    const m = ev && (ev.message || (ev.error && ev.error.message));
+    if(m) showDiagnostic('ERROR JS: ' + m + (ev.filename ? '\n' + ev.filename + ':' + ev.lineno : ''));
+  }catch(e){}
+});
+window.addEventListener('unhandledrejection', function(ev){
+  try{
+    const r = ev && ev.reason;
+    const m = r ? ((r.code ? r.code + ': ' : '') + (r.message || String(r))) : 'promesa rechazada';
+    showDiagnostic('PROMESA RECHAZADA: ' + m);
+  }catch(e){}
+});
 
 // Cada modo se guarda en un documento de Firestore distinto para que sean
 // bases de datos completamente separadas dentro del mismo proyecto.
@@ -874,7 +911,7 @@ function disconnectFirebase(){
 }
 
 function setSyncStatus(status){
-  if(status === 'synced') fbLastErrorCode = null; // conexión sana: se limpia el último error
+  if(status === 'synced'){ fbLastErrorCode = null; fbLastErrorMessage = null; } // conexión sana: se limpia el último error
   const el = document.getElementById('sidebarSyncStatus');
   if(!el) return;
   const labels = {
@@ -883,9 +920,18 @@ function setSyncStatus(status){
     synced: '🔥 Sincronizado con Firebase',
     error: fbLastErrorCode === 'resource-exhausted'
       ? '⚠️ Cuota gratis de Firebase agotada (se reinicia en unas horas)'
-      : '⚠️ Error de sincronización'
+      : '⚠️ Error de sincronización' + (fbLastErrorCode ? ' (' + fbLastErrorCode + ')' : '')
   };
   el.textContent = labels[status] || '';
+  // En caso de error, deja en pantalla los datos exactos para poder diagnosticar
+  // desde el celular (código, mensaje, proyecto y si el SDK llegó a cargar).
+  if(status === 'error'){
+    showDiagnostic('Firebase falló al conectar.\nCódigo: ' + (fbLastErrorCode || 'desconocido') +
+      (fbLastErrorMessage ? '\nMensaje: ' + fbLastErrorMessage : '') +
+      '\nProyecto: ' + ((typeof firebaseConfig !== 'undefined' && firebaseConfig && firebaseConfig.projectId) ? firebaseConfig.projectId : '(sin config)') +
+      '\nSDK cargado: ' + (typeof firebase !== 'undefined' ? 'sí' : 'NO') +
+      '\nURL: ' + location.href);
+  }
 }
 
 // Botón "Recibir y mandar actualizaciones": fuerza una sincronización con
@@ -981,6 +1027,8 @@ async function connectFirebase(){
   }
   if(typeof firebase === 'undefined'){
     console.warn('El SDK de Firebase no cargó (revisa tu conexión a internet)');
+    fbLastErrorCode = 'sdk-no-cargado';
+    fbLastErrorMessage = 'No se descargó el SDK de Firebase desde gstatic.com (CDN bloqueado o sin internet).';
     setSyncStatus('error');
     return;
   }
@@ -1024,6 +1072,7 @@ async function connectFirebase(){
     }, err=>{
       console.error('Error de sincronización Firebase', err);
       fbLastErrorCode = (err && err.code) || 'error';
+      fbLastErrorMessage = (err && err.message) || String(err);
       setSyncStatus('error');
     });
 
@@ -1084,6 +1133,7 @@ async function connectFirebase(){
   }catch(err){
     console.error('No se pudo conectar a Firebase', err);
     fbLastErrorCode = (err && err.code) || 'error';
+    fbLastErrorMessage = (err && err.message) || String(err);
     setSyncStatus('error');
   }
 }

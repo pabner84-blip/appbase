@@ -453,6 +453,8 @@ function runQueuedWrite(docId, ref){
       return;
     }
     q.attempt = 0;
+    fbLastErrorCode = (err && err.code) || 'write-failed';
+    fbLastErrorMessage = (err && err.message) || String(err);
     setSyncStatus('error');
     console.warn('Escritura a Firebase no pudo subir tras varios reintentos. Se reintentará al volver la conexión.');
     finishQueuedWrite(docId, ref, toSend);
@@ -9175,6 +9177,140 @@ function importBackup(file){
   reader.readAsText(file, 'UTF-8');
 }
 
+/* -------------------------------------------------------------------------
+   9b. FOTOS DE LOS PRODUCTOS (exportar / importar SOLO las imágenes)
+   -------------------------------------------------------------------------
+   Las fotos viven en IndexedDB (no en Firebase): tiendas "imgs_manual" e
+   "imgs_electrico". Este respaldo guarda SOLO las fotos (con el link original
+   de cada una cuando lo tenía) para poder pasarlas a otro dispositivo sin
+   llevar productos, ventas ni stock.
+   ------------------------------------------------------------------------- */
+
+function _fotosNormMapa(map){
+  const out = {};
+  if(!map || typeof map !== 'object') return out;
+  Object.keys(map).forEach(id=>{
+    const v = map[id];
+    let dataArr = [], urlArr = [];
+    if(Array.isArray(v)){
+      dataArr = v.filter(x => typeof x === 'string' && x);
+    }else if(v && typeof v === 'object'){
+      const d = (v.data !== undefined) ? v.data : v.d;
+      const u = (v.url !== undefined) ? v.url : v.u;
+      dataArr = Array.isArray(d) ? d.filter(Boolean) : (d ? [d] : []);
+      urlArr = Array.isArray(u) ? u : (u ? [u] : []);
+    }else if(typeof v === 'string'){
+      dataArr = [v];
+    }
+    dataArr = dataArr.slice(0, MAX_IMGS);
+    urlArr = urlArr.slice(0, dataArr.length);
+    if(dataArr.length) out[id] = { data: dataArr, url: urlArr };
+  });
+  return out;
+}
+
+// Lee TODAS las fotos de ambos modos y las descarga como un .json.
+function exportFotosProductos(){
+  openImgDB().then(db => new Promise(resolve=>{
+    const out = { _tipo: 'stockferre_fotos', version: 1, fecha: new Date().toISOString(), imgs_manual: {}, imgs_electrico: {} };
+    const stores = ['imgs_manual', 'imgs_electrico'].filter(s => db.objectStoreNames.contains(s));
+    if(!stores.length){ resolve(out); return; }
+    let pend = stores.length;
+    const tx = db.transaction(stores, 'readonly');
+    stores.forEach(s=>{
+      const req = tx.objectStore(s).getAll();
+      req.onsuccess = ()=>{
+        (req.result || []).forEach(it=>{
+          if(!it || !it.id) return;
+          const dataArr = Array.isArray(it.data) ? it.data : (it.data ? [it.data] : []);
+          const urlArr = Array.isArray(it.url) ? it.url : (it.url ? [it.url] : []);
+          if(dataArr.length) out[s][it.id] = { data: dataArr, url: urlArr };
+        });
+        if(--pend === 0) resolve(out);
+      };
+      req.onerror = ()=>{ if(--pend === 0) resolve(out); };
+    });
+  })).then(out=>{
+    const total = Object.keys(out.imgs_manual).length + Object.keys(out.imgs_electrico).length;
+    if(!total){ toast('No hay fotos para exportar', 'error'); return; }
+    const blob = new Blob([JSON.stringify(out)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'stockferre_fotos_' + todayISO().slice(0,10) + '.json';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    toast('Fotos exportadas (' + total + ' productos)', 'success');
+  }).catch(err=>{ console.error('Error exportando fotos', err); toast('No se pudieron exportar las fotos', 'error'); });
+}
+
+// Escribe en IndexedDB las fotos importadas (reemplaza las de cada producto
+// incluido y deja intactas las de los demás).
+function _fotosEscribirEnIndexedDB(manual, electrico){
+  return openImgDB().then(db => new Promise(resolve=>{
+    const stores = [];
+    if(Object.keys(manual).length) stores.push('imgs_manual');
+    if(Object.keys(electrico).length) stores.push('imgs_electrico');
+    if(!stores.length){ resolve(true); return; }
+    const tx = db.transaction(stores, 'readwrite');
+    Object.keys(manual).forEach(id=>{
+      const r = manual[id];
+      tx.objectStore('imgs_manual').put({ id: id, data: r.data, url: r.url }, id);
+    });
+    Object.keys(electrico).forEach(id=>{
+      const r = electrico[id];
+      tx.objectStore('imgs_electrico').put({ id: id, data: r.data, url: r.url }, id);
+    });
+    tx.oncomplete = ()=> resolve(true);
+    tx.onerror = ()=>{ console.error('Error escribiendo fotos', tx.error); resolve(false); };
+  })).catch(err=>{ console.error('Error escribiendo fotos', err); return false; });
+}
+
+function importFotosProductos(file){
+  const reader = new FileReader();
+  reader.onload = (e)=>{
+    try{
+      const parsed = JSON.parse(e.target.result) || {};
+      let manual = _fotosNormMapa(parsed.imgs_manual);
+      let electrico = _fotosNormMapa(parsed.imgs_electrico);
+      // Compatibilidad: un backup COMPLETO (JSON) guarda las fotos en "imagenes"
+      // (y los links en "imgUrl"), sin separar por modo. En ese caso se asignan
+      // al modo actual.
+      if(!Object.keys(manual).length && !Object.keys(electrico).length && parsed.imagenes){
+        const legacy = _fotosNormMapa(parsed.imagenes);
+        const urls = (parsed.imgUrl && typeof parsed.imgUrl === 'object') ? parsed.imgUrl : {};
+        Object.keys(legacy).forEach(id=>{
+          if(!legacy[id].url.length && urls[id]){
+            const u = Array.isArray(urls[id]) ? urls[id] : [urls[id]];
+            legacy[id].url = u.slice(0, legacy[id].data.length);
+          }
+        });
+        if(currentModo === 'manual') manual = legacy; else electrico = legacy;
+      }
+      const total = Object.keys(manual).length + Object.keys(electrico).length;
+      if(!total){ toast('El archivo no tiene fotos para importar', 'error'); return; }
+      confirmDialog('Importar fotos',
+        'Se importarán las fotos de ' + total + ' productos (se reemplazan las fotos de esos productos en este dispositivo). ¿Continuar?',
+        ()=>{
+          _fotosEscribirEnIndexedDB(manual, electrico).then(ok=>{
+            if(!ok){ toast('No se pudieron importar las fotos', 'error'); return; }
+            return loadImagesForModo(currentModo).then(()=>{
+              rerenderCurrentView();
+              toast('Fotos importadas (' + total + ' productos)', 'success');
+            });
+          });
+        });
+    }catch(err){
+      console.error('Error leyendo archivo de fotos', err);
+      toast('No se pudo leer el archivo de fotos', 'error');
+    }
+  };
+  reader.onerror = ()=> toast('Error al leer el archivo', 'error');
+  reader.readAsText(file, 'UTF-8');
+}
+
 // Vacía el catálogo SOLO del modo actual (Manuales o Eléctricas): quita todos
 // los productos y categorías de ese modo, tanto localmente como de la nube.
 // Se usa antes de reimportar el Excel de ese modo, para que no queden
@@ -11407,6 +11543,16 @@ function setupEventListeners(){
     if(e.target.files[0]) importBackup(e.target.files[0]);
     e.target.value = '';
   });
+  // Fotos de los productos (solo las imágenes, para pasarlas a otro dispositivo)
+  const btnExpFotos = document.getElementById('btnExportFotos');
+  const btnImpFotos = document.getElementById('btnImportFotos');
+  const fileImpFotos = document.getElementById('fileImportFotos');
+  if(btnExpFotos) btnExpFotos.addEventListener('click', exportFotosProductos);
+  if(btnImpFotos) btnImpFotos.addEventListener('click', ()=> document.getElementById('fileImportFotos').click());
+  if(fileImpFotos) fileImpFotos.addEventListener('change', (e)=>{
+    if(e.target.files[0]) importFotosProductos(e.target.files[0]);
+    e.target.value = '';
+  });
   document.getElementById('btnManualSync').addEventListener('click', manualSync);
   document.getElementById('btnVaciarCatalogo').addEventListener('click', vaciarCatalogo);
   document.getElementById('btnFactoryReset').addEventListener('click', factoryReset);
@@ -11427,29 +11573,13 @@ function init(){
   updateSidebarProductCount();
   updateSidebarBrand();
   updatePasswordButtonLabel();
-  // ¿La pestaña sigue viva? Si solo se recargó (p. ej. al volver de otra app y
-  // el navegador refrescó la página), la app vuelve a la vista donde se quedó
-  // en vez de empezar desde Inicio. Al CERRAR Chrome o la pestaña, sessionStorage
-  // se borra solo y la app abre de nuevo desde Inicio.
-  const sessionState = readSessionViewState();
-  let savedMode = null;
-  try{ savedMode = localStorage.getItem(MODO_KEY); }catch(e){}
-  if(sessionState && sessionState.view && sessionState.view !== 'inicio' && VIEW_TITLES[sessionState.view]){
-    connectFirebase(); // sigue con el modo que restoreModo ya eligió
-    showView(sessionState.view);
-    if(sessionState.view === 'escaner' && sessionState.lastCodigo){
-      renderScanResult(sessionState.lastCodigo);
-    }
-  }else if(savedMode && savedMode !== 'invitado' && isRemembered(savedMode)){
-    // "Mantener sesión abierta": no pide contraseña para este modo, pero igual
-    // muestra la pantalla de Inicio (antes saltaba directo al Escáner).
-    switchModoData(savedMode); // ya conecta Firebase para ese modo
-    applyRoleUI();
-    showView('inicio');
-  }else{
-    showView('inicio');
-    connectFirebase(); // no bloquea el arranque; si no está configurado, sigue todo local
-  }
+  // La app SIEMPRE abre en el menú de Inicio (para elegir el modo), tanto al
+  // entrar como al recargar la página o al volver desde otra app. Antes, si la
+  // pestaña seguía viva, volvía a la última vista/modo (p. ej. Eléctricas) y
+  // parecía que "entraba solo" ahí. Ahora siempre muestra el menú de Inicio.
+  applyRoleUI();
+  showView('inicio');
+  connectFirebase(); // no bloquea el arranque; si no está configurado, sigue todo local
   updateInicioClock();
   setInterval(updateInicioClock, 1000);
   // La vigía de sincronización: reconecta sola si Firebase se cae o queda una

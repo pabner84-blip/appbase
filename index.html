@@ -594,6 +594,17 @@
           </div>
         </div>
 
+        <div class="panel admin-only">
+          <div class="panel-header"><h3>🖼️ Fotos de los productos</h3></div>
+          <div class="panel-body">
+            <p class="hint">Exporta o importa SOLO las fotos de los productos (de 🛠️ Manuales y ⚡ Eléctricas) para pasarlas a otro dispositivo. No incluye productos, ventas ni stock. Las fotos se guardan en este dispositivo (no en Firebase).</p>
+            <div class="toolbar" style="margin-bottom:0;">
+              <button class="btn btn-primary" id="btnExportFotos">📤 Exportar fotos</button>
+              <button class="btn btn-secondary" id="btnImportFotos">📥 Importar fotos</button>
+            </div>
+          </div>
+        </div>
+
         <div class="panel">
           <div class="panel-header"><h3>🔄 Recibir y mandar actualizaciones</h3></div>
           <div class="panel-body">
@@ -1332,6 +1343,7 @@
 <input type="file" id="fileImportTopVentas" accept=".csv,.xls,.xlsx" hidden>
 <input type="file" id="fileImportPedidos" accept=".csv,.xls,.xlsx" hidden>
 <input type="file" id="fileImportBackup" accept=".json" hidden>
+<input type="file" id="fileImportFotos" accept=".json,application/json" hidden>
 <input type="file" id="fileImgCamera" accept="image/*" capture="environment" hidden>
 <input type="file" id="fileImgGallery" accept="image/*" hidden>
 

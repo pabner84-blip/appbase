@@ -3062,6 +3062,8 @@ function openVentaModal(producto){
   const qrTabOpen = document.querySelector('[data-payment-method="qr"]');
   if(qrTabOpen) qrTabOpen.textContent = '📱 QR';
   resetSplitPagoUI();
+  const btnVI = document.getElementById('btnVentaVerIngresos');
+  if(btnVI) btnVI.style.display = currentRole === 'guest' ? 'none' : '';
   updateVentaDestinoUI(producto.modoOrigin || 'manual', true);
   recalcVentaPrecioUnitario();
   openModal('modalVenta');
@@ -3087,6 +3089,8 @@ function openVentaModalOtro(){
   const qrTabOpen = document.querySelector('[data-payment-method="qr"]');
   if(qrTabOpen) qrTabOpen.textContent = '📱 QR';
   resetSplitPagoUI();
+  const btnVI = document.getElementById('btnVentaVerIngresos');
+  if(btnVI) btnVI.style.display = 'none';
   updateVentaDestinoUI('manual', false);
   recalcVentaPrecioUnitario();
   openModal('modalVenta');
@@ -7981,10 +7985,9 @@ function renderProductos(){
 
   const tbody = document.querySelector('#productsTable tbody');
   if(list.length === 0){
-    tbody.innerHTML = `<tr class="empty-row"><td colspan="${currentRole === 'guest' ? 11 : 12}">No hay productos que coincidan.</td></tr>`;
+    tbody.innerHTML = `<tr class="empty-row"><td colspan="${currentRole === 'guest' ? 4 : 5}">No hay productos que coincidan.</td></tr>`;
   }else{
     tbody.innerHTML = list.map((p, idx) => {
-      const bajo = (p.stockMin || 0) > 0 && p.stock <= p.stockMin;
       const img = getImage(p.id);
       const countImg = getImageCount(p.id);
       const thumb = img
@@ -8001,15 +8004,8 @@ function renderProductos(){
           </div>
         </td>
         <td><strong>${escapeHtml(p.codigo)}</strong></td>
-        <td>${escapeHtml(p.codigoBarras || '-')}</td>
         <td>${escapeHtml(p.nombre)}</td>
         <td>${escapeHtml(p.marca || '-')}</td>
-        <td>${p.categoria ? `<span class="badge badge-muted">${escapeHtml(p.categoria)}</span>` : '-'}</td>
-        <td class="price-guest-hide">${fmtMoney(p.precioCompra)}</td>
-        <td class="price-guest-hide">${fmtMoney(p.precioMarca)}</td>
-        <td>${fmtMoney(p.precioVenta)}</td>
-        <td>${p.stock}${bajo ? ' <span class="badge badge-danger-soft">Bajo</span>' : ''}</td>
-        <td>${p.stockMin || 0}</td>
         ${currentRole === 'guest' ? '' : `
         <td>
           <button class="btn-icon" title="Editar" data-edit-product="${p.id}">✏️</button>
@@ -8099,6 +8095,37 @@ function renderCategorias(){
    7. MODAL DE PRODUCTO
    ------------------------------------------------------------------------- */
 
+/* En Herramientas Eléctricas no se usa el "Precio de compra" y el "Precio de
+   marca" pasa a llamarse "Precio último", mostrándose después del precio de
+   venta. En Herramientas Manuales se mantiene igual que siempre. */
+function applyPreciosModoDetalle(){
+  const grid = document.querySelector('#modalProductoDetalle .detail-grid');
+  const rowCompra = document.getElementById('detRowPCompra');
+  const rowMarca = document.getElementById('detRowPMarca');
+  const rowVenta = document.getElementById('detRowPVenta');
+  if(!grid || !rowCompra || !rowMarca || !rowVenta) return;
+  const esElec = currentModo === 'electrico';
+  rowCompra.style.display = esElec ? 'none' : '';
+  const lbl = document.getElementById('detPMarcaLabel');
+  if(lbl) lbl.textContent = esElec ? 'Precio último' : 'Precio de marca';
+  if(esElec) grid.insertBefore(rowVenta, rowMarca);       // ... Último, Venta → Venta, Último
+  else grid.insertBefore(rowVenta, rowMarca.nextSibling); // orden original: Marca, Venta
+}
+
+function applyPreciosModoForm(){
+  const form = document.getElementById('formProducto');
+  const lCompra = document.getElementById('lblPrecioCompra');
+  const lMarca = document.getElementById('lblPrecioMarca');
+  const lVenta = document.getElementById('lblPrecioVenta');
+  if(!form || !lCompra || !lMarca || !lVenta) return;
+  const esElec = currentModo === 'electrico';
+  lCompra.style.display = esElec ? 'none' : '';
+  const t = document.getElementById('lblPrecioMarcaText');
+  if(t) t.textContent = esElec ? 'Precio último' : 'Precio de marca';
+  if(esElec) form.insertBefore(lVenta, lMarca);
+  else form.insertBefore(lVenta, lMarca.nextSibling);
+}
+
 function openProductModal(producto, prefillCodigo){
   const form = document.getElementById('formProducto');
   form.reset();
@@ -8120,6 +8147,7 @@ function openProductModal(producto, prefillCodigo){
     document.getElementById('pId').value = '';
     if(prefillCodigo) document.getElementById('pCodigo').value = prefillCodigo;
   }
+  applyPreciosModoForm();
   openModal('modalProducto');
 }
 
@@ -8211,6 +8239,7 @@ function openProductDetails(productId){
       openVentaModal(p);
     };
   }
+  applyPreciosModoDetalle();
   openModal('modalProductoDetalle');
 }
 
@@ -10010,19 +10039,67 @@ function handleSetPasswordSubmit(e){
    11. MODALES / TOASTS / CONFIRMACIÓN
    ------------------------------------------------------------------------- */
 
+/* --- Botón "atrás" del teléfono: cierra el modal que está arriba en vez de
+   salir de la app. Cada modal abierto empuja un paso al historial; al apretar
+   "atrás" se cierra el modal de más arriba y se sigue en la app. Cuando un
+   modal se cierra con un botón, se consume su paso para no dejar pasos de más. --- */
+let sfModalGuards = 0;
+let sfModalSuppressPop = 0;
+function sfPushModalGuard(){
+  sfModalGuards++;
+  try{ history.pushState({ sfModal: sfModalGuards }, ''); }catch(e){}
+}
+function sfConsumeModalGuard(){
+  if(sfModalGuards <= 0) return;
+  sfModalGuards--;
+  sfModalSuppressPop++;
+  try{ history.back(); }catch(e){ sfModalSuppressPop--; }
+}
+// Cierra el modal de arriba (como lo haría un botón) sin tocar el historial:
+// si es un escáner, detiene la cámara para no dejarla encendida.
+function sfCerrarModalDeArriba(){
+  const abiertos = Array.from(document.querySelectorAll('.modal.open'));
+  if(!abiertos.length){
+    document.getElementById('modalBackdrop').classList.remove('open');
+    return;
+  }
+  const top = abiertos[abiertos.length - 1];
+  const esScanner = ['modalInventarioScan','modalBarcodeScan','modalVentaScan','modalCompraScan'].indexOf(top.id) !== -1;
+  if(top.id === 'modalModoDetalle') currentModoDetalleOpen = null;
+  top.classList.remove('open');
+  if(!document.querySelector('.modal.open')){
+    document.getElementById('modalBackdrop').classList.remove('open');
+  }
+  if(esScanner){
+    if(top.id === 'modalBarcodeScan') stopBarcodeScanner();
+    else { stopActiveScanner(); restoreScannerBlockHome(); scanContext = 'lookup'; }
+  }
+}
+window.addEventListener('popstate', function(){
+  if(sfModalSuppressPop > 0){ sfModalSuppressPop--; return; }
+  if(sfModalGuards <= 0) return;
+  sfModalGuards--;
+  sfCerrarModalDeArriba();
+});
+
 function openModal(id){
+  const modal = document.getElementById(id);
+  const yaAbierto = !!(modal && modal.classList.contains('open'));
   document.getElementById('modalBackdrop').classList.add('open');
-  document.getElementById(id).classList.add('open');
+  if(modal) modal.classList.add('open');
+  if(!yaAbierto) sfPushModalGuard();
 }
 // Cierra únicamente el modal indicado, sin tocar otros modales que puedan
 // estar abiertos debajo (por ejemplo el escáner de código de barras, que se
 // abre "encima" del recuadro de registrar inventario).
 function closeModalById(id){
   const modal = document.getElementById(id);
+  const estabaAbierto = !!(modal && modal.classList.contains('open'));
   if(modal) modal.classList.remove('open');
   if(!document.querySelector('.modal.open')){
     document.getElementById('modalBackdrop').classList.remove('open');
   }
+  if(estabaAbierto) sfConsumeModalGuard();
 }
 function closeAllModals(){
   currentModoDetalleOpen = null;
@@ -10030,8 +10107,10 @@ function closeAllModals(){
   const barcodeScanWasOpen = document.getElementById('modalBarcodeScan').classList.contains('open');
   const ventaScanWasOpen = document.getElementById('modalVentaScan').classList.contains('open');
   const compraScanWasOpen = document.getElementById('modalCompraScan').classList.contains('open');
+  const abiertosCount = document.querySelectorAll('.modal.open').length;
   document.querySelectorAll('.modal.open').forEach(m => m.classList.remove('open'));
   document.getElementById('modalBackdrop').classList.remove('open');
+  for(let i = 0; i < abiertosCount; i++) sfConsumeModalGuard();
   if(inventarioScanWasOpen || ventaScanWasOpen || compraScanWasOpen){
     stopActiveScanner();
     restoreScannerBlockHome();
@@ -11154,6 +11233,43 @@ function setupEventListeners(){
     openVentaModalOtro();
   });
   document.getElementById('formVenta').addEventListener('submit', handleVentaSubmit);
+  // "Ver ingresos" desde el modal de registrar venta: muestra los ingresos del
+  // producto que se está vendiendo sin cerrar el formulario.
+  const btnVentaVerIngresos = document.getElementById('btnVentaVerIngresos');
+  if(btnVentaVerIngresos){
+    btnVentaVerIngresos.addEventListener('click', ()=>{
+      if(currentRole === 'guest'){
+        toast('No tienes acceso a los ingresos', 'error');
+        return;
+      }
+      const esOtro = document.getElementById('vEsOtro').value === '1';
+      const codigo = document.getElementById('vCodigo').value;
+      if(esOtro || !codigo){
+        toast('Este producto no está en el inventario', 'error');
+        return;
+      }
+      const p = getProductoByCodigo(codigo);
+      if(!p){
+        toast('No se encontró el producto', 'error');
+        return;
+      }
+      openCompraHistorial(p.codigo);
+    });
+  }
+  // Si el historial de ingresos se abrió desde el modal de venta, su botón de
+  // cerrar solo cierra el historial y deja la venta abierta debajo.
+  const histComprasModal = document.getElementById('modalCompraHistorial');
+  if(histComprasModal){
+    histComprasModal.querySelectorAll('[data-close-modal]').forEach(btn=>{
+      btn.addEventListener('click', (e)=>{
+        if(document.getElementById('modalVenta').classList.contains('open')){
+          e.stopImmediatePropagation();
+          e.preventDefault();
+          closeModalById('modalCompraHistorial');
+        }
+      }, true);
+    });
+  }
   document.getElementById('vCantidad').addEventListener('input', recalcVentaPrecioUnitario);
   document.getElementById('vPrecioTotal').addEventListener('input', ()=>{
     recalcVentaPrecioUnitario();

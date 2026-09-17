@@ -431,7 +431,15 @@ const server = http.createServer(async (req, res) => {
   const ext = path.extname(filePath).toLowerCase();
   fs.readFile(filePath, (err, data) => {
     if (err) { res.writeHead(404); res.end('Not found'); return; }
-    res.writeHead(200, { 'Content-Type': MIME[ext] || 'application/octet-stream' });
+    // Sin caché en los archivos de la app: así el navegador y los celulares SIEMPRE
+    // descargan la versión nueva de app.js/index.html al abrir la app (una copia
+    // vieja en caché hacía que algunos dispositivos siguieran con el código
+    // anterior y "no se conectaran" entre sí ni aparecieran las ventas).
+    res.writeHead(200, {
+      'Content-Type': MIME[ext] || 'application/octet-stream',
+      'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0',
+      'Pragma': 'no-cache'
+    });
     res.end(data);
   });
 });

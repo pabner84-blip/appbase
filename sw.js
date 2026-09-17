@@ -4,7 +4,7 @@
    funcione sin internet (los datos se sincronizan cuando hay conexión).
    ========================================================================= */
 
-const CACHE = 'stockferre-v4';
+const CACHE = 'stockferre-v5';
 
 // Archivos esenciales para que la app arranque sin conexión.
 // Los CDNs (Supabase, Tesseract, lector de barras, fuentes) también se

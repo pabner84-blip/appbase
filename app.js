@@ -2,9 +2,12 @@
    STOCKFERRE — Consulta rápida de productos (100% frontend)
    Escaneas un código con la cámara (OCR) o lo escribes, y ves al instante:
    código, descripción, marca, categoría, precio de compra y de venta.
-   Todo editable. Persistencia: Firebase Firestore (si está configurado en
-   firebase-config.js) + LocalStorage como caché/respaldo local. Sin Google Sheets.
+   Todo editable. Persistencia: Supabase (si está configurado en
+   supabase-config.js) + LocalStorage como caché/respaldo local. Sin Google Sheets.
    ========================================================================= */
+
+const APP_VERSION = 'supabase-v5'; // al subir un arreglo se cambia para saber qué versión carga cada dispositivo
+try{ window.__appVersion = APP_VERSION; console.log('StockFerre ' + APP_VERSION + ' — si ves otra versión, recarga con Ctrl+F5.'); }catch(e){}
 
 // Claves "viejas" (de cuando la app tenía una sola base de datos, antes de
 // dividirse en Herramientas Manuales / Herramientas Eléctricas). Se usan solo

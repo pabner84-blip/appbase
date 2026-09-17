@@ -6,7 +6,7 @@
    supabase-config.js) + LocalStorage como caché/respaldo local. Sin Google Sheets.
    ========================================================================= */
 
-const APP_VERSION = 'supabase-v5'; // al subir un arreglo se cambia para saber qué versión carga cada dispositivo
+const APP_VERSION = 'supabase-v6'; // al subir un arreglo se cambia para saber qué versión carga cada dispositivo
 try{ window.__appVersion = APP_VERSION; console.log('StockFerre ' + APP_VERSION + ' — si ves otra versión, recarga con Ctrl+F5.'); }catch(e){}
 
 // Claves "viejas" (de cuando la app tenía una sola base de datos, antes de
@@ -353,27 +353,29 @@ function loadDB(){
     if(!raw && currentModo === 'manual'){
       raw = localStorage.getItem(LEGACY_STORAGE_KEY); // migración única
     }
-    if(raw){ db = normalizeDB(JSON.parse(raw)); persistLocalCache(); }
-    else { db = defaultDB(); persistLocalCache(); }
-  }catch(e){ console.error('Error leyendo LocalStorage', e); db = defaultDB(); persistLocalCache(); }
+    db = normalizeDB(raw ? JSON.parse(raw) : defaultDB());
+  }catch(e){ console.error('Error leyendo LocalStorage', e); db = defaultDB(); }
 
-  // Si el localStorage estaba lleno, la copia real quedó en IndexedDB; cuando
-  // esta esté disponible se aplica la más reciente de las dos.
+  // Si el LocalStorage estaba lleno, la copia REAL más reciente vive en
+  // IndexedDB. Se compara con la copia rápida y gana la más nueva, SIN volver
+  // a grabar encima la copia vieja del LocalStorage (ese regrabado era lo que
+  // borraba la última venta al recargar cuando el almacenamiento del navegador
+  // estaba lleno: primero se pisaba IndexedDB con la copia sin la venta y
+  // después la comparación ya no la encontraba).
   try{
     kvGet(storageKey()).then(big => {
-      if(!big) return;
       try{
-        const parsed = JSON.parse(big);
-        const a = typeof parsed._savedAt === 'number' ? parsed._savedAt : 0;
-        const b = db && typeof db._savedAt === 'number' ? db._savedAt : 0;
-        if(a > b){
-          db = normalizeDB(parsed);
-          persistLocalCache();
-          if(typeof rerenderCurrentView === 'function') rerenderCurrentView();
+        if(big){
+          const parsed = normalizeDB(JSON.parse(big));
+          const a = typeof parsed._savedAt === 'number' ? parsed._savedAt : 0;
+          const b = db && typeof db._savedAt === 'number' ? db._savedAt : 0;
+          if(a >= b) db = parsed;
         }
       }catch(e){ /* se conserva la copia de arranque */ }
+      persistLocalCache();
+      if(typeof rerenderCurrentView === 'function') rerenderCurrentView();
     });
-  }catch(e){}
+  }catch(e){ persistLocalCache(); }
 }
 
 function persistLocalCache(){
@@ -970,7 +972,7 @@ async function upsertGasto(modo, data){
       { id: String(data.id), modo: modo, payload: gpDocData(data) }, { onConflict: 'id,modo' }), 'gasto/préstamo a la nube');
 }
 
-async function deleteGasto(modo, id){
+async function deleteGastoCloud(modo, id){
   const client = sbClient();
   if(!client || !id) return;
   sbWrite(() => client.from('gastos_prestamos').delete().eq('modo', modo).eq('id', String(id)), 'borrado de gasto/préstamo de la nube');
@@ -1078,11 +1080,14 @@ function connectGuestFirebase(){
     // instante. Primero sube las ventas locales que no tengan registro y luego
     // escucha la tabla.
     try{ backfillVentas('invitado'); }catch(e){ /* no bloquea */ }
+    try{ assimilateVentasFromCloud('invitado'); }catch(e){ /* no bloquea */ }
     startVentasListener('invitado');
     // AJUSTE DE CUENTAS y GASTOS/PRÉSTAMOS del invitado (mismo modelo): lo
     // ajustado o registrado aquí se comparte solo entre dispositivos invitados.
     try{ backfillAjustes('invitado'); }catch(e){ /* no bloquea */ }
+    try{ assimilateAjustesFromCloud('invitado'); }catch(e){ /* no bloquea */ }
     try{ backfillGastosPrestamos('invitado'); }catch(e){ /* no bloquea */ }
+    try{ assimilateGastosFromCloud('invitado'); }catch(e){ /* no bloquea */ }
     startAjustesListener('invitado');
     startGastosPrestamosListener('invitado');
   }catch(err){
@@ -1297,10 +1302,13 @@ async function connectFirebase(){
     // PROPIO dominio y sus propios dispositivos. Solo se escucha el dominio
     // del modo actual; al cambiar de modo se re-conecta con su tabla.
     try{ await withTimeout(backfillVentas(currentModo), 15000); }catch(e){ /* no bloquea */ }
+    try{ await withTimeout(assimilateVentasFromCloud(currentModo), 15000); }catch(e){ /* no bloquea */ }
     startVentasListener(currentModo);
     // AJUSTE DE CUENTAS y GASTOS/PRÉSTAMOS del dueño (mismo modelo por dominio).
     try{ await withTimeout(backfillAjustes(currentModo), 15000); }catch(e){ /* no bloquea */ }
+    try{ await withTimeout(assimilateAjustesFromCloud(currentModo), 15000); }catch(e){ /* no bloquea */ }
     try{ await withTimeout(backfillGastosPrestamos(currentModo), 15000); }catch(e){ /* no bloquea */ }
+    try{ await withTimeout(assimilateGastosFromCloud(currentModo), 15000); }catch(e){ /* no bloquea */ }
     startAjustesListener(currentModo);
     startGastosPrestamosListener(currentModo);
   }catch(err){
@@ -1561,6 +1569,89 @@ async function backfillVentas(modo){
   }catch(e){ console.error('Error respaldando ventas en la nube', e); }
 }
 
+// Trae de la nube a ESTE dispositivo las ventas que le falten del dominio
+// (incluida una venta que este mismo celular registró y cuya única copia
+// estaba en el almacén lleno del navegador: así no se pierde aunque la copia
+// local falle en la recarga). Se ejecuta en cada conexión. Solo AGREGA las que
+// falten; nunca borra ni reemplaza una venta local.
+async function assimilateVentasFromCloud(modo){
+  if(!sbConfigOk() || !firebaseToggleOn()) return;
+  const m = modo || currentModo;
+  try{
+    const remote = await listVentas(m);
+    if(!Array.isArray(remote) || !remote.length) return;
+    const tumbas = (db.tombstones || {}).ventas || {};
+    const map = new Map();
+    (db.ventas || []).forEach(v => { if(v && v.id != null && !tumbas[String(v.id)]) map.set(String(v.id), v); });
+    let cambios = false;
+    remote.forEach(r => {
+      if(!r || r.id == null) return;
+      const key = String(r.id);
+      if(tumbas[key]) return;
+      if(map.has(key)) return;
+      const v = Object.assign({}, r.data || {});
+      v.id = key;
+      map.set(key, v);
+      cambios = true;
+    });
+    if(cambios){
+      db.ventas = Array.from(map.values());
+      persistLocalCache();
+      rerenderCurrentView();
+    }
+  }catch(e){ console.error('Error trayendo ventas de la nube', e); }
+}
+
+async function assimilateAjustesFromCloud(modo){
+  if(!sbConfigOk() || !firebaseToggleOn()) return;
+  const m = modo || currentModo;
+  try{
+    const remote = await listAjustes(m);
+    if(!Array.isArray(remote) || !remote.length) return;
+    db.ajustes = db.ajustes || {};
+    let cambios = false;
+    remote.forEach(r => {
+      if(!r || r.id == null) return;
+      const rec = Object.assign({}, r.data || {});
+      delete rec.dia; delete rec._ts;
+      if(!Object.keys(rec).length) return;
+      if(!db.ajustes[String(r.id)]){
+        db.ajustes[String(r.id)] = rec;
+        cambios = true;
+      }
+    });
+    if(cambios){ persistLocalCache(); rerenderCurrentView(); }
+  }catch(e){ console.error('Error trayendo ajustes de cuentas de la nube', e); }
+}
+
+async function assimilateGastosFromCloud(modo){
+  if(!sbConfigOk() || !firebaseToggleOn()) return;
+  const m = modo || currentModo;
+  try{
+    const remote = await listGastos(m);
+    if(!Array.isArray(remote) || !remote.length) return;
+    const tumbas = (db.tombstones || {}).gastosPrestamos || {};
+    const map = new Map();
+    (db.gastosPrestamos || []).forEach(g => { if(g && g.id != null && !tumbas[String(g.id)]) map.set(String(g.id), g); });
+    let cambios = false;
+    remote.forEach(r => {
+      if(!r || r.id == null) return;
+      const key = String(r.id);
+      if(tumbas[key]) return;
+      if(map.has(key)) return;
+      const g = Object.assign({}, r.data || {});
+      g.id = key;
+      map.set(key, g);
+      cambios = true;
+    });
+    if(cambios){
+      db.gastosPrestamos = Array.from(map.values());
+      persistLocalCache();
+      rerenderCurrentView();
+    }
+  }catch(e){ console.error('Error trayendo gastos/préstamos de la nube', e); }
+}
+
 // Escucha la tabla del dominio (invitado/manual/electrico) y corrige la lista
 // local de ventas con lo que hay en la nube: las ventas de OTROS dispositivos
 // del MISMO dominio aparecen al instante, y las que se borraron en otro lado
@@ -1748,7 +1839,7 @@ function syncGastoPrestamoDoc(g){
   if(!client) return;
   if(currentModo !== 'invitado'){
     ['manual','electrico'].forEach(cl => {
-      if(cl !== home) deleteGasto(cl, g.id);
+      if(cl !== home) deleteGastoCloud(cl, g.id);
     });
   }
   if(home){

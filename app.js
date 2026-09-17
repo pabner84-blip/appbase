@@ -1880,11 +1880,12 @@ function startStockListener(modo){
   // IMPORTANTE (quema de lecturas): antes se escuchaba la colección COMPLETA
   // de productos en cada apertura (miles de documentos = miles de lecturas del
   // cupo gratis, que se agotaba y le quitaba al celular la vista de los
-  // productos nuevos). Ahora se escucha SOLO lo que cambió en las últimas 24 h
-  // (_updatedAt > ahora - 24h). Es barato (unas decenas de lecturas por
-  // apertura), es a prueba de relojes desincronizados entre dispositivos y
-  // nunca se pierde un cambio. La primera vez igual queda cubierta porque el
-  // propio catálogo base se mantiene en la copia local de este dispositivo.
+  // productos nuevos). Luego se pasó a escuchar solo lo de las últimas 24 h
+  // (_updatedAt > ahora - 24h). AHORA es INCREMENTAL: se lee solo lo que cambió
+  // desde el lastSync guardado en este dispositivo (con 24 h de tope y 5 min de
+  // margen). Tras la primera carga, cada apertura son unas pocas lecturas. Nunca
+  // se pierde un cambio porque el catálogo base vive en la copia local de este
+  // dispositivo y el vigía/asimilación semanal cubren cualquier hueco.
 
   const flush = () => {
     if(!changed) return;
@@ -1911,13 +1912,28 @@ function startStockListener(modo){
     }
   };
 
-  const query = col.where('_updatedAt', '>', Date.now() - 24 * 3600 * 1000);
+  // LECTURA INCREMENTAL (quema de lecturas): se lee SOLO lo que cambió desde la
+  // última vez que ESTE dispositivo escuchó, usando la marca lastSync ya guardada
+  // (sinceKey). La primera vez (o si el guardado se perdió) se usa una ventana
+  // máxima de 24 h. Además se retrocede 5 min de margen para no perder nada por
+  // relojes desincronizados entre dispositivos. Así, tras la primera carga, cada
+  // apertura lee solo unos pocos documentos recientes en vez de todo lo tocado en
+  // las últimas 24 h (antes: miles de lecturas por apertura).
+  const MAX_WINDOW = 24 * 3600 * 1000;
+  const MARGIN = 5 * 60 * 1000;
+  let sinceTs = 0;
+  try{ sinceTs = Number(localStorage.getItem(sinceKey) || 0) || 0; }catch(e){}
+  const fromTs = sinceTs > 0 ? Math.max(sinceTs - MARGIN, Date.now() - MAX_WINDOW) : (Date.now() - MAX_WINDOW);
+  let checkpointSet = false;
+  const query = col.where('_updatedAt', '>', fromTs);
   fbProductosUnsubs[modo] = query.onSnapshot(snap => {
+    // La marca avanza SOLO cuando el snapshot llegó bien (no si falló por cuota):
+    // así, si esta sesión no pudo sincronizar, la próxima vuelve a leer el tramo.
+    if(!checkpointSet){ checkpointSet = true; try{ localStorage.setItem(sinceKey, String(Date.now())); }catch(e){} }
     snap.docChanges().forEach(ch => {
       if(ch.type === 'removed' || ch.doc.metadata.hasPendingWrites) return;
       const data = ch.doc.data();
       if(!data || !data.id) return;
-      try{ localStorage.setItem(sinceKey, String(Date.now())); }catch(e){}
       if(!stockStoreCache[modo]){
         try{
           stockStoreCache[modo] = modo === currentModo ? db : loadModoDB(modo);

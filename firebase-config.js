@@ -18,10 +18,10 @@
    ========================================================================= */
 
 const firebaseConfig = {
-  apiKey: "AIzaSyDxZsRC2109QZr7ENaFPsNDW0lT9Y1kcZY",
-  authDomain: "app-perez-f9e37.firebaseapp.com",
-  projectId: "app-perez-f9e37",
-  storageBucket: "app-perez-f9e37.firebasestorage.app",
-  messagingSenderId: "613161124999",
-  appId: "1:613161124999:web:01f8e76daa4559b7a2a422"
+  apiKey: "AIzaSyDs9j2aVyKOe4BwJfcSOCKN16he8kit8WU",
+  authDomain: "app-perez-2.firebaseapp.com",
+  projectId: "app-perez-2",
+  storageBucket: "app-perez-2.firebasestorage.app",
+  messagingSenderId: "635214212777",
+  appId: "1:635214212777:web:01568a1f9497183a2f03b8"
 };

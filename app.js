@@ -782,6 +782,32 @@ function sbClient(){
 
 const sbChannels = [];
 
+const SB_RETRY_DELAYS = [1500, 3000, 6000, 12000, 24000, 60000];
+// Ejecuta UNA escritura a la nube y, si falla (red cortada o rechazo del
+// servidor), la reintenta sola con espera creciente. Así una venta o un gasto
+// registrado con internet inestable llega igual a los otros dispositivos SIN
+// que el usuario tenga que recargar la página.
+function sbWrite(fn, label){
+  const delay = (ms) => new Promise(r => setTimeout(r, ms));
+  (async () => {
+    let err = null;
+    for(let i = 0; i <= SB_RETRY_DELAYS.length; i++){
+      try{
+        const res = await fn();
+        if(!res || !res.error) return;
+        err = res.error;
+      }catch(e){
+        err = e;
+      }
+      if(i < SB_RETRY_DELAYS.length){
+        console.warn('Reintentando ' + label + ' (' + (i + 1) + '/' + (SB_RETRY_DELAYS.length + 1) + ')', (err && (err.message || err)) || err);
+        await delay(SB_RETRY_DELAYS[i]);
+      }
+    }
+    console.error('No se pudo subir a la nube definitivamente:', label, (err && (err.message || err)) || err);
+  })();
+}
+
 // Suscribe a los cambios en tiempo real de UNA tabla para UN filtro (ej.
 // {'modo': 'manual'}). onChange recibe { type, id, data } donde data es el
 // payload jsonb completo del registro (o null si el evento no lo trae).
@@ -835,12 +861,9 @@ async function getMeta(docId){
 async function upsertProducto(modo, data){
   const client = sbClient();
   if(!client || !data || !data.id) return false;
-  try{
-    const { error } = await client.from('productos').upsert(
-      { id: String(data.id), modo: modo, payload: data }, { onConflict: 'id,modo' });
-    if(error) console.error('Error subiendo producto a la nube', error);
-    return !error;
-  }catch(e){ console.error('Error subiendo producto a la nube', e); return false; }
+  sbWrite(() => client.from('productos').upsert(
+      { id: String(data.id), modo: modo, payload: data }, { onConflict: 'id,modo' }), 'producto a la nube');
+  return true;
 }
 
 // Crea el producto si no existe o FUSIONA los campos del payload con los de la
@@ -849,12 +872,9 @@ async function upsertProducto(modo, data){
 async function ensureProducto(modo, id, data){
   const client = sbClient();
   if(!client || !id || !data) return;
-  try{
-    const { error } = await client.rpc('ensure_producto', {
+  sbWrite(() => client.rpc('ensure_producto', {
       p_id: String(id), p_modo: modo, p_payload: data
-    });
-    if(error) console.error('Error creando producto en la nube', error);
-  }catch(e){ console.error('Error creando producto en la nube', e); }
+    }), 'producto a la nube');
 }
 
 async function listProductos(modo){
@@ -877,10 +897,8 @@ async function deleteProductos(modo, ids){
   const client = sbClient();
   if(!client || !ids || !ids.length) return;
   for(let i = 0; i < ids.length; i += 200){
-    try{
-      const { error } = await client.from('productos').delete().eq('modo', modo).in('id', ids.slice(i, i + 200).map(String));
-      if(error) console.error('Error borrando productos de la nube', error);
-    }catch(e){ console.error('Error borrando productos de la nube', e); }
+    const chunk = ids.slice(i, i + 200).map(String);
+    sbWrite(() => client.from('productos').delete().eq('modo', modo).in('id', chunk), 'borrado de productos de la nube');
   }
 }
 
@@ -891,11 +909,10 @@ async function upsertVenta(modo, data, chunkSize){
   const rows = Array.isArray(data) ? data : [data];
   const list = rows.filter(v => v && v.id).map(v => ({ id: String(v.id), modo: modo, payload: ventaDocData(v) }));
   if(!list.length) return true;
-  for(let i = 0; i < list.length; i += (chunkSize || 400)){
-    try{
-      const { error } = await client.from('ventas').upsert(list.slice(i, i + (chunkSize || 400)), { onConflict: 'id,modo' });
-      if(error) console.error('Error subiendo ventasi a la nube', error);
-    }catch(e){ console.error('Error subiendo ventas a la nube', e); }
+  const size = chunkSize || 400;
+  for(let i = 0; i < list.length; i += size){
+    const chunk = list.slice(i, i + size);
+    sbWrite(() => client.from('ventas').upsert(chunk, { onConflict: 'id,modo' }), 'ventas a la nube');
   }
   return true;
 }
@@ -914,10 +931,8 @@ async function deleteVentas(modo, ids){
   const client = sbClient();
   if(!client || !ids || !ids.length) return;
   for(let i = 0; i < ids.length; i += 200){
-    try{
-      const { error } = await client.from('ventas').delete().eq('modo', modo).in('id', ids.slice(i, i + 200).map(String));
-      if(error) console.error('Error borrando ventas de la nube', error);
-    }catch(e){ console.error('Error borrando ventas de la nube', e); }
+    const chunk = ids.slice(i, i + 200).map(String);
+    sbWrite(() => client.from('ventas').delete().eq('modo', modo).in('id', chunk), 'borrado de ventas de la nube');
   }
 }
 
@@ -925,19 +940,13 @@ async function deleteVentas(modo, ids){
 async function upsertAjuste(modo, rows){
   const client = sbClient();
   if(!client || !rows || !rows.length) return;
-  try{
-    const { error } = await client.from('ajustes').upsert(rows, { onConflict: 'id,modo' });
-    if(error) console.error('Error subiendo ajustes a la nube', error);
-  }catch(e){ console.error('Error subiendo ajustes a la nube', e); }
+  sbWrite(() => client.from('ajustes').upsert(rows, { onConflict: 'id,modo' }), 'ajustes a la nube');
 }
 
 async function deleteAjuste(modo, dia){
   const client = sbClient();
   if(!client || !dia) return;
-  try{
-    const { error } = await client.from('ajustes').delete().eq('modo', modo).eq('id', String(dia));
-    if(error) console.error('Error borrando ajuste de la nube', error);
-  }catch(e){ console.error('Error borrando ajuste de la nube', e); }
+  sbWrite(() => client.from('ajustes').delete().eq('modo', modo).eq('id', String(dia)), 'borrado de ajuste de la nube');
 }
 
 async function listAjustes(modo){
@@ -954,30 +963,22 @@ async function listAjustes(modo){
 async function upsertGasto(modo, data){
   const client = sbClient();
   if(!client || !data || !data.id) return;
-  try{
-    const { error } = await client.from('gastos_prestamos').upsert(
-      { id: String(data.id), modo: modo, payload: gpDocData(data) }, { onConflict: 'id,modo' });
-    if(error) console.error('Error subiendo gasto/préstamo a la nube', error);
-  }catch(e){ console.error('Error subiendo gasto/préstamo a la nube', e); }
+  sbWrite(() => client.from('gastos_prestamos').upsert(
+      { id: String(data.id), modo: modo, payload: gpDocData(data) }, { onConflict: 'id,modo' }), 'gasto/préstamo a la nube');
 }
 
 async function deleteGasto(modo, id){
   const client = sbClient();
   if(!client || !id) return;
-  try{
-    const { error } = await client.from('gastos_prestamos').delete().eq('modo', modo).eq('id', String(id));
-    if(error) console.error('Error borrando gasto/préstamo de la nube', error);
-  }catch(e){ console.error('Error borrando gasto/préstamo de la nube', e); }
+  sbWrite(() => client.from('gastos_prestamos').delete().eq('modo', modo).eq('id', String(id)), 'borrado de gasto/préstamo de la nube');
 }
 
 async function deleteGastos(modo, ids){
   const client = sbClient();
   if(!client || !ids || !ids.length) return;
   for(let i = 0; i < ids.length; i += 200){
-    try{
-      const { error } = await client.from('gastos_prestamos').delete().eq('modo', modo).in('id', ids.slice(i, i + 200).map(String));
-      if(error) console.error('Error borrando gastos/préstamos de la nube', error);
-    }catch(e){ console.error('Error borrando gastos/préstamos de la nube', e); }
+    const chunk = ids.slice(i, i + 200).map(String);
+    sbWrite(() => client.from('gastos_prestamos').delete().eq('modo', modo).in('id', chunk), 'borrado de gastos/préstamos de la nube');
   }
 }
 
@@ -11349,25 +11350,15 @@ function init(){
   // el navegador refrescó la página), la app vuelve a la vista donde se quedó
   // en vez de empezar desde Inicio. Al CERRAR Chrome o la pestaña, sessionStorage
   // se borra solo y la app abre de nuevo desde Inicio.
-  const sessionState = readSessionViewState();
-  let savedMode = null;
-  try{ savedMode = localStorage.getItem(MODO_KEY); }catch(e){}
-  if(sessionState && sessionState.view && sessionState.view !== 'inicio' && VIEW_TITLES[sessionState.view]){
-    connectFirebase(); // sigue con el modo que restoreModo ya eligió
-    showView(sessionState.view);
-    if(sessionState.view === 'escaner' && sessionState.lastCodigo){
-      renderScanResult(sessionState.lastCodigo);
-    }
-  }else if(savedMode && savedMode !== 'invitado' && isRemembered(savedMode)){
-    // "Mantener sesión abierta": no pide contraseña para este modo, pero igual
-    // muestra la pantalla de Inicio (antes saltaba directo al Escáner).
-    switchModoData(savedMode); // ya conecta Firebase para ese modo
-    applyRoleUI();
-    showView('inicio');
-  }else{
-    showView('inicio');
-    connectFirebase(); // no bloquea el arranque; si no está configurado, sigue todo local
-  }
+  // Al recargar la página SIEMPRE se vuelve a la pantalla de Inicio (elegir
+  // modo). No se restaura la última vista ni se entra solo al último modo:
+  // el usuario vuelve a elegir manual/eléctricas/invitado y siempre ve lo
+  // mismo, sin "heredar" el modo anterior (eso hacía que una venta registrada
+  // en Manuales pareciera perdida al recargar y caer en Eléctricas).
+  updateSidebarBrand();
+  try{ sessionStorage.removeItem(SESSION_VIEW_KEY); }catch(e){}
+  showView('inicio');
+  connectFirebase(); // no bloquea el arranque; si no está configurado, sigue todo local
   updateInicioClock();
   setInterval(updateInicioClock, 1000);
   // La vigía de sincronización: reconecta sola si Firebase se cae o queda una

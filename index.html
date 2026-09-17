@@ -6,7 +6,8 @@
 <title>TIENDA 1 — Consulta de Productos</title>
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#f26522">
-<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="TIENDA 1">
 <link rel="apple-touch-icon" href="icon-192.png">
@@ -82,11 +83,11 @@
           <small>Avisar cuando se registre una venta</small>
         </span>
       </label>
-      <label class="remember-switch" id="firebaseSwitchRow" title="Sincronizar productos, ventas e inventario con otros dispositivos usando Firebase">
+      <label class="remember-switch" id="firebaseSwitchRow" title="Sincronizar productos, ventas e inventario con otros dispositivos usando la nube">
         <input type="checkbox" id="firebaseSwitch">
         <span class="switch-track"><span class="switch-thumb"></span></span>
         <span class="remember-text">
-          <strong>Conectar a Firebase</strong>
+          <strong>Conectar a la nube</strong>
           <small>Sincronizar con otros dispositivos</small>
         </span>
       </label>
@@ -597,7 +598,7 @@
         <div class="panel">
           <div class="panel-header"><h3>🔄 Recibir y mandar actualizaciones</h3></div>
           <div class="panel-body">
-            <p class="hint">Baja los últimos cambios de otros dispositivos (productos, stock, ventas) y sube los de este equipo a Firebase. Ideal para que el invitado reciba las actualizaciones del dueño.</p>
+            <p class="hint">Baja los últimos cambios de otros dispositivos (productos, stock, ventas) y sube los de este equipo a la nube. Ideal para que el invitado reciba las actualizaciones del dueño.</p>
             <button class="btn btn-primary" id="btnManualSync">🔄 Recibir y mandar actualizaciones</button>
             <p class="hint" style="margin:10px 0 0;" id="manualSyncHint">Si está apagada, esta acción enciende la sincronización de este dispositivo.</p>
           </div>
@@ -616,13 +617,13 @@
         </div>
 
         <div class="panel">
-          <div class="panel-header"><h3>🌐 Conexión a Firebase</h3></div>
+          <div class="panel-header"><h3>🌐 Conexión a la nube</h3></div>
           <div class="panel-body">
-            <label class="remember-switch" id="firebaseSwitchConfigRow" title="Sincronizar productos, ventas e inventario con otros dispositivos usando Firebase">
+            <label class="remember-switch" id="firebaseSwitchConfigRow" title="Sincronizar productos, ventas e inventario con otros dispositivos usando la nube">
               <input type="checkbox" id="firebaseSwitchConfig">
               <span class="switch-track"><span class="switch-thumb"></span></span>
               <span class="remember-text">
-                <strong>Conectar a Firebase</strong>
+<strong>Conectar a la nube</strong>
                 <small>Sincronizar con otros dispositivos</small>
               </span>
             </label>
@@ -713,7 +714,7 @@
       <button type="button" class="btn btn-danger" id="btnImgRemove" style="display:none;">🗑️ Quitar imagen</button>
       <button type="button" class="btn btn-secondary" data-close-modal>Cerrar</button>
     </div>
-    <p class="hint" style="margin-top:12px; margin-bottom:0;">Máximo <strong>3 fotos</strong> por producto. La imagen se guarda solo en este dispositivo, no ocupa espacio en Firebase. La foto se reduce automáticamente para que no pese.</p>
+    <p class="hint" style="margin-top:12px; margin-bottom:0;">Máximo <strong>3 fotos</strong> por producto. La imagen se guarda solo en este dispositivo, no ocupa espacio en la nube. La foto se reduce automáticamente para que no pese.</p>
   </div>
 </div>
 
@@ -1258,7 +1259,7 @@
       <label style="grid-column:1/-1;">Confirmar contraseña *
         <input type="password" id="setPassConfirm" class="input" autocomplete="off" required>
       </label>
-      <p class="hint" style="grid-column:1/-1; margin:0;">La contraseña se sincroniza a los dispositivos conectados a la misma cuenta de Firebase. Si alguien no la sabe, siempre puede entrar como invitado.</p>
+      <p class="hint" style="grid-column:1/-1; margin:0;">La contraseña se sincroniza a los dispositivos conectados a la misma cuenta de la nube. Si alguien no la sabe, siempre puede entrar como invitado.</p>
       <div class="form-actions" style="justify-content:space-between;">
         <button type="button" class="btn btn-danger" id="btnRemovePassword" style="display:none;">Quitar contraseña</button>
         <button type="submit" class="btn btn-primary">Guardar</button>
@@ -1350,13 +1351,12 @@ window.__LAZY_LIBS__ = {
   zxing: function(){ return new Promise(function(ok, no){ if(window.ZXing) return ok(); var s=document.createElement('script'); s.src='https://unpkg.com/@zxing/library@0.20.0'; s.onload=ok; s.onerror=function(){no()}; document.head.appendChild(s); }); }
 };
 </script>
-<!-- Firebase (opcional): si firebase-config.js está vacío, la app funciona 100% local.
-     Se cargan con defer: descargan en paralelo SIN bloquear la app. Así, sin
+<!-- Supabase (opcional): si supabase-config.js está vacío, la app funciona 100% local.
+     Se carga con defer: descarga en paralelo SIN bloquear la app. Así, sin
      internet o con internet lento, la app abre al instante (igual que la versión
-     puramente local) y Firebase conecta solo cuando llega la conexión. -->
-<script defer src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
-<script defer src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js"></script>
-<script src="firebase-config.js"></script>
+     puramente local) y la nube conecta solo cuando llega la conexión. -->
+<script defer src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+<script src="supabase-config.js"></script>
 <script>if('serviceWorker' in navigator){ window.addEventListener('load', function(){ navigator.serviceWorker.register('./sw.js', { updateViaCache: 'none' }).catch(function(){}); }); }</script>
 <script src="app.js"></script>
 </body>

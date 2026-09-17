@@ -4,17 +4,17 @@
    funcione sin internet (los datos se sincronizan cuando hay conexión).
    ========================================================================= */
 
-const CACHE = 'stockferre-v2';
+const CACHE = 'stockferre-v4';
 
 // Archivos esenciales para que la app arranque sin conexión.
-// Los CDNs (Firebase, Tesseract, lector de barras, fuentes) también se
+// Los CDNs (Supabase, Tesseract, lector de barras, fuentes) también se
 // pre-cachean: con una sola visita quedan listos para usar offline.
 const PRECACHE = [
   './',
   './index.html',
   './app.js',
   './styles.css',
-  './firebase-config.js',
+  './supabase-config.js',
   './manifest.json',
   './icon-192.png',
   './icon-512.png',
@@ -22,8 +22,7 @@ const PRECACHE = [
   'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js',
   'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js',
   'https://unpkg.com/@zxing/library@0.20.0',
-  'https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js',
-  'https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js',
+  'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js',
   'https://fonts.googleapis.com/css2?family=Alfa+Slab+One&family=Cormorant+Garamond:ital,wght@1,300&display=swap'
 ];
 
@@ -56,6 +55,10 @@ self.addEventListener('fetch', (event) => {
   const url = new URL(req.url);
   const esNavegacion = req.mode === 'navigate';
 
+  // Solo http/https: las peticiones de extensiones del navegador (chrome-extension://,
+  // moz-extension://, etc.) no se pueden meter en la caché y rompen el SW.
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return;
+
   // Pedidos opacos (imágenes de la web, Google Fonts con no-cors, etc.):
   // se dejan pasar sin tocar para no guardar respuestas ilegibles.
   if (req.mode !== 'cors' && url.origin !== self.location.origin) {
@@ -76,7 +79,7 @@ self.addEventListener('fetch', (event) => {
     const archivo = (url.pathname.replace(/\/+$/, '') || '/').split('/').pop();
     const esCore = esNavegacion ||
       archivo === 'index.html' || archivo === 'app.js' ||
-      archivo === 'styles.css' || archivo === 'firebase-config.js' ||
+      archivo === 'styles.css' || archivo === 'supabase-config.js' ||
       archivo === 'manifest.json';
     if (esCore) {
       try {

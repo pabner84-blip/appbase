@@ -315,24 +315,22 @@ function mejorProducto(a, b){
   return a;
 }
 
-// Trae de la nube el mapa código -> id de los documentos de producto de un
+// Trae de la nube el mapa código -> id de los registros de producto de un
 // modo. Se usa justo antes de crear productos (imports, backfill) para
-// REUTILIZAR el documento que ya existe con ese código y no crear duplicados.
+// REUTILIZAR el registro que ya existe con ese código y no crear duplicados.
 async function buildCloudCodeMap(modo){
   try{
-    const col = fbProductsCol(modo);
-    if(!col) return null;
-    const snap = await col.get();
-    const map = new Map(); // codigo normalizado -> id del documento canónico
-    snap.docs.forEach(d => {
-      const data = d.data() || {};
-      if(!data || !data.id) return;
-      const code = normalize(data.codigo);
-      if(code) map.set(code, String(data.id));
+    const cloud = await listProductos(modo || currentModo);
+    const map = new Map(); // codigo normalizado -> id del registro canónico
+    cloud.forEach(r => {
+      const d = r.data || {};
+      if(!d || !d.id) return;
+      const code = normalize(d.codigo);
+      if(code) map.set(code, String(r.id));
     });
     return map;
   }catch(e){
-    if(e && e.code !== 'permission-denied') console.error('Error leyendo códigos de la nube', e);
+    console.error('Error leyendo códigos de la nube', e);
     return null;
   }
 }
@@ -384,8 +382,8 @@ function persistLocalCache(){
   }
 }
 
-// Guarda siempre en LocalStorage (instantáneo) y, si Firebase está conectado,
-// también sube los datos a Firestore para que se vean en todos los dispositivos.
+// Guarda siempre en LocalStorage (instantáneo) y, si la nube está conectada,
+// también sube los datos a Supabase para que se vean en todos los dispositivos.
 // El historial de escaneos/búsquedas se queda solo en este dispositivo (no se
 // sube) para no gastar la cuota gratuita de Firebase con cada escaneo.
 /* -------------------------------------------------------------------------
@@ -401,17 +399,17 @@ function persistLocalCache(){
    último cambio aunque ya se hubiera aplicado localmente (por eso aparecía
    en el Historial pero el producto no quedaba actualizado).
 
-   La solución: por cada documento de Firestore solo dejamos UNA escritura en
-   curso a la vez. Si llegan más cambios mientras esa escritura está en
-   camino, no se disparan escrituras nuevas de inmediato: se espera a que
-   termine la actual y entonces se manda UNA sola escritura más, con el
-   estado más reciente de la base de datos en ese momento. Así nunca se puede
+   La solución: por cada documento de meta (el respaldo completo de un modo)
+   solo dejamos UNA escritura en curso a la vez. Si llegan más cambios mientras
+   esa escritura está en camino, no se disparan escrituras nuevas de inmediato:
+   se espera a que termine la actual y entonces se manda UNA sola escritura
+   más, con el estado más reciente en ese momento. Así nunca se puede
    sobrescribir un cambio nuevo con uno viejo, sin importar la velocidad a la
    que se registren productos ni la latencia de la red.
    ------------------------------------------------------------------------- */
 const fbWriteQueues = {}; // docId -> { inFlight: bool, latestData: object, attempt: int }
 
-// Si una escritura a Firestore falla (cortón de red, o el servidor rechaza por
+// Si una escritura a Supabase falla (cortón de red, o el servidor rechaza por
 // un momento), NO se pierde: se reintenta sola con espera creciente (2s, 4s,
 // 8s, ... hasta 60s). Así una venta registrada con internet inestable llega
 // igual al otro dispositivo apenas la conexión se recupera, sin que el dueño
@@ -434,12 +432,12 @@ function runQueuedWrite(docId, ref){
   q.attempt = (q.attempt || 0) + 1;
   const toSend = q.latestData;
   setSyncStatus('connecting');
-  ref.set(toSend).then(()=>{
+  upsertMeta(docId, toSend).then(ok=>{
     q.attempt = 0;
-    setSyncStatus('synced');
+    setSyncStatus(ok ? 'synced' : 'error');
     finishQueuedWrite(docId, ref, toSend);
   }).catch(err=>{
-    console.error('Error guardando en Firebase', err);
+    console.error('Error guardando en Supabase', err);
     // Durante los reintentos NO marcamos "error de sincronización": seguimos
     // "conectando" para que no salte el aviso de error por un cortón tonto.
     if(q.attempt < FB_WRITE_MAX_ATTEMPTS){
@@ -454,7 +452,7 @@ function runQueuedWrite(docId, ref){
     }
     q.attempt = 0;
     setSyncStatus('error');
-    console.warn('Escritura a Firebase no pudo subir tras varios reintentos. Se reintentará al volver la conexión.');
+    console.warn('Escritura a Supabase no pudo subir tras varios reintentos. Se reintentará al volver la conexión.');
     finishQueuedWrite(docId, ref, toSend);
   });
 }
@@ -469,20 +467,19 @@ function finishQueuedWrite(docId, ref, toSend){
 
 function saveDB(){
   persistLocalCache();
-  // Sube SIEMPRE que Firebase esté configurado (no hace falta esperar a que
+  // Sube SIEMPRE que Supabase esté configurado (no hace falta esperar a que
   // "fbReady" termine de arrancar): si la conexión todavía no está lista, la
   // cola espera el momento correcto y reenvía sola. Así UNA VENTA REGISTRADA
   // EN EL CELULAR sube igual y llega a la compu aunque el arranque de la
   // sincronización haya sido lento (era el motivo por el que el celular
   // guardaba la venta solo ahí y la compu nunca se enteraba).
-  if(firebaseToggleOn() && typeof firebase !== 'undefined' && typeof firebaseConfig !== 'undefined' && firebaseConfig.apiKey){
+  if(firebaseToggleOn() && sbConfigOk()){
     try{
-      if(!firebase.apps || !firebase.apps.length){ firebase.initializeApp(firebaseConfig); }
-      const ref = fbDocRef || firebase.firestore().collection('stockferre').doc(firebaseDocId());
+      const docId = fbDocRef || firebaseDocId();
       const { historialEscaneos, historialBusquedas, historialInventario, ventas, ajustes, gastosPrestamos, ...syncData } = db;
-      scheduleFirestoreWrite(firebaseDocId(), ref, syncData);
+      scheduleFirestoreWrite(docId, null, syncData);
     }catch(err){
-      console.error('Error guardando en Firebase', err);
+      console.error('Error guardando en Supabase', err);
     }
   }
 }
@@ -563,19 +560,17 @@ function findProductoInDB(dbObj, codigo){
   return dbObj.productos.find(p => normalize(p.codigo) === c || (p.codigoBarras && normalize(p.codigoBarras) === c)) || null;
 }
 
-// Guarda la base de UN modo concreto (LocalStorage + Firebase), sin depender
+// Guarda la base de UN modo concreto (LocalStorage + Supabase), sin depender
 // del modo actual. Lo usa el invitado para que sus ventas queden en la base
 // correcta (Manuales o Eléctricas).
 function persistModoDB(modo, dbObj){
   persistBlob('stockferre_catalogo_v1_' + modo, dbObj);
-  if(firebaseToggleOn() && typeof firebase !== 'undefined' && typeof firebaseConfig !== 'undefined' && firebaseConfig.apiKey){
+  if(firebaseToggleOn() && sbConfigOk()){
     try{
-      if(!firebase.apps || !firebase.apps.length){ firebase.initializeApp(firebaseConfig); }
-      const ref = firebase.firestore().collection('stockferre').doc('inventario_' + modo);
       const { historialEscaneos, historialBusquedas, historialInventario, ventas, ajustes, gastosPrestamos, ...syncData } = dbObj;
-      scheduleFirestoreWrite('inventario_' + modo, ref, syncData);
+      scheduleFirestoreWrite('inventario_' + modo, null, syncData);
     }catch(err){
-      console.error('Error guardando en Firebase', err);
+      console.error('Error guardando en Supabase', err);
     }
   }
 }
@@ -729,104 +724,355 @@ function disconnectGuestFirebase(){
   stopVentasListeners();
   stopAjustesListeners();
   stopGastosPrestamosListeners();
+  stopStockListeners();
   Object.keys(fbWriteQueues).forEach(k => delete fbWriteQueues[k]);
   fbReady = false;
   fbDocRef = null;
 }
 
-// En modo invitado conecta a Firestore: escucha los documentos de Manuales y
-// Eléctricas (solo para catálogo/productos) y también el documento propio del
-// invitado (ventas/gastos/finanzas). Cada uno se mantiene aislado.
+/* =========================================================================
+   1b. SUPABASE (sincronización entre dispositivos — opcional)
+   -------------------------------------------------------------------------
+   Sustituye al Firestore de la versión anterior. La app guarda SIEMPRE en
+   este dispositivo (LocalStorage + IndexedDB) y sincroniza con Supabase
+   usando tablas con el objeto EXACTO que ya usaba la app (payload jsonb):
+
+     public.meta              -> UN registro por dominio (inventario_<modo>):
+                                 el respaldo completo del catálogo (productos,
+                                 categorías, contraseña, finanzas, tumbas...).
+                                 Es lo que envía y recibe saveDB().
+     public.productos         -> UN registro por producto (id + modo). El
+                                 stock se cambia con incrementos ATÓMICOS
+                                 (rpc inc_stock), igual que el FieldValue
+                                 .increment de Firestore.
+     public.ventas            -> UNA venta por registro (id + modo).
+     public.ajustes           -> UN día por registro (id = fecha).
+     public.gastos_prestamos  -> UN gasto/préstamo por registro (id + modo).
+
+   El tiempo real (reemplaza al onSnapshot) se recibe con canales
+   "postgres_changes" de supabase-js para cada tabla + dominio.
+
+   IMPORTANTE: la clave del switch de sincronización se conserva de la versión
+   Firebase (stockferre_firebase_v1): si en un dispositivo estaba encendido,
+   sigue encendido igual.
+   ========================================================================= */
+
+let sb = null; // cliente supabase-js (se crea la primera vez que se usa)
+
+// ¿Supabase está configurado y el SDK cargó?
+function sbConfigOk(){
+  return typeof supabaseConfig !== 'undefined' && supabaseConfig &&
+    supabaseConfig.supabaseUrl && supabaseConfig.supabaseAnonKey &&
+    typeof window !== 'undefined' && window.supabase;
+}
+
+// Cliente listo para usar (null si el usuario apagó la sincronización o si
+// falta la configuración). Todas las escrituras/lecturas pasan por aquí, así
+// el switch "Conectar a la nube" funciona para todo: si está apagado, cada
+// helper devuelve null/[] y la app se queda 100% local.
+function sbClient(){
+  if(!firebaseToggleOn()) return null;
+  if(!sbConfigOk()) return null;
+  if(!sb){
+    try{ sb = window.supabase.createClient(supabaseConfig.supabaseUrl, supabaseConfig.supabaseAnonKey); }
+    catch(e){ console.error('Error creando cliente Supabase', e); return null; }
+  }
+  return sb;
+}
+
+const sbChannels = [];
+
+// Suscribe a los cambios en tiempo real de UNA tabla para UN filtro (ej.
+// {'modo': 'manual'}). onChange recibe { type, id, data } donde data es el
+// payload jsonb completo del registro (o null si el evento no lo trae).
+// Devuelve la función para desuscribirse (o null si no se pudo).
+function sbSubscribe(table, filtro, onChange){
+  const client = sbClient();
+  if(!client) return null;
+  const channel = client
+    .channel('sb_' + table + '_' + filtro.replace(/[^a-z0-9]/gi, '_') + '_' + Date.now() + '_' + Math.floor(Math.random()*1e5))
+    .on('postgres_changes',
+      { event: '*', schema: 'public', table: table, filter: filtro },
+      payload => {
+        const row = (payload.new && Object.keys(payload.new).length) ? payload.new : payload.old;
+        if(!row) return;
+        onChange({
+          type: String(payload.eventType || 'UPDATE').toUpperCase(),
+          id: String(row.id),
+          data: row.payload || null,
+          raw: row
+        });
+      })
+    .subscribe();
+  sbChannels.push(channel);
+  return () => { try{ channel.unsubscribe(); }catch(e){ /* ignorar */ } };
+}
+
+// ---------------------------------------------------------------- META
+// Un registro por dominio: inventario_manual, inventario_electrico, inventario_invitado.
+async function upsertMeta(docId, data){
+  const client = sbClient();
+  if(!client || !docId) return false;
+  try{
+    const { error } = await client.from('meta').upsert(
+      { id: docId, payload: data }, { onConflict: 'id' });
+    if(error){ console.error('Error subiendo datos a la nube', error); return false; }
+    return true;
+  }catch(e){ console.error('Error subiendo datos a la nube', e); return false; }
+}
+
+async function getMeta(docId){
+  const client = sbClient();
+  if(!client || !docId) return null;
+  try{
+    const { data, error } = await client.from('meta').select('payload').eq('id', docId).maybeSingle();
+    if(error){ console.error('Error leyendo datos de la nube', error); return null; }
+    return (data && data.payload) ? data.payload : null;
+  }catch(e){ console.error('Error leyendo datos de la nube', e); return null; }
+}
+
+// ------------------------------------------------------------- PRODUCTOS
+async function upsertProducto(modo, data){
+  const client = sbClient();
+  if(!client || !data || !data.id) return false;
+  try{
+    const { error } = await client.from('productos').upsert(
+      { id: String(data.id), modo: modo, payload: data }, { onConflict: 'id,modo' });
+    if(error) console.error('Error subiendo producto a la nube', error);
+    return !error;
+  }catch(e){ console.error('Error subiendo producto a la nube', e); return false; }
+}
+
+// Crea el producto si no existe o FUSIONA los campos del payload con los de la
+// nube (igual que el "merge: true" de Firestore). Nunca toca el stock que ya
+// exista si el payload no lo trae.
+async function ensureProducto(modo, id, data){
+  const client = sbClient();
+  if(!client || !id || !data) return;
+  try{
+    const { error } = await client.rpc('ensure_producto', {
+      p_id: String(id), p_modo: modo, p_payload: data
+    });
+    if(error) console.error('Error creando producto en la nube', error);
+  }catch(e){ console.error('Error creando producto en la nube', e); }
+}
+
+async function listProductos(modo){
+  const client = sbClient();
+  if(!client) return [];
+  try{
+    const { data, error } = await client.from('productos').select('id,payload,stock').eq('modo', modo);
+    if(error){ console.error('Error leyendo productos de la nube', error); return []; }
+    // El stock vive en su propia columna (para las sumas/restas atómicas), así
+    // que se fusiona con el payload para que el resto de la app lo lea igual.
+    return (data || []).map(r => {
+      const d = Object.assign({}, r.payload);
+      if(typeof r.stock === 'number' && d.stock === undefined) d.stock = r.stock;
+      return { id: String(r.id), data: d };
+    });
+  }catch(e){ console.error('Error leyendo productos de la nube', e); return []; }
+}
+
+async function deleteProductos(modo, ids){
+  const client = sbClient();
+  if(!client || !ids || !ids.length) return;
+  for(let i = 0; i < ids.length; i += 200){
+    try{
+      const { error } = await client.from('productos').delete().eq('modo', modo).in('id', ids.slice(i, i + 200).map(String));
+      if(error) console.error('Error borrando productos de la nube', error);
+    }catch(e){ console.error('Error borrando productos de la nube', e); }
+  }
+}
+
+// ---------------------------------------------------------------- VENTAS
+async function upsertVenta(modo, data, chunkSize){
+  const client = sbClient();
+  if(!client) return false;
+  const rows = Array.isArray(data) ? data : [data];
+  const list = rows.filter(v => v && v.id).map(v => ({ id: String(v.id), modo: modo, payload: ventaDocData(v) }));
+  if(!list.length) return true;
+  for(let i = 0; i < list.length; i += (chunkSize || 400)){
+    try{
+      const { error } = await client.from('ventas').upsert(list.slice(i, i + (chunkSize || 400)), { onConflict: 'id,modo' });
+      if(error) console.error('Error subiendo ventasi a la nube', error);
+    }catch(e){ console.error('Error subiendo ventas a la nube', e); }
+  }
+  return true;
+}
+
+async function listVentas(modo){
+  const client = sbClient();
+  if(!client) return [];
+  try{
+    const { data, error } = await client.from('ventas').select('id,payload').eq('modo', modo);
+    if(error){ console.error('Error leyendo ventas de la nube', error); return []; }
+    return (data || []).map(r => ({ id: String(r.id), data: r.payload }));
+  }catch(e){ console.error('Error leyendo ventas de la nube', e); return []; }
+}
+
+async function deleteVentas(modo, ids){
+  const client = sbClient();
+  if(!client || !ids || !ids.length) return;
+  for(let i = 0; i < ids.length; i += 200){
+    try{
+      const { error } = await client.from('ventas').delete().eq('modo', modo).in('id', ids.slice(i, i + 200).map(String));
+      if(error) console.error('Error borrando ventas de la nube', error);
+    }catch(e){ console.error('Error borrando ventas de la nube', e); }
+  }
+}
+
+// -------------------------------------------------------------- AJUSTES
+async function upsertAjuste(modo, rows){
+  const client = sbClient();
+  if(!client || !rows || !rows.length) return;
+  try{
+    const { error } = await client.from('ajustes').upsert(rows, { onConflict: 'id,modo' });
+    if(error) console.error('Error subiendo ajustes a la nube', error);
+  }catch(e){ console.error('Error subiendo ajustes a la nube', e); }
+}
+
+async function deleteAjuste(modo, dia){
+  const client = sbClient();
+  if(!client || !dia) return;
+  try{
+    const { error } = await client.from('ajustes').delete().eq('modo', modo).eq('id', String(dia));
+    if(error) console.error('Error borrando ajuste de la nube', error);
+  }catch(e){ console.error('Error borrando ajuste de la nube', e); }
+}
+
+async function listAjustes(modo){
+  const client = sbClient();
+  if(!client) return [];
+  try{
+    const { data, error } = await client.from('ajustes').select('id,payload').eq('modo', modo);
+    if(error){ console.error('Error leyendo ajustes de la nube', error); return []; }
+    return (data || []).map(r => ({ id: String(r.id), data: r.payload }));
+  }catch(e){ console.error('Error leyendo ajustes de la nube', e); return []; }
+}
+
+// ------------------------------------------------- GASTOS / PRÉSTAMOS
+async function upsertGasto(modo, data){
+  const client = sbClient();
+  if(!client || !data || !data.id) return;
+  try{
+    const { error } = await client.from('gastos_prestamos').upsert(
+      { id: String(data.id), modo: modo, payload: gpDocData(data) }, { onConflict: 'id,modo' });
+    if(error) console.error('Error subiendo gasto/préstamo a la nube', error);
+  }catch(e){ console.error('Error subiendo gasto/préstamo a la nube', e); }
+}
+
+async function deleteGasto(modo, id){
+  const client = sbClient();
+  if(!client || !id) return;
+  try{
+    const { error } = await client.from('gastos_prestamos').delete().eq('modo', modo).eq('id', String(id));
+    if(error) console.error('Error borrando gasto/préstamo de la nube', error);
+  }catch(e){ console.error('Error borrando gasto/préstamo de la nube', e); }
+}
+
+async function deleteGastos(modo, ids){
+  const client = sbClient();
+  if(!client || !ids || !ids.length) return;
+  for(let i = 0; i < ids.length; i += 200){
+    try{
+      const { error } = await client.from('gastos_prestamos').delete().eq('modo', modo).in('id', ids.slice(i, i + 200).map(String));
+      if(error) console.error('Error borrando gastos/préstamos de la nube', error);
+    }catch(e){ console.error('Error borrando gastos/préstamos de la nube', e); }
+  }
+}
+
+async function listGastos(modo){
+  const client = sbClient();
+  if(!client) return [];
+  try{
+    const { data, error } = await client.from('gastos_prestamos').select('id,payload').eq('modo', modo);
+    if(error){ console.error('Error leyendo gastos/préstamos de la nube', error); return []; }
+    return (data || []).map(r => ({ id: String(r.id), data: r.payload }));
+  }catch(e){ console.error('Error leyendo gastos/préstamos de la nube', e); return []; }
+}
+
+// ------------------------------------------------------------ ESTADO
+let fbReady = false;
+let fbDocRef = null;             // id del registro meta del modo actual
+let fbUnsub = null;              // desuscripción del meta del modo actual
+let fbOtherUnsub = null;         // desuscripción del meta del OTRO modo
+
+// Cada modo se guarda en un registro de meta distinto para que sean bases de
+// datos completamente separadas dentro del mismo proyecto.
+function firebaseDocId(){ return 'inventario_' + currentModo; }
+
+// En modo invitado conecta a Supabase: escucha los registros de meta de
+// Manuales y Eléctricas (solo para catálogo/productos) y también el registro
+// propio del invitado (ventas/gastos/finanzas). Cada uno se mantiene aislado.
 function connectGuestFirebase(){
   if(!firebaseToggleOn()){
     setSyncStatus('local'); // el usuario apagó la sincronización en este dispositivo
     return;
   }
-  if(typeof firebaseConfig === 'undefined' || !firebaseConfig.apiKey || !firebaseConfig.projectId) return;
-  if(typeof firebase === 'undefined') return;
+  if(typeof supabaseConfig === 'undefined' || !supabaseConfig.supabaseUrl || !supabaseConfig.supabaseAnonKey) return;
+  if(typeof window === 'undefined' || !window.supabase) return;
+  const client = sbClient();
+  if(!client) { setSyncStatus('error'); return; }
   // Limpia los listeners del invitado de una conexión previa (para poder
   // reconectar desde el watchdog sin duplicar), SIN tocar la cola de
   // escrituras pendientes para que ninguna venta se pierda.
   guestUnsubs.forEach(u => { try{ u(); }catch(e){ /* ignorar */ } });
   guestUnsubs = [];
   try{
-    if(!firebase.apps || !firebase.apps.length){ firebase.initializeApp(firebaseConfig); }
-    const fbFirestore = firebase.firestore();
-    enableOfflinePersistence(fbFirestore); // no bloquea la conexión
     setSyncStatus('connecting');
-    // 1) Escucha documentos de Manuales y Eléctricas (solo para catálogo/productos)
+    // 1) Escucha meta de Manuales y Eléctricas (solo para catálogo/productos)
+    const adoptMetaFor = (modo) => (data) => {
+      if(!data) return;
+      const prev = loadModoDB(modo);
+      const remote = normalizeDB(data);
+      const merged = mergeRemoteIntoLocal(prev, remote);
+      merged.historialEscaneos = prev.historialEscaneos;
+      merged.historialBusquedas = prev.historialBusquedas;
+      merged.historialInventario = prev.historialInventario;
+      persistBlob('stockferre_catalogo_v1_' + modo, merged);
+      if(currentModo === 'invitado'){ db = buildGuestDB(); rerenderCurrentView(); }
+    };
     ['manual','electrico'].forEach(modo => {
-      const ref = fbFirestore.collection('stockferre').doc('inventario_' + modo);
-      withTimeout(ref.get(), 12000).then(snap=>{
-        if(snap && snap.exists){
-          const prev = loadModoDB(modo);
-          const remote = normalizeDB(snap.data());
-          const merged = mergeRemoteIntoLocal(prev, remote);
-          merged.historialEscaneos = prev.historialEscaneos;
-          merged.historialBusquedas = prev.historialBusquedas;
-          merged.historialInventario = prev.historialInventario;
-          persistBlob('stockferre_catalogo_v1_' + modo, merged);
-          if(currentModo === 'invitado'){ db = buildGuestDB(); rerenderCurrentView(); }
-        }
+      const docId = 'inventario_' + modo;
+      withTimeout(getMeta(docId), 12000).then(data=>{
+        if(data) adoptMetaFor(modo)(data);
       }).catch(()=>{ /* local sigue funcionando */ });
-      const unsub = ref.onSnapshot(snap=>{
-        if(snap.metadata.hasPendingWrites) return;
-        if(!snap.exists) return;
-        const prev = loadModoDB(modo);
-        const remote = normalizeDB(snap.data());
-        const merged = mergeRemoteIntoLocal(prev, remote);
-        merged.historialEscaneos = prev.historialEscaneos;
-        merged.historialBusquedas = prev.historialBusquedas;
-        merged.historialInventario = prev.historialInventario;
-        persistBlob('stockferre_catalogo_v1_' + modo, merged);
-        if(currentModo === 'invitado'){ db = buildGuestDB(); rerenderCurrentView(); }
-      }, ()=>{ /* ignorar */ });
-      guestUnsubs.push(unsub);
+      guestUnsubs.push(sbSubscribe('meta', 'id=eq.' + docId, ev => { if(ev && ev.data) adoptMetaFor(modo)(ev.data); }));
       backfillProductos(modo);
       syncCaracteristicasCloud(modo);
       startStockListener(modo);
       assimilateCatalogFromCloud(modo);
     });
-    // 2) Escucha el documento PROPIO del invitado (ventas/gastos/finanzas)
-    //    y habilita escritura para que saveDB() suba ventas/gastos a Firebase.
-    const ownRef = fbFirestore.collection('stockferre').doc('inventario_invitado');
-    fbDocRef = ownRef;
+    // 2) Escucha el registro PROPIO del invitado (ventas/gastos/finanzas)
+    //    y habilita escritura para que saveDB() suba ventas/gastos a la nube.
+    const ownDocId = 'inventario_invitado';
+    fbDocRef = ownDocId;
     fbReady = true;
     // Con límite de tiempo: si la red está lenta, el estado no se queda para
-    // siempre en "Conectando a Firebase..." (era lo que pasaba en el celular);
-    // entre tanto, el listener de ventas y los de catálogo ya están activos.
-    withTimeout(ownRef.get(), 12000).then(snap=>{
-      if(snap && snap.exists){
-        const prev = loadOwnGuestBase() || defaultDB();
-        const remote = normalizeDB(snap.data());
-        const merged = mergeRemoteIntoLocal(prev, remote);
-        merged.historialEscaneos = guestSessionScans;
-        merged.historialBusquedas = guestSessionSearches;
-        merged.historialInventario = guestSessionInventory;
-        persistBlob(storageKey(), merged);
-        if(currentModo === 'invitado'){ db = buildGuestDB(); rerenderCurrentView(); }
-      }
-      setSyncStatus('synced');
-    }).catch(()=>{ setSyncStatus('synced'); });
-    const ownUnsub = ownRef.onSnapshot(snap=>{
-      if(snap.metadata.hasPendingWrites) return;
-      if(!snap.exists) return;
+    // siempre en "Conectando a la nube..." (era lo que pasaba en el celular);
+    // entre tanto, los listeners de ventas y catálogo ya están activos.
+    const adoptOwnGuest = (data) => {
+      if(!data) return;
       const prev = loadOwnGuestBase() || defaultDB();
-      const remote = normalizeDB(snap.data());
+      const remote = normalizeDB(data);
       const merged = mergeRemoteIntoLocal(prev, remote);
       merged.historialEscaneos = guestSessionScans;
       merged.historialBusquedas = guestSessionSearches;
       merged.historialInventario = guestSessionInventory;
       persistBlob(storageKey(), merged);
       if(currentModo === 'invitado'){ db = buildGuestDB(); rerenderCurrentView(); }
-    }, ()=>{ /* ignorar */ });
-    guestUnsubs.push(ownUnsub);
+    };
+    withTimeout(getMeta(ownDocId), 12000).then(data=>{
+      if(data) adoptOwnGuest(data);
+      setSyncStatus('synced');
+    }).catch(()=>{ setSyncStatus('synced'); });
+    guestUnsubs.push(sbSubscribe('meta', 'id=eq.' + ownDocId, ev => { if(ev && ev.data) adoptOwnGuest(ev.data); }));
 
     // VENTAS COMPARTIDAS del INVITADO: los dispositivos invitados comparten su
-    // PROPIA colección (stockferre_ventas_invitado), separada de la de manuales
-    // y eléctricas. Así el invitado no se mezcla con el dueño, pero dos
-    // invitados se ven al instante. Primero sube las ventas locales que no
-    // tengan documento y luego escucha la colección.
+    // PROPIO dominio (modo 'invitado'), separado de manuales y eléctricas.
+    // Así el invitado no se mezcla con el dueño, pero dos invitados se ven al
+    // instante. Primero sube las ventas locales que no tengan registro y luego
+    // escucha la tabla.
     try{ backfillVentas('invitado'); }catch(e){ /* no bloquea */ }
     startVentasListener('invitado');
     // AJUSTE DE CUENTAS y GASTOS/PRÉSTAMOS del invitado (mismo modelo): lo
@@ -836,23 +1082,10 @@ function connectGuestFirebase(){
     startAjustesListener('invitado');
     startGastosPrestamosListener('invitado');
   }catch(err){
-    console.error('No se pudo conectar a Firebase en modo invitado', err);
+    console.error('No se pudo conectar a Supabase en modo invitado', err);
     setSyncStatus('error');
   }
 }
-
-/* -------------------------------------------------------------------------
-   1b. FIREBASE (sincronización entre dispositivos — opcional)
-   ------------------------------------------------------------------------- */
-
-let fbReady = false;
-let fbDocRef = null;
-let fbUnsub = null;
-let fbOtherUnsub = null; // suscripción al OTRO modo (mantiene su contraseña/datos en caché)
-
-// Cada modo se guarda en un documento de Firestore distinto para que sean
-// bases de datos completamente separadas dentro del mismo proyecto.
-function firebaseDocId(){ return 'inventario_' + currentModo; }
 
 function disconnectFirebase(){
   if(fbUnsub){ try{ fbUnsub(); }catch(e){ /* ignorar */ } fbUnsub = null; }
@@ -871,37 +1104,37 @@ function setSyncStatus(status){
   if(!el) return;
   const labels = {
     local: '💾 Solo en este dispositivo',
-    connecting: '🔄 Conectando a Firebase...',
-    synced: '🔥 Sincronizado con Firebase',
+    connecting: '🔄 Conectando a la nube...',
+    synced: '🔥 Sincronizado con la nube',
     error: '⚠️ Error de sincronización'
   };
   el.textContent = labels[status] || '';
 }
 
-// Botón "Recibir y mandar actualizaciones": fuerza una sincronización con
-// Firebase en este momento (baja los cambios de otros dispositivos y sube los
-// de este). Si la sincronización estaba apagada, la enciende al presionarlo.
+// Botón "Recibir y mandar actualizaciones": fuerza una sincronización con la
+// nube en este momento (baja los cambios de otros dispositivos y sube los de
+// este). Si la sincronización estaba apagada, la enciende al presionarlo.
 function manualSync(){
   setFirebaseToggle(true);
   setFirebaseToggleUI(true);
   const btn = document.getElementById('btnManualSync');
   if(btn){ btn.disabled = true; btn.textContent = '🔄 Sincronizando…'; }
   const finish = ()=>{ if(btn){ btn.disabled = false; btn.textContent = '🔄 Recibir y mandar actualizaciones'; } };
-  if(typeof firebaseConfig === 'undefined' || !firebaseConfig.apiKey || !firebaseConfig.projectId){
+  if(typeof supabaseConfig === 'undefined' || !supabaseConfig.supabaseUrl || !supabaseConfig.supabaseAnonKey){
     setFirebaseToggle(false);
     setFirebaseToggleUI(false);
     finish();
     toast('No hay sincronización configurada en este equipo', 'error');
     return;
   }
-  if(typeof firebase === 'undefined'){
+  if(typeof window === 'undefined' || !window.supabase){
     finish();
-    toast('No se pudo cargar Firebase (revisa tu conexión a internet)', 'error');
+    toast('No se pudo cargar la nube (revisa tu conexión a internet)', 'error');
     return;
   }
   if(currentModo === 'invitado'){
     // El modo invitado avisa con setSyncStatus() al terminar de leer
-    // el documento propio; se confirma cuando aparece "synced" o "error".
+    // el registro propio; se confirma cuando aparece "synced" o "error".
     connectGuestFirebase();
     const statusEl = document.getElementById('sidebarSyncStatus');
     const started = Date.now();
@@ -965,12 +1198,12 @@ async function connectFirebase(){
     setSyncStatus('local'); // el usuario apagó la sincronización en este dispositivo
     return;
   }
-  if(typeof firebaseConfig === 'undefined' || !firebaseConfig.apiKey || !firebaseConfig.projectId){
+  if(typeof supabaseConfig === 'undefined' || !supabaseConfig.supabaseUrl || !supabaseConfig.supabaseAnonKey){
     setSyncStatus('local');
     return; // no configurado: la app sigue funcionando 100% local
   }
-  if(typeof firebase === 'undefined'){
-    console.warn('El SDK de Firebase no cargó (revisa tu conexión a internet)');
+  if(typeof window === 'undefined' || !window.supabase){
+    console.warn('El SDK de Supabase no cargó (revisa tu conexión a internet)');
     setSyncStatus('error');
     return;
   }
@@ -982,21 +1215,22 @@ async function connectFirebase(){
     if(fbUnsub){ try{ fbUnsub(); }catch(e){ /* ignorar */ } fbUnsub = null; }
     if(fbOtherUnsub){ try{ fbOtherUnsub(); }catch(e){ /* ignorar */ } fbOtherUnsub = null; }
     stopStockListeners();
+    stopVentasListeners();
+    stopAjustesListeners();
+    stopGastosPrestamosListeners();
     setSyncStatus('connecting');
-    if(!firebase.apps || !firebase.apps.length){ firebase.initializeApp(firebaseConfig); }
-    const fbFirestore = firebase.firestore();
-    await withTimeout(enableOfflinePersistence(fbFirestore), 5000);
-    fbDocRef = fbFirestore.collection('stockferre').doc(firebaseDocId());
+    const client = sbClient();
+    if(!client){ setSyncStatus('error'); return; }
+    fbDocRef = firebaseDocId();
     fbReady = true;
 
-    // IMPORTANTE: el listener del documento se activa AHORA MISMO, antes de
+    // IMPORTANTE: el listener del meta se activa AHORA MISMO, antes de
     // cualquier lectura. Así este dispositivo empieza a recibir los cambios
     // de los otros al instante, aunque la red esté lenta o una lectura tarde.
-    const applySnapshot = (snap) => {
-      if(!snap.exists) return;
+    const applySnapshot = (remote) => {
+      if(!remote) return;
       const prevVentas = (db.ventas || []).map(v => v.id);
-      const remote = normalizeDB(snap.data());
-      const merged = mergeRemoteIntoLocal(db, remote);
+      const merged = mergeRemoteIntoLocal(db, normalizeDB(remote));
       merged.historialEscaneos = db.historialEscaneos;
       merged.historialBusquedas = db.historialBusquedas;
       merged.historialInventario = db.historialInventario;
@@ -1006,14 +1240,11 @@ async function connectFirebase(){
       notifyNewRemoteSales(prevVentas, merged.ventas); // avisa ventas hechas en otro dispositivo
       setSyncStatus('synced');
     };
-    fbUnsub = fbDocRef.onSnapshot(snap=>{
-      // Si este snapshot incluye una escritura propia todavía sin confirmar,
-      // esperamos: el snapshot confirmado que llega después ya lo aplica.
-      if(snap.metadata.hasPendingWrites) return;
-      applySnapshot(snap);
-    }, err=>{
-      console.error('Error de sincronización Firebase', err);
-      setSyncStatus('error');
+    fbUnsub = sbSubscribe('meta', 'id=eq.' + fbDocRef, ev => {
+      // Si el registro llegara a borrarse, no hacemos nada (lo recrea el
+      // próximo saveDB): el broadcast confirma la escritura propia también.
+      if(ev && ev.data) applySnapshot(ev.data);
+      else setSyncStatus('synced');
     });
 
     // La conexión quedó activa: el estado ya no debe quedarse en "conectando".
@@ -1022,13 +1253,13 @@ async function connectFirebase(){
     // Lectura inicial: fusiona lo que haya en la nube con lo local (o sube la
     // semilla la primera vez). Con límite de tiempo: si la red tarda, el
     // listener de arriba sigue activo recibiendo los cambios igual.
-    const snap = await withTimeout(fbDocRef.get(), 12000);
-    if(snap && snap.exists){
-      applySnapshot(snap);
-    }else if(snap && !snap.exists){
+    const remote = await withTimeout(getMeta(fbDocRef), 12000);
+    if(remote){
+      applySnapshot(remote);
+    }else{
       // Primera vez: sube los datos locales como semilla inicial de la nube
       const { historialEscaneos, historialBusquedas, historialInventario, ventas, ajustes, gastosPrestamos, ...syncData } = db;
-      try{ await withTimeout(fbDocRef.set(syncData), 12000); }catch(e){ /* el SDK reintenta */ }
+      try{ await withTimeout(upsertMeta(fbDocRef, syncData), 12000); }catch(e){ /* la cola reintenta */ }
     }
 
     // Mantiene también en caché el OTRO modo (Manuales ↔ Eléctricas). Así la
@@ -1037,17 +1268,15 @@ async function connectFirebase(){
     // desde la pantalla de Inicio en un celular recién configurado).
     const otherModo = currentModo === 'manual' ? 'electrico' : 'manual';
     try{
-      const otherRef = fbFirestore.collection('stockferre').doc('inventario_' + otherModo);
-      const otherSnap = await withTimeout(otherRef.get(), 8000);
-      if(otherSnap.exists) cacheRemoteModo(otherSnap.data(), otherModo);
-      fbOtherUnsub = otherRef.onSnapshot(snap=>{
-        if(snap.metadata.hasPendingWrites) return;
-        if(snap.exists) cacheRemoteModo(snap.data(), otherModo);
-      }, ()=>{ /* ignorar */ });
+      const otherData = await withTimeout(getMeta('inventario_' + otherModo), 8000);
+      if(otherData) cacheRemoteModo(otherData, otherModo);
+      fbOtherUnsub = sbSubscribe('meta', 'id=eq.inventario_' + otherModo, ev => {
+        if(ev && ev.data) cacheRemoteModo(ev.data, otherModo);
+      });
     }catch(err){ /* la caché del otro modo es opcional */ }
 
-    // Stock atómico: crea los documentos de producto que falten (los que ya
-    // existían antes de este arreglo) y escucha la colección para mantener el
+    // Stock atómico: crea los registros de producto que falten (los que ya
+    // existían antes de este arreglo) y escucha la tabla para mantener el
     // stock local al día con el valor EXACTO de la nube.
     try{ await withTimeout(backfillProductos(currentModo), 15000); }catch(e){ /* no bloquea */ }
     try{ await withTimeout(backfillProductos(otherModo), 15000); }catch(e){ /* no bloquea */ }
@@ -1056,13 +1285,13 @@ async function connectFirebase(){
     startStockListener(currentModo);
     startStockListener(otherModo);
     // Sin esperar: adopta en este dispositivo los productos que le falten de la
-    // colección (una sola vez por modo). Así el catálogo completo llega aunque la
-    // base local esté llena o el documento consolidado pese demasiado.
+    // tabla (aunque la base local esté llena o el registro consolidado pese
+    // demasiado). Así el catálogo completo llega igual.
     assimilateCatalogFromCloud(currentModo);
     assimilateCatalogFromCloud(otherModo);
     // VENTAS COMPARTIDAS del dueño: cada modo (manual/electrico) tiene su
-    // PROPIA colección y sus propios dispositivos. Solo se escucha el dominio
-    // del modo actual; al cambiar de modo se re-conecta con su colección.
+    // PROPIO dominio y sus propios dispositivos. Solo se escucha el dominio
+    // del modo actual; al cambiar de modo se re-conecta con su tabla.
     try{ await withTimeout(backfillVentas(currentModo), 15000); }catch(e){ /* no bloquea */ }
     startVentasListener(currentModo);
     // AJUSTE DE CUENTAS y GASTOS/PRÉSTAMOS del dueño (mismo modelo por dominio).
@@ -1071,7 +1300,7 @@ async function connectFirebase(){
     startAjustesListener(currentModo);
     startGastosPrestamosListener(currentModo);
   }catch(err){
-    console.error('No se pudo conectar a Firebase', err);
+    console.error('No se pudo conectar a la nube', err);
     setSyncStatus('error');
   }
 }
@@ -1088,7 +1317,7 @@ let fbReconnecting = false;
 function startSyncWatchdog(){
   stopSyncWatchdog();
   fbWatchdogTimer = setInterval(()=>{
-    if(typeof firebase === 'undefined' || typeof firebaseConfig === 'undefined') return;
+    if(typeof window === 'undefined' || !window.supabase || typeof supabaseConfig === 'undefined') return;
     if(!fbConfigOk() || !firebaseToggleOn()) return;
     if(fbReconnecting) return;
     const stEl = document.getElementById('sidebarSyncStatus');
@@ -1127,7 +1356,7 @@ function cacheRemoteModo(data, modo){
 
 
 /* -------------------------------------------------------------------------
-   1c. STOCK EN LA NUBE: UN DOCUMENTO POR PRODUCTO + INCREMENTOS ATÓMICOS
+   1c. STOCK EN LA NUBE: UN REGISTRO POR PRODUCTO + INCREMENTOS ATÓMICOS
    -------------------------------------------------------------------------
    EL PROBLEMA que arregla esto:
    Antes, TODO (incluido el stock de cada producto) se guardaba en UN solo
@@ -1141,47 +1370,26 @@ function cacheRemoteModo(data, modo){
      • Al recargar, cada celular mezclaba su copia vieja con la nube con
        marcas de tiempo, y quedaban valores distintos (3 vs 4).
 
-   LA SOLUCIÓN:
-   • Cada producto tiene SU PROPIO documento en la colección
-     "stockferre_productos_<modo>". Esos documentos son pequeños y nunca
-     chocan entre sí.
-   • Los cambios de stock se aplican con FieldValue.increment() DENTRO de
-     Firestore: si dos celulares suman +1 a la vez, Firestore suma +1 y +1
-     (nunca se pierde un registro).
-   • La persistencia offline guarda las escrituras pendientes y las reenvía
-     cuando vuelve la conexión (ya no se pierde un registro por un cortón).
-   • Este celular ESCUCHA la colección (onSnapshot) y corrige su stock local
-     con el valor exacto que tiene la nube, así todos los dispositivos
-     terminan mostrando lo mismo.
+   LA SOLUCIÓN (supabase):
+   • Cada producto tiene SU PROPIO registro (id_producto,modo) en la tabla
+     "productos". El stock vive en su propia columna, separada del resto.
+   • Los cambios de stock se aplican con la función Postgres inc_stock, que
+     SUMA la cantidad sobre el valor actual: si dos celulares suman +1 a la
+     vez, Postgres suma +1 y +1 (nunca se pierde un registro).
+   • La cola local de escrituras pendientes guarda lo que no llegó y lo
+     reenvía cuando vuelve la conexión (ya no se pierde un registro por un
+     cortón).
+   • Este celular ESCUCHA la tabla (Realtime postgres_changes) y corrige su
+     stock local con el valor exacto que tiene la nube, así todos los
+     dispositivos terminan mostrando lo mismo.
    ------------------------------------------------------------------------- */
 
-// ¿Firebase está configurado y listo para escribir?
+// ¿La nube (Supabase) está configurada y lista para escribir?
 function fbConfigOk(){
-  return typeof firebaseConfig !== 'undefined' && firebaseConfig &&
-    firebaseConfig.apiKey && firebaseConfig.projectId &&
-    typeof firebase !== 'undefined' && firebase.firestore;
+  return sbConfigOk();
 }
 
-function fbFirestoreOrNull(){
-  if(!fbConfigOk() || !firebaseToggleOn()) return null;
-  try{
-    if(!firebase.apps || !firebase.apps.length){ firebase.initializeApp(firebaseConfig); }
-    const fs = firebase.firestore();
-    // Red de seguridad: activa la persistencia offline también por esta vía
-    // (por si se escribe stock antes de que termine connectFirebase). La
-    // función es idempotente, así que no duplica nada.
-    enableOfflinePersistence(fs);
-    return fs;
-  }catch(e){ console.error('Error preparando Firestore', e); return null; }
-}
-
-// Colección de documentos por producto del modo dado (o del modo actual).
-function fbProductsCol(modo){
-  const fs = fbFirestoreOrNull();
-  return fs ? fs.collection('stockferre_productos_' + (modo || currentModo)) : null;
-}
-
-// Datos que se guardan en el documento del producto.
+// Datos que se guardan en el registro del producto.
 function productoDocData(p){
   return {
     id: p.id,
@@ -1200,79 +1408,79 @@ function productoDocData(p){
   };
 }
 
-// Crea (si no existe) el documento del producto SIN tocar su stock: el stock
+// Crea (si no existe) el registro del producto SIN tocar su stock: el stock
 // solo se modifica con incrementos atómicos para no pisar a otro dispositivo.
 async function ensureProductoDoc(p, modo){
-  const col = fbProductsCol(modo);
-  if(!col || !p || !p.id) return false;
+  if(!p || !p.id) return false;
   try{
     const data = productoDocData(p);
     delete data.stock; // el stock se maneja con incrementos, no con reemplazo
-    await col.doc(p.id).set(data, { merge: true });
+    await ensureProducto(modo || currentModo, p.id, data);
     return true;
-  }catch(e){ console.error('Error creando documento del producto en la nube', e); return false; }
+  }catch(e){ console.error('Error creando registro del producto en la nube', e); return false; }
 }
 
 // Aplica un cambio ATÓMICO de stock en la nube (suma o resta). Esto es lo que
-// evita que dos celulares se pisen: Firestore suma la cantidad sobre el valor
-// actual que tenga en ese momento, así que ningún registro se pierde.
+// evita que dos celulares se pisen: la función inc_stock de Postgres suma la
+// cantidad sobre el valor actual que tenga en ese momento, así que ningún
+// registro se pierde. Devuelve el stock nuevo (la fuente de verdad).
 async function applyStockDelta(p, delta, modo){
-  const col = fbProductsCol(modo);
-  if(!col || !p || !p.id) return;
+  modo = modo || currentModo;
+  if(!p || !p.id) return null;
   delta = Number(delta) || 0;
-  if(delta === 0) return;
+  if(delta === 0) return null;
+  const client = sbClient();
+  if(!client) return null;
   try{
-    await col.doc(p.id).update({
-      stock: firebase.firestore.FieldValue.increment(delta),
-      _updatedAt: Date.now()
+    const payload = productoDocData(p);
+    delete payload.stock;
+    const { data, error } = await client.rpc('inc_stock', {
+      p_id: String(p.id), p_modo: modo, p_delta: delta, p_payload: payload
     });
-  }catch(err){
-    if(err && err.code === 'not-found'){
-      // Producto creado antes de esta actualización: se crea su documento
-      // primero y luego se aplica el incremento sobre el stock de la nube.
-      await ensureProductoDoc(p, modo);
-      try{
-        await col.doc(p.id).update({
-          stock: firebase.firestore.FieldValue.increment(delta),
-          _updatedAt: Date.now()
-        });
-      }catch(e2){ console.error('Error incrementando stock tras crear documento', e2); }
-    }else{
-      // Con la persistencia offline, un fallo transitorio de red se reenvía
-      // solo; si falla por otra razón, este celular conserva su valor local.
-      console.error('Error aplicando cambio de stock en la nube', err);
+    if(error){ console.error('Error aplicando cambio de stock en la nube', error); return null; }
+    const newStock = (typeof data === 'number') ? data : null;
+    if(typeof newStock === 'number'){
+      // Este dispositivo corrige su stock local con el valor EXACTO de la nube,
+      // así todos terminan mostrando la misma cantidad.
+      const target = (modo === currentModo && currentModo !== 'invitado') ? db : loadModoDB(modo);
+      if(target && Array.isArray(target.productos)){
+        const local = target.productos.find(x => x && String(x.id) === String(p.id));
+        if(local){ local.stock = newStock; }
+      }
+      if(modo === currentModo && currentModo !== 'invitado'){
+        persistLocalCache();
+      }else{
+        persistBlob('stockferre_catalogo_v1_' + modo, target);
+        if(currentModo === 'invitado'){ db = buildGuestDB(); }
+      }
+      rerenderCurrentView();
     }
+    return newStock;
+  }catch(err){
+    console.error('Error aplicando cambio de stock en la nube', err);
+    return null;
   }
 }
 
 // Guarda el stock EXACTO de un producto (para correcciones manuales o CSV).
 // Se usa solo cuando el usuario dice explícitamente "este es el stock real".
 async function applyStockAbsolute(p, value, modo){
-  const col = fbProductsCol(modo);
-  if(!col || !p || !p.id) return;
+  if(!p || !p.id) return;
   const data = productoDocData(p);
   data.stock = Number(value) || 0;
   data._updatedAt = Date.now();
-  try{
-    await col.doc(p.id).set(data, { merge: true });
-  }catch(e){ console.error('Error guardando stock exacto en la nube', e); }
+  await upsertProducto(modo || currentModo, data);
 }
 
-// Guarda (crea o actualiza) el documento completo de un producto.
+// Guarda (crea o actualiza) el registro completo de un producto.
 async function syncProductoDoc(p, modo){
-  const col = fbProductsCol(modo);
-  if(!col || !p || !p.id) return;
-  try{
-    await col.doc(p.id).set(productoDocData(p), { merge: true });
-  }catch(e){ console.error('Error sincronizando producto en la nube', e); }
+  if(!p || !p.id) return;
+  await upsertProducto(modo || currentModo, productoDocData(p));
 }
 
 async function deleteProductoDoc(p, modo){
-  const col = fbProductsCol(modo);
-  if(!col || !p || !p.id) return;
-  try{
-    await col.doc(p.id).delete();
-  }catch(e){ console.error('Error borrando producto de la nube', e); }
+  if(!p || !p.id) return;
+  await deleteProductos(modo || currentModo, [p.id]);
 }
 
 /* -------------------------------------------------------------------------
@@ -1286,25 +1494,18 @@ async function deleteProductoDoc(p, modo){
      • El celular se quedara en "Conectando a Firebase..." porque el documento
        del invitado tardaba/hangueaba y el estado no avanzaba.
    La solución (igual que el stock):
-   • Cada venta es SU PROPIO documento en una colección SEPARADA por dominio:
-       "stockferre_ventas_invitado", "stockferre_ventas_manual" y
-       "stockferre_ventas_electrico".
+   • Cada venta es SU PROPIO registro (id,modo) en la tabla "ventas". El resto
+     de sus datos (producto, cantidades, pagos) viajan en el payload jsonb.
    • Los TRES dominios están separados: las ventas de INVITADOS no se mezclan
      con las de MANUALES ni con las de ELÉCTRICAS. Pero dentro de cada dominio
      TODOS los dispositivos comparten y se actualizan al instante: un invitado
      en el celular ve las ventas de otros invitados, y manuales/eléctricas
      hacen lo mismo entre sus propios dispositivos.
-   • Al registrar una venta se sube su documento a la colección de SU dominio;
-     al borrarla se borra su documento. Ningún dispositivo puede "resucitar"
-     una venta borrada.
-   • Todos escuchan la colección de su dominio (onSnapshot) y corrigen su
-     lista local al instante, igual que con el stock.
+   • Al registrar una venta se sube su registro a SU dominio; al borrarla se
+     borra su registro. Ningún dispositivo puede "resucitar" una venta borrada.
+   • Todos escuchan la tabla de su dominio (Realtime postgres_changes) y
+     corrigen su lista local al instante, igual que con el stock.
    ------------------------------------------------------------------------- */
-
-function fbVentasCol(modo){
-  const fs = fbFirestoreOrNull();
-  return fs ? fs.collection('stockferre_ventas_' + (modo || currentModo)) : null;
-}
 
 function ventaDocData(v){
   return {
@@ -1324,84 +1525,46 @@ function ventaDocData(v){
   };
 }
 
-// Sube (crea o actualiza) el documento de UNA venta. Si no hay conexión, la
-// persistencia offline lo reenvía solo cuando vuelva la red (como el stock).
+// Sube (crea o actualiza) el registro de UNA venta (una venta = un registro,
+// igual que antes era un documento). Si no hay conexión, la venta ya quedó
+// guardada en este dispositivo y la subida se reintenta con backfillVentas()
+// la próxima vez que vuelva la red.
 async function syncVentaDoc(v, modo){
-  const col = fbVentasCol(modo);
-  if(!col || !v || !v.id) return;
-  try{
-    await col.doc(String(v.id)).set(ventaDocData(v));
-  }catch(e){ console.error('Error subiendo venta a la nube', e); }
+  await upsertVenta(modo || currentModo, v);
 }
 
 async function syncVentaDocs(list, modo){
-  const col = fbVentasCol(modo);
-  if(!col || !list || !list.length) return;
-  try{
-    const fs = firebase.firestore();
-    for(let i = 0; i < list.length; i += 450){
-      const batch = fs.batch();
-      list.slice(i, i + 450).forEach(v => {
-        if(v && v.id) batch.set(col.doc(String(v.id)), ventaDocData(v));
-      });
-      await batch.commit();
-    }
-  }catch(e){ console.error('Error subiendo ventas a la nube', e); }
+  await upsertVenta(modo || currentModo, list);
 }
 
 async function deleteVentaDocs(ids, modo){
-  const col = fbVentasCol(modo);
-  if(!col || !ids || !ids.length) return;
-  try{
-    const fs = firebase.firestore();
-    for(let i = 0; i < ids.length; i += 450){
-      const batch = fs.batch();
-      ids.slice(i, i + 450).forEach(id => {
-        if(id) batch.delete(col.doc(String(id)));
-      });
-      await batch.commit();
-    }
-  }catch(e){ console.error('Error borrando ventas de la nube', e); }
+  await deleteVentas(modo || currentModo, ids);
 }
 
-// Sube a la colección del dominio las ventas locales que todavía no tienen
-// documento en la nube (por ejemplo, todo el historial que ya existía antes
-// de este arreglo). Es idempotente: solo crea las que faltan.
+// Sube al dominio las ventas locales que todavía no tienen registro en la
+// nube (por ejemplo, todo el historial que ya existía antes de este arreglo,
+// o una venta hecha sin conexión). Es idempotente y se ejecuta en CADA
+// conexión: en Supabase no hay cupo de lecturas que cuidar, así esto además
+// reenvía solas las ventas registradas sin internet.
 async function backfillVentas(modo){
-  const col = fbVentasCol(modo);
-  if(!col) return;
-  // Una sola vez por dominio: releer TODA la colección de ventas en cada
-  // apertura también quema el cupo de lecturas (una lectura por venta).
-  const markKey = 'fs_backfill_ventas_' + (modo || DOMAIN);
-  let done = false;
-  try{ done = await kvGet(markKey) === '1'; }catch(e){}
-  if(done) return;
-  const arr = (db.ventas || []);
-  if(!arr.length){
-    try{ await kvSet(markKey, '1'); }catch(e){}
-    return;
-  }
+  if(!sbConfigOk() || !firebaseToggleOn()) return;
+  const arr = (db.ventas || []).filter(v => v && v.id);
+  if(!arr.length) return;
   try{
-    const snap = await col.get();
-    const existing = new Set(snap.docs.map(d => d.id));
-    const missing = arr.filter(v => v && v.id && !existing.has(String(v.id)));
-    if(missing.length){
-      await syncVentaDocs(missing, modo);
-    }
-    try{ await kvSet(markKey, '1'); }catch(e){}
-  }catch(e){ if(e && e.code !== 'permission-denied') console.error('Error respaldando ventas en la nube', e); }
+    const existing = new Set((await listVentas(modo || currentModo)).map(r => String(r.id)));
+    const missing = arr.filter(v => !existing.has(String(v.id)));
+    if(missing.length) await syncVentaDocs(missing, modo || currentModo);
+  }catch(e){ console.error('Error respaldando ventas en la nube', e); }
 }
 
-// Escucha la colección del dominio (invitado/manual/electrico) y corrige la
-// lista local de ventas con lo que hay en la nube: las ventas de OTROS
-// dispositivos del MISMO dominio aparecen al instante, y las que se borraron
-// en otro lado desaparecen. Los dominios no se mezclan entre sí.
+// Escucha la tabla del dominio (invitado/manual/electrico) y corrige la lista
+// local de ventas con lo que hay en la nube: las ventas de OTROS dispositivos
+// del MISMO dominio aparecen al instante, y las que se borraron en otro lado
+// desaparecen. Los dominios no se mezclan entre sí.
 const ventasStoreCache = {}; // copia de la lista mientras se actualiza
 let fbVentasUnsub = null;
 
 function startVentasListener(modo){
-  const col = fbVentasCol(modo);
-  if(!col) return;
   if(fbVentasUnsub){ try{ fbVentasUnsub(); }catch(e){ /* ignorar */ } }
   ventasStoreCache.list = null;
   let timer = null, changed = false;
@@ -1421,19 +1584,17 @@ function startVentasListener(modo){
     rerenderCurrentView();
   };
 
-  fbVentasUnsub = col.onSnapshot(snap => {
-    snap.docChanges().forEach(ch => {
-      if(ch.doc.metadata.hasPendingWrites) return; // espera a que la nube confirme lo propio
-      if(ch.type === 'removed'){
-        // Alguien borró la venta: desaparece también aquí (y no vuelve más).
-        if(ventasStoreCache.list === null){
-          try{ ventasStoreCache.list = (db.ventas || []).slice(); }catch(e){ return; }
-        }
-        const i = ventasStoreCache.list.findIndex(v => v && String(v.id) === String(ch.doc.id));
-        if(i !== -1){ ventasStoreCache.list.splice(i, 1); changed = true; }
-        return;
+  fbVentasUnsub = sbSubscribe('ventas', 'modo=eq.' + (modo || currentModo), ev => {
+    const id = ev.id;
+    if(ev.type === 'DELETE'){
+      // Alguien borró la venta: desaparece también aquí (y no vuelve más).
+      if(ventasStoreCache.list === null){
+        try{ ventasStoreCache.list = (db.ventas || []).slice(); }catch(e){ return; }
       }
-      const data = ch.doc.data();
+      const i = ventasStoreCache.list.findIndex(v => v && String(v.id) === String(id));
+      if(i !== -1){ ventasStoreCache.list.splice(i, 1); changed = true; }
+    }else{
+      const data = ev.data;
       if(!data || !data.id) return;
       if(ventasStoreCache.list === null){
         try{ ventasStoreCache.list = (db.ventas || []).slice(); }catch(e){ return; }
@@ -1445,13 +1606,11 @@ function startVentasListener(modo){
         ventasStoreCache.list.push(data);
       }
       changed = true;
-    });
+    }
     if(changed){
       if(timer) clearTimeout(timer);
       timer = setTimeout(()=>{ timer = null; flush(); }, 60);
     }
-  }, err => {
-    console.error('Error escuchando las ventas compartidas', err);
   });
 }
 
@@ -1471,11 +1630,6 @@ function stopVentasListeners(){
 let fbAjustesUnsub = null;
 let fbGpUnsub = null;
 
-function fbAjustesCol(modo){
-  const fs = fbFirestoreOrNull();
-  return fs ? fs.collection('stockferre_ajustes_' + (modo || currentModo)) : null;
-}
-
 function ajusteDocData(dia, record){
   const data = Object.assign({}, record || {});
   data.dia = dia;
@@ -1484,43 +1638,30 @@ function ajusteDocData(dia, record){
 }
 
 function syncAjusteDay(dia, modo){
-  const col = fbAjustesCol(modo);
-  if(!col || !dia) return;
+  if(!sbConfigOk() || !firebaseToggleOn() || !dia) return;
   const rec = (db.ajustes && db.ajustes[dia]) || {};
-  try{
-    if(Object.keys(rec).length){
-      col.doc(String(dia)).set(ajusteDocData(dia, rec));
-    }else{
-      col.doc(String(dia)).delete();
-    }
-  }catch(e){ console.error('Error subiendo ajuste de cuentas a la nube', e); }
+  const m = modo || currentModo;
+  if(Object.keys(rec).length){
+    upsertAjuste(m, [{ id: String(dia), modo: m, payload: ajusteDocData(dia, rec) }]);
+  }else{
+    deleteAjuste(m, dia);
+  }
 }
 
-// Sube las fechas locales que no tengan documento (historias viejas).
+// Sube las fechas locales que no tengan registro (historias viejas).
 async function backfillAjustes(modo){
-  const col = fbAjustesCol(modo);
-  if(!col) return;
+  if(!sbConfigOk() || !firebaseToggleOn()) return;
   const local = db.ajustes || {};
   const dias = Object.keys(local).filter(d => local[d] && Object.keys(local[d]).length);
   if(!dias.length) return;
   try{
-    const snap = await col.get();
-    const existing = new Set(snap.docs.map(d => d.id));
-    const fs = firebase.firestore();
-    for(let i = 0; i < dias.length; i += 450){
-      const batch = fs.batch();
-      dias.slice(i, i + 450).forEach(d => {
-        if(existing.has(String(d))) return;
-        batch.set(col.doc(String(d)), ajusteDocData(d, local[d]));
-      });
-      if(dias.slice(i, i + 450).some(d => !existing.has(String(d)))) await batch.commit();
-    }
+    const existing = new Set((await listAjustes(modo || currentModo)).map(r => String(r.id)));
+    const missing = dias.filter(d => !existing.has(String(d)));
+    if(missing.length) await upsertAjuste(modo || currentModo, missing.map(d => ({ id: String(d), modo: modo || currentModo, payload: ajusteDocData(d, local[d]) })));
   }catch(e){ console.error('Error respaldando ajustes de cuentas en la nube', e); }
 }
 
 function startAjustesListener(modo){
-  const col = fbAjustesCol(modo);
-  if(!col) return;
   if(fbAjustesUnsub){ try{ fbAjustesUnsub(); }catch(e){ /* ignorar */ } }
   let timer = null;
   const dirty = {};
@@ -1532,32 +1673,25 @@ function startAjustesListener(modo){
     rerenderCurrentView();
     if(typeof refreshModoDetalleIfOpen === 'function') refreshModoDetalleIfOpen();
   };
-  fbAjustesUnsub = col.onSnapshot(snap => {
-    let changed = false;
-    snap.docChanges().forEach(ch => {
-      if(ch.doc.metadata.hasPendingWrites) return;
-      const dia = ch.doc.id;
-      db.ajustes = db.ajustes || {};
-      if(ch.type === 'removed'){
-        if(db.ajustes[dia]){ delete db.ajustes[dia]; dirty[dia] = true; changed = true; }
-        return;
-      }
-      const data = ch.doc.data();
-      if(!data) return;
-      // Se aplica la copia remota como fuente de verdad de ese día.
-      const rec = Object.assign({}, data);
-      delete rec.dia;
-      delete rec._ts;
-      db.ajustes[dia] = Object.keys(rec).length ? rec : {};
-      dirty[dia] = true;
-      changed = true;
-    });
-    if(changed){
+  fbAjustesUnsub = sbSubscribe('ajustes', 'modo=eq.' + (modo || currentModo), ev => {
+    const dia = ev.id;
+    db.ajustes = db.ajustes || {};
+    if(ev.type === 'DELETE'){
+      if(db.ajustes[dia]){ delete db.ajustes[dia]; dirty[dia] = true; }
       if(timer) clearTimeout(timer);
       timer = setTimeout(()=>{ timer = null; flush(); }, 60);
+      return;
     }
-  }, err => {
-    console.error('Error escuchando el ajuste de cuentas', err);
+    const data = ev.data;
+    if(!data) return;
+    // Se aplica la copia remota como fuente de verdad de ese día.
+    const rec = Object.assign({}, data);
+    delete rec.dia;
+    delete rec._ts;
+    db.ajustes[dia] = Object.keys(rec).length ? rec : {};
+    dirty[dia] = true;
+    if(timer) clearTimeout(timer);
+    timer = setTimeout(()=>{ timer = null; flush(); }, 60);
   });
 }
 
@@ -1576,11 +1710,6 @@ function stopAjustesListeners(){
    Los gastos "sin color" del dueño (modo ninguno) no se envían a ningún modo.
    ------------------------------------------------------------------------- */
 
-function fbGpCol(modo){
-  const fs = fbFirestoreOrNull();
-  return fs ? fs.collection('stockferre_gastosprestamos_' + (modo || currentModo)) : null;
-}
-
 function gpDocData(g){
   return {
     id: g.id,
@@ -1594,7 +1723,7 @@ function gpDocData(g){
   };
 }
 
-// Dominio (colección) al que pertenece un gasto:
+// Dominio (dominio) al que pertenece un gasto:
 //   • Invitado → siempre "invitado" (el color es solo una etiqueta ahí).
 //   • Dueño → el color del gasto ("manual"/"electrico"); si es "sin color"
 //     (ninguno) no vive en la nube (devuelve null).
@@ -1604,77 +1733,46 @@ function gpHome(g){
   return null;
 }
 
-// Sube el documento del gasto a SU dominio. En el dueño, si cambió de color
-// se borra la copia vieja de los otros dominios para que no aparezca duplicada
-// en otro dispositivo del mismo color.
+// Sube el gasto a SU dominio. En el dueño, si cambiaron su color, se borra la
+// copia vieja de los otros dominios para que no aparezca duplicada en otro
+// dispositivo del mismo color.
 function syncGastoPrestamoDoc(g){
+  if(!sbConfigOk() || !firebaseToggleOn()) return;
   if(!g || !g.id) return;
   const home = gpHome(g);
-  const cols = fbFirestoreOrNull();
-  if(!cols) return;
-  try{
-    if(currentModo !== 'invitado'){
-      ['manual','electrico'].forEach(cl => {
-        if(cl !== home){
-          const c = fbGpCol(cl);
-          if(c) c.doc(String(g.id)).delete();
-        }
-      });
-    }
-    if(home){
-      const col = fbGpCol(home);
-      if(col) col.doc(String(g.id)).set(gpDocData(g));
-    }
-  }catch(e){ console.error('Error subiendo gasto/préstamo a la nube', e); }
+  const client = sbClient();
+  if(!client) return;
+  if(currentModo !== 'invitado'){
+    ['manual','electrico'].forEach(cl => {
+      if(cl !== home) deleteGasto(cl, g.id);
+    });
+  }
+  if(home){
+    upsertGasto(home, g);
+  }
 }
 
 async function deleteGastoPrestamoDocs(ids, modo){
-  const col = fbGpCol(modo);
-  if(!col || !ids || !ids.length) return;
-  try{
-    const fs = firebase.firestore();
-    for(let i = 0; i < ids.length; i += 450){
-      const batch = fs.batch();
-      ids.slice(i, i + 450).forEach(id => { if(id) batch.delete(col.doc(String(id))); });
-      await batch.commit();
-    }
-  }catch(e){ console.error('Error borrando gastos/préstamos de la nube', e); }
+  await deleteGastos(modo || currentModo, ids);
 }
 
-// Sube los gastos/préstamos locales que no tengan documento (historia vieja).
+// Sube los gastos/préstamos locales que no tengan registro (historia vieja o
+// gastos creados sin conexión). Idempotente y de corrida en CADA conexión.
 async function backfillGastosPrestamos(modo){
-  const col = fbGpCol(modo);
-  if(!col) return;
-  // Una sola vez por dominio (igual que ventas/productos) para no releer la
-  // colección entera en cada apertura y agotar el cupo gratuito de lecturas.
-  const markKey = 'fs_backfill_gastos_' + (modo || DOMAIN);
-  let done = false;
-  try{ done = await kvGet(markKey) === '1'; }catch(e){}
-  if(done) return;
+  if(!sbConfigOk() || !firebaseToggleOn()) return;
   // En el invitado se sube todo (incluidos los "sin color", para que los
   // dispositivos invitados compartan); en el dueño solo los de su dominio.
-  const arr = (db.gastosPrestamos || []).filter(g => g && g.id && (modo === 'invitado' || g.modo === 'manual' || g.modo === 'electrico'));
-  if(!arr.length){
-    try{ await kvSet(markKey, '1'); }catch(e){}
-    return;
-  }
+  const m = modo || currentModo;
+  const arr = (db.gastosPrestamos || []).filter(g => g && g.id && (m === 'invitado' || g.modo === 'manual' || g.modo === 'electrico'));
+  if(!arr.length) return;
   try{
-    const snap = await col.get();
-    const existing = new Set(snap.docs.map(d => d.id));
+    const existing = new Set((await listGastos(m)).map(r => String(r.id)));
     const missing = arr.filter(g => !existing.has(String(g.id)));
-    const fs = firebase.firestore();
-    for(let i = 0; i < missing.length; i += 450){
-      const batch = fs.batch();
-      missing.slice(i, i + 450).forEach(g => batch.set(col.doc(String(g.id)), gpDocData(g)));
-      await batch.commit();
-    }
-    try{ await kvSet(markKey, '1'); }catch(e){}
-  }catch(e){ if(e && e.code !== 'permission-denied') console.error('Error respaldando gastos/préstamos en la nube', e); }
+    for(const g of missing) await upsertGasto(m, g);
+  }catch(e){ console.error('Error respaldando gastos/préstamos en la nube', e); }
 }
 
 function startGastosPrestamosListener(modo){
-  const col = fbGpCol(modo);
-  if(!col) return;
   // En el dominio del invitado también se aceptan los "sin color" (los
   // dispositivos invitados los comparten); en el dueño no deberían existir.
   const acceptNeutral = (modo === 'invitado');
@@ -1687,16 +1785,13 @@ function startGastosPrestamosListener(modo){
     rerenderCurrentView();
     if(typeof refreshModoDetalleIfOpen === 'function') refreshModoDetalleIfOpen();
   };
-  fbGpUnsub = col.onSnapshot(snap => {
-    snap.docChanges().forEach(ch => {
-      if(ch.doc.metadata.hasPendingWrites) return;
-      const id = String(ch.doc.id);
-      if(ch.type === 'removed'){
-        const i = (db.gastosPrestamos || []).findIndex(x => x && String(x.id) === id);
-        if(i !== -1){ db.gastosPrestamos.splice(i, 1); changed = true; }
-        return;
-      }
-      const data = ch.doc.data();
+  fbGpUnsub = sbSubscribe('gastos_prestamos', 'modo=eq.' + (modo || currentModo), ev => {
+    const id = String(ev.id);
+    if(ev.type === 'DELETE'){
+      const i = (db.gastosPrestamos || []).findIndex(x => x && String(x.id) === id);
+      if(i !== -1){ db.gastosPrestamos.splice(i, 1); changed = true; }
+    }else{
+      const data = ev.data;
       if(!data || !data.id) return;
       const g = (db.gastosPrestamos || []).find(x => x && String(x.id) === String(data.id));
       if(g){
@@ -1707,13 +1802,11 @@ function startGastosPrestamosListener(modo){
         db.gastosPrestamos.push(data);
         changed = true;
       }
-    });
+    }
     if(changed){
       if(timer) clearTimeout(timer);
       timer = setTimeout(()=>{ timer = null; flush(); }, 60);
     }
-  }, err => {
-    console.error('Error escuchando los gastos/préstamos compartidos', err);
   });
 }
 
@@ -1721,151 +1814,104 @@ function stopGastosPrestamosListeners(){
   if(fbGpUnsub){ try{ fbGpUnsub(); }catch(e){ /* ignorar */ } fbGpUnsub = null; }
 }
 
-// Crea los documentos de los productos locales que todavía no tienen uno en
-// la nube (por ejemplo, los 1000+ productos que ya existían antes de este
-// arreglo). Es idempotente: solo crea los que faltan, sin tocar los stocks.
+// Crea los registros de los productos locales que todavía no tienen uno en la
+// nube (por ejemplo, los 1000+ productos que ya existían antes de este
+// arreglo). Es idempotente: solo crea los que faltan.
 async function backfillProductos(modo){
-  const col = fbProductsCol(modo);
-  if(!col) return;
-  // Una sola vez por modo: releer la colección entera en cada apertura quema
-  // miles de lecturas del cupo gratis de Firestore (eso dejaba el celular sin
-  // poder ver los productos nuevos). Una vez migrado, los productos nuevos y
-  // editados se suben solos con syncProductoDoc/startStockListener.
-  const markKey = 'fs_backfill_prod_' + modo;
-  // La marca va en IndexedDB: el LocalStorage puede estar lleno y, si fallara,
-  // no se marcaría y se releería toda la colección en cada apertura (agota las
-  // lecturas gratis de Firestore y deja a otros dispositivos sin productos).
-  let done = false;
-  try{ done = await kvGet(markKey) === '1'; }catch(e){}
-  if(done) return;
-  const local = modo === currentModo ? db : loadModoDB(modo);
+  if(!sbConfigOk() || !firebaseToggleOn()) return;
+  const local = (modo === currentModo) ? db : loadModoDB(modo);
   const arr = (local && local.productos) || [];
-  if(arr.length === 0){
-    // Nada local que respaldar: se marca igual para no releer la colección
-    // en cada apertura (los productos nuevos se suben solos al crearse).
-    try{ await kvSet(markKey, '1'); }catch(e){}
-    return;
-  }
+  if(arr.length === 0) return;
   try{
-    const snap = await col.get();
-    const existing = new Set(snap.docs.map(d => d.id));
-    const existingByCode = new Map(); // código -> id del documento canónico
-    snap.docs.forEach(d => {
-      const data = d.data() || {};
-      if(data && data.id){
-        const c = normalize(data.codigo);
-        if(c) existingByCode.set(c, String(data.id));
+    const cloud = await listProductos(modo || currentModo);
+    const existing = new Set(cloud.map(r => String(r.id)));
+    const existingByCode = new Map(); // código -> id del registro canónico
+    cloud.forEach(r => {
+      const d = r.data || {};
+      if(d && d.codigo){
+        const c = normalize(d.codigo);
+        if(c) existingByCode.set(c, String(r.id));
       }
     });
     const missing = arr.filter(p => p && p.id && !existing.has(p.id));
-    // Nada que respaldar: todo el catálogo local ya tiene documento. Se marca
-    // como hecho para no volver a releer la colección entera.
-    if(missing.length === 0){
-      try{ await kvSet(markKey, '1'); }catch(e){}
-      return;
-    }
+    if(missing.length === 0) return;
     // Los productos LOCALES que ya tienen su código en la nube (bajo OTRO id,
-    // por reimportar el mismo Excel en otro dispositivo) NO crean un documento
-    // duplicado: se fusionan en el documento canónico que ya existe.
-    const fs = firebase.firestore();
-    for(let i = 0; i < missing.length; i += 450){
-      const batch = fs.batch();
-      missing.slice(i, i + 450).forEach(p => {
-        const data = productoDocData(p);
-        delete data.stock; // el stock se sincroniza después con incrementos
-        const canonicalId = existingByCode.get(normalize(p.codigo));
-        batch.set(col.doc(canonicalId ? canonicalId : p.id), data, { merge: true });
-      });
-      await batch.commit();
-    }
-    try{ await kvSet(markKey, '1'); }catch(e){}
-  }catch(e){ if(e && e.code !== 'permission-denied') console.error('Error respaldando productos en la nube', e); }
-}
-
-// UNA vez por modo: reenvía a la nube las CARACTERÍSTICAS de los productos
-// locales que la documentación individual todavía no tiene (los documentos de
-// producto se crearon antes de que existiera ese campo). Así el celular que
-// las recibe por listener vuelve a ver "Características" sin reimportar nada.
-async function syncCaracteristicasCloud(modo){
-  const col = fbProductsCol(modo);
-  if(!col) return;
-  const markKey = 'fs_caract_sync_' + modo;
-  // La marca va en IndexedDB (no LocalStorage): puede que el LocalStorage esté
-  // lleno, y si fallara no se marcaría y nos quemaríamos lecturas cada apertura.
-  try{ if(await kvGet(markKey) === '1') return; }catch(e){}
-  const local = modo === currentModo ? db : loadModoDB(modo);
-  const arr = (local && local.productos) || [];
-  if(arr.length === 0){
-    try{ await kvSet(markKey, '1'); }catch(e){}
-    return;
-  }
-  try{
-    const snap = await col.get();
-    const batched = [];
-    const docsById = {};
-    snap.docs.forEach(d => { docsById[d.id] = d.data() || {}; });
-    arr.forEach(p => {
-      if(!p || !p.id) return;
-      const localCar = String(p.caracteristicas || '');
-      const cloudCar = String(docsById[p.id] ? docsById[p.id].caracteristicas || '' : '');
-      if(localCar && localCar !== cloudCar) batched.push(p);
-    });
-    if(batched.length){
-      const fs = firebase.firestore();
-      for(let i = 0; i < batched.length; i += 450){
-        const batch = fs.batch();
-        batched.slice(i, i + 450).forEach(p => {
-          batch.set(col.doc(p.id), {
-            caracteristicas: String(p.caracteristicas || ''),
-            _updatedAt: Date.now()
-          }, { merge: true });
-        });
-        await batch.commit();
+    // por reimportar el mismo Excel en otro dispositivo) NO crean un registro
+    // duplicado: se FUSIONAN en el registro canónico que ya existe (sin pisar
+    // su stock). Los que son nuevos se siembran con el stock local para que el
+    // resto de dispositivos vean el catálogo con su cantidad real.
+    for(const p of missing){
+      const data = productoDocData(p);
+      const canonicalId = existingByCode.get(normalize(p.codigo));
+      if(canonicalId){
+        delete data.stock; // el stock del canónico se respeta
+        await ensureProducto(modo || currentModo, canonicalId, data);
+      }else{
+        await upsertProducto(modo || currentModo, data);
       }
     }
-    try{ await kvSet(markKey, '1'); }catch(e){}
-  }catch(e){ if(e && e.code !== 'permission-denied') console.error('Error sincronizando características a la nube', e); }
+  }catch(e){ console.error('Error respaldando productos en la nube', e); }
 }
 
-// Escribe los documentos de una lista de productos (para importaciones CSV).
-async function syncProductoDocs(list, modo){
-  const col = fbProductsCol(modo);
-  if(!col || !list || !list.length) return;
+// Reenvía a la nube las CARACTERÍSTICAS de los productos locales que el
+// registro individual todavía no tiene (los registros se crearon antes de que
+// existiera ese campo). Así el celular que las recibe por listener vuelve a
+// ver "Características" sin reimportar nada. Es idempotente: solo escribe
+// cuando la local tiene y la nube no.
+async function syncCaracteristicasCloud(modo){
+  if(!sbConfigOk() || !firebaseToggleOn()) return;
+  const local = (modo === currentModo) ? db : loadModoDB(modo);
+  const arr = (local && local.productos) || [];
+  if(arr.length === 0) return;
   try{
-    const fs = firebase.firestore();
-    for(let i = 0; i < list.length; i += 450){
-      const batch = fs.batch();
-      list.slice(i, i + 450).forEach(p => {
-        if(!p || !p.id) return;
-        batch.set(col.doc(p.id), productoDocData(p), { merge: true });
-      });
-      await batch.commit();
+    const cloud = await listProductos(modo || currentModo);
+    const byId = {};
+    cloud.forEach(r => { byId[r.id] = r.data || {}; });
+    for(const p of arr){
+      if(!p || !p.id) continue;
+      const localCar = String(p.caracteristicas || '');
+      const cloudCar = String(byId[p.id] ? byId[p.id].caracteristicas || '' : '');
+      if(localCar && localCar !== cloudCar){
+        // Fusión (no reemplazo): solo agrega el campo caracteristicas al
+        // payload que ya haya en la nube, sin tocar el resto ni el stock.
+        await ensureProducto(modo || currentModo, p.id, {
+          caracteristicas: String(p.caracteristicas || ''),
+          _updatedAt: Date.now()
+        });
+      }
+    }
+  }catch(e){ console.error('Error sincronizando características a la nube', e); }
+}
+
+// Escribe los registros de una lista de productos (para importaciones CSV).
+async function syncProductoDocs(list, modo){
+  if(!sbConfigOk() || !firebaseToggleOn()) return;
+  if(!list || !list.length) return;
+  try{
+    for(const p of list){
+      if(!p || !p.id) continue;
+      await upsertProducto(modo || currentModo, productoDocData(p));
     }
   }catch(e){ console.error('Error sincronizando lista de productos en la nube', e); }
 }
 
 // Escucha los documentos de productos de un modo y corrige el stock local con
 // el valor EXACTO que tiene la nube. Así dos celulares que registraron a la
-// vez terminan mostrando la misma cantidad (la que Firestore sumó de verdad).
+// vez terminan mostrando la misma cantidad (la que Postgres sumó de verdad).
 const fbProductosUnsubs = {};   // modo -> función para dejar de escuchar
 const stockStoreCache = {};     // modo -> copia de la base mientras se actualiza
 
 function startStockListener(modo){
-  const col = fbProductsCol(modo);
-  if(!col) return;
   if(fbProductosUnsubs[modo]){ try{ fbProductosUnsubs[modo](); }catch(e){ /* ignorar */ } }
   stockStoreCache[modo] = null;
   let timer = null, changed = false;
   let sinceKey = 'fs_laststock_' + modo;
 
-  // IMPORTANTE (quema de lecturas): antes se escuchaba la colección COMPLETA
-  // de productos en cada apertura (miles de documentos = miles de lecturas del
-  // cupo gratis, que se agotaba y le quitaba al celular la vista de los
-  // productos nuevos). Ahora se escucha SOLO lo que cambió en las últimas 24 h
-  // (_updatedAt > ahora - 24h). Es barato (unas decenas de lecturas por
-  // apertura), es a prueba de relojes desincronizados entre dispositivos y
-  // nunca se pierde un cambio. La primera vez igual queda cubierta porque el
-  // propio catálogo base se mantiene en la copia local de este dispositivo.
+  // En Supabase el tiempo real es por tabla+modo (sin cupo de lecturas), así
+  // que se escucha TODO lo que cambie en el dominio: un cambio registrado en la
+  // compu llega al instante y, como cada evento trae el stock EXACTO, dos
+  // dispositivos que registraron a la vez terminan mostrando la misma cantidad
+  // (la que la función inc_stock de Postgres sumó de verdad).
 
   const flush = () => {
     if(!changed) return;
@@ -1873,7 +1919,7 @@ function startStockListener(modo){
     const store = stockStoreCache[modo];
     if(store){
       try{
-        // Si en la nube hay DOS documentos del mismo código (duplicados de un
+        // Si en la nube hay DOS registros del mismo código (duplicados de un
         // re-import), el listener pudo haberlos recibido: se deja solo uno.
         dedupeProductosByCode(store.productos);
         if(modo === currentModo){
@@ -1892,81 +1938,79 @@ function startStockListener(modo){
     }
   };
 
-  const query = col.where('_updatedAt', '>', Date.now() - 24 * 3600 * 1000);
-  fbProductosUnsubs[modo] = query.onSnapshot(snap => {
-    snap.docChanges().forEach(ch => {
-      if(ch.type === 'removed' || ch.doc.metadata.hasPendingWrites) return;
-      const data = ch.doc.data();
-      if(!data || !data.id) return;
-      try{ localStorage.setItem(sinceKey, String(Date.now())); }catch(e){}
-      if(!stockStoreCache[modo]){
-        try{
-          stockStoreCache[modo] = modo === currentModo ? db : loadModoDB(modo);
-        }catch(e){ return; }
-      }
-      const store = stockStoreCache[modo];
-      if(!store) return;
-      const p = store.productos.find(x => x && x.id === data.id);
-      let touched = false;
-      if(p){
-        // Producto ya conocido: actualiza stock y código de barras y, si el doc
-        // que llegó es igual o más reciente, también los datos editables (nombre,
-        // precios, categoría, etc.): un cambio hecho en otro dispositivo (la
-        // compu) se refleja solo en este.
-        if(typeof data.stock === 'number' && data.stock !== p.stock){
-          p.stock = data.stock;
-          touched = true;
-        }
-        if(typeof data.codigoBarras === 'string' && data.codigoBarras && data.codigoBarras !== p.codigoBarras){
-          p.codigoBarras = data.codigoBarras;
-          touched = true;
-        }
-        const remoteTs = typeof data._updatedAt === 'number' ? data._updatedAt : 0;
-        if(remoteTs >= (p._updatedAt || 0)){
-          ['codigo','nombre','marca','categoria','precioCompra','precioMarca','precioVenta','stockMin','caracteristicas'].forEach(f => {
-            if(data[f] !== undefined && String(data[f]) !== String(p[f])){
-              p[f] = typeof data[f] === 'number' ? Number(data[f]) : data[f];
-              touched = true;
-            }
-          });
-        }
-      }else{
-        // Producto NUEVO (lo registró otro dispositivo): se agrega al catálogo
-        // local salvo que esté borrado (tumba). Así un producto registrado en la
-        // compu aparece solo en el celular aunque el documento grande pese mucho
-        // o tarde en llegar.
-        const tbs = (store.tombstones && store.tombstones.productos) || (db.tombstones || {}).productos;
-        if(tbs && tbs[String(data.id)]) return;
-        const nuevo = {
-          id: data.id,
-          codigo: data.codigo || '',
-          nombre: data.nombre || '',
-          marca: data.marca || '',
-          categoria: data.categoria || '',
-          codigoBarras: data.codigoBarras || '',
-          precioCompra: Number(data.precioCompra) || 0,
-          precioMarca: Number(data.precioMarca) || 0,
-          precioVenta: Number(data.precioVenta) || 0,
-          stock: Number(data.stock) || 0,
-          stockMin: Number(data.stockMin) || 0,
-          caracteristicas: data.caracteristicas || '',
-          fechaCreacion: todayISO(),
-          _updatedAt: typeof data._updatedAt === 'number' ? data._updatedAt : Date.now()
-        };
-        store.productos.push(nuevo);
+  fbProductosUnsubs[modo] = sbSubscribe('productos', 'modo=eq.' + (modo || currentModo), ev => {
+    if(ev.type === 'DELETE') return;
+    const row = ev.raw || null;
+    const data = Object.assign({}, ev.data || {});
+    if(!data || !data.id) return;
+    // El stock exacto vive en su propia columna (sumada atómicamente por el
+    // trigger): se aplica sobre el payload para que la app lo lea igual.
+    if(row && typeof row.stock === 'number' && row.stock !== data.stock){
+      data.stock = row.stock;
+    }
+    try{ localStorage.setItem(sinceKey, String(Date.now())); }catch(e){}
+    if(!stockStoreCache[modo]){
+      try{
+        stockStoreCache[modo] = modo === currentModo ? db : loadModoDB(modo);
+      }catch(e){ return; }
+    }
+    const store = stockStoreCache[modo];
+    if(!store) return;
+    const p = store.productos.find(x => x && x.id === data.id);
+    let touched = false;
+    if(p){
+      // Producto ya conocido: actualiza stock y código de barras y, si el registro
+      // que llegó es igual o más reciente, también los datos editables (nombre,
+      // precios, categoría, etc.): un cambio hecho en otro dispositivo (la compu)
+      // se refleja solo en este.
+      if(typeof data.stock === 'number' && data.stock !== p.stock){
+        p.stock = data.stock;
         touched = true;
       }
-      if(touched) changed = true;
-    });
+      if(typeof data.codigoBarras === 'string' && data.codigoBarras && data.codigoBarras !== p.codigoBarras){
+        p.codigoBarras = data.codigoBarras;
+        touched = true;
+      }
+      const remoteTs = typeof data._updatedAt === 'number' ? data._updatedAt : 0;
+      if(remoteTs >= (p._updatedAt || 0)){
+        ['codigo','nombre','marca','categoria','precioCompra','precioMarca','precioVenta','stockMin','caracteristicas'].forEach(f => {
+          if(data[f] !== undefined && String(data[f]) !== String(p[f])){
+            p[f] = typeof data[f] === 'number' ? Number(data[f]) : data[f];
+            touched = true;
+          }
+        });
+      }
+    }else{
+      // Producto NUEVO (lo registró otro dispositivo): se agrega al catálogo
+      // local salvo que esté borrado (tumba). Así un producto registrado en la
+      // compu aparece solo en el celular aunque el registro grande pese mucho
+      // o tarde en llegar.
+      const tbs = (store.tombstones && store.tombstones.productos) || (db.tombstones || {}).productos;
+      if(tbs && tbs[String(data.id)]) return;
+      const nuevo = {
+        id: data.id,
+        codigo: data.codigo || '',
+        nombre: data.nombre || '',
+        marca: data.marca || '',
+        categoria: data.categoria || '',
+        codigoBarras: data.codigoBarras || '',
+        precioCompra: Number(data.precioCompra) || 0,
+        precioMarca: Number(data.precioMarca) || 0,
+        precioVenta: Number(data.precioVenta) || 0,
+        stock: Number(data.stock) || 0,
+        stockMin: Number(data.stockMin) || 0,
+        caracteristicas: data.caracteristicas || '',
+        fechaCreacion: todayISO(),
+        _updatedAt: typeof data._updatedAt === 'number' ? data._updatedAt : Date.now()
+      };
+      store.productos.push(nuevo);
+      touched = true;
+    }
+    if(touched) changed = true;
     if(changed){
       if(timer) clearTimeout(timer);
       timer = setTimeout(()=>{ timer = null; flush(); }, 60);
     }
-  }, err => {
-    console.error('Error escuchando stock de productos (' + modo + ')', err);
-    // Degrada con seguridad: si la consulta incremental fallara (p.ej. sin
-    // índice automático), se reintenta completo en la próxima reconexión.
-    try{ localStorage.removeItem(sinceKey); }catch(e){}
   });
 }
 
@@ -1977,7 +2021,7 @@ function stopStockListeners(){
   Object.keys(stockStoreCache).forEach(k => { stockStoreCache[k] = null; });
 }
 
-// Convierte el documento de producto de la nube (delgado) a un producto local
+// Convierte el registro de producto de la nube (delgado) a un producto local
 // completo, para agregarlo al catálogo cuando llega desde otro dispositivo.
 function cloudProductoToDB(data){
   return {
@@ -1998,37 +2042,22 @@ function cloudProductoToDB(data){
   };
 }
 
-// UNA vez por dispositivo, relee la colección completa de productos de un modo y
-// agrega los que a este dispositivo le faltan (p. ej. los registrados en la compu
-// con una base que quedó grande). El marcador se guarda en IndexedDB para que
-// funcione aunque el LocalStorage esté lleno.
+// Cada vez que se conecta, relee los productos de un modo y agrega los que a
+// este dispositivo le faltan (p. ej. los registrados en la compu mientras este
+// estuvo apagado). En Supabase una lectura completa del dominio es barata, así
+// que no hace falta la ventana de 24 h ni el marcador semanal de Firestore.
 async function assimilateCatalogFromCloud(modo){
-  const col = fbProductsCol(modo);
-  if(!col) return;
-  const markKey = 'fs_catalog_pull_' + modo;
-  // Marca con tiempo: se re-asimila una vez por semana para que los productos
-  // registrados mientras este dispositivo estuvo apagado (más de 24 h) también
-  // lleguen aunque ya hayan salido de la ventana del listener.
+  if(!sbConfigOk() || !firebaseToggleOn()) return;
   try{
-    const done = await kvGet(markKey);
-    if(done){
-      const parts = String(done).split('@');
-      if(parts[0] === '1'){
-        const doneAt = Number(parts[1] || 0);
-        if(!doneAt || (Date.now() - doneAt) < 7 * 24 * 3600 * 1000) return;
-      }
-    }
-  }catch(e){}
-  try{
-    const snap = await col.get();
-    const store = modo === currentModo ? db : loadModoDB(modo);
+    const cloud = await listProductos(modo || currentModo);
+    const store = (modo === currentModo) ? db : loadModoDB(modo);
     if(!store || !Array.isArray(store.productos)) return;
     const byId = new Map(store.productos.filter(p => p && p.id).map(p => [p.id, p]));
     const tbs = (store.tombstones && store.tombstones.productos) || (db.tombstones || {}).productos;
     const add = [];
     let refilled = false;
-    snap.docs.forEach(doc => {
-      const data = doc.data();
+    cloud.forEach(r => {
+      const data = r.data;
       if(!data || !data.id) return;
       if(tbs && tbs[String(data.id)]) return;
       const existing = byId.get(data.id);
@@ -2048,7 +2077,7 @@ async function assimilateCatalogFromCloud(modo){
     });
     if(add.length || refilled){
       if(add.length) store.productos = store.productos.concat(add);
-      // Si la nube tenía DOS documentos del mismo código, se deja solo uno.
+      // Si la nube tenía DOS registros del mismo código, se deja solo uno.
       dedupeProductosByCode(store.productos);
       if(modo === currentModo){
         persistLocalCache();
@@ -2058,26 +2087,8 @@ async function assimilateCatalogFromCloud(modo){
         if(currentModo === 'invitado'){ db = buildGuestDB(); rerenderCurrentView(); }
       }
     }
-    try{ await kvSet(markKey, '1@' + Date.now()); }catch(e){}
-  }catch(e){ if(e && e.code !== 'permission-denied') console.error('Error asimilando catálogo de la nube (' + modo + ')', e); }
+  }catch(e){ console.error('Error asimilando catálogo de la nube (' + (modo || currentModo) + ')', e); }
 }
-
-// Activa la persistencia offline UNA sola vez por sesión: las escrituras que
-// no puedan llegar a Firestore se guardan localmente y se reenvían solas
-// cuando vuelva la conexión (evita perder un registro por un cortón de red).
-let persistenceEnabled = false;
-async function enableOfflinePersistence(fs){
-  if(persistenceEnabled || !fs) return;
-  persistenceEnabled = true;
-  try{
-    await fs.enablePersistence({ synchronizeTabs: true });
-  }catch(err){
-    if(err && err.code !== 'failed-precondition' && err.code !== 'unimplemented'){
-      console.warn('Persistencia offline no disponible', err);
-    }
-  }
-}
-
 
 
 /* -------------------------------------------------------------------------
@@ -2948,8 +2959,8 @@ function updateVenta(id, oldModo, data){
   if(currentModo === 'invitado') v.modoOrigin = newModo;
 
   saveDB();
-  // La venta editada también debe actualizarse en su colección de Firestore
-  // para que los demás dispositivos del mismo dominio vean los cambios.
+  // La venta editada también debe actualizarse en la nube para que los demás
+  // dispositivos del mismo dominio vean los cambios.
   syncVentaDoc(v, oldModo === 'invitado' || currentModo === 'invitado' ? 'invitado' : (currentModo || oldModo));
   renderVentas();
   renderInventario();
@@ -9116,18 +9127,10 @@ function vaciarCatalogo(){
     });
 }
 
-// Borra de la nube los documentos de producto del modo actual (en lotes).
+// Borra de la nube los registros de producto del modo actual (en lotes).
 async function vaciarProductosNube(ids){
-  const col = fbProductsCol(currentModo);
-  if(!col || !fbConfigOk() || !ids || !ids.length) return;
-  try{
-    const fs = firebase.firestore();
-    for(let i = 0; i < ids.length; i += 450){
-      const batch = fs.batch();
-      ids.slice(i, i + 450).forEach(id => { batch.delete(col.doc(id)); });
-      await batch.commit();
-    }
-  }catch(e){ console.error('Error vaciando productos de la nube', e); }
+  if(!sbConfigOk() || !ids || !ids.length) return;
+  await deleteProductos(currentModo, ids);
 }
 
 function factoryReset(){
@@ -10608,14 +10611,14 @@ function setupEventListeners(){
     setFirebaseToggle(on);
     setFirebaseToggleUI(on);
     if(on){
-      toast('Conectando a Firebase...', 'success');
+      toast('Conectando a la nube...', 'success');
       if(currentModo === 'invitado') connectGuestFirebase();
       else connectFirebase();
     }else{
       disconnectFirebase();
       disconnectGuestFirebase();
       setSyncStatus('local');
-      toast('Firebase apagado: todo queda solo en este dispositivo', 'success');
+      toast('Nube apagada: todo queda solo en este dispositivo', 'success');
     }
   }
   const swFB = document.getElementById('firebaseSwitch');

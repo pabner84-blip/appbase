@@ -837,6 +837,7 @@ function connectGuestFirebase(){
     startGastosPrestamosListener('invitado');
   }catch(err){
     console.error('No se pudo conectar a Firebase en modo invitado', err);
+    fbLastErrorCode = (err && err.code) || 'error';
     setSyncStatus('error');
   }
 }
@@ -849,6 +850,12 @@ let fbReady = false;
 let fbDocRef = null;
 let fbUnsub = null;
 let fbOtherUnsub = null; // suscripción al OTRO modo (mantiene su contraseña/datos en caché)
+// Último código de error de Firebase (p.ej. 'resource-exhausted' cuando se
+// agota la cuota gratis, o 'permission-denied'). El vigía lo usa para NO
+// reintentar en bucle cuando el problema no se arregla reintentando.
+let fbLastErrorCode = null;
+// Instante del último intento de reconexión del vigía (para espaciarlos).
+let fbLastAttempt = 0;
 
 // Cada modo se guarda en un documento de Firestore distinto para que sean
 // bases de datos completamente separadas dentro del mismo proyecto.
@@ -867,13 +874,16 @@ function disconnectFirebase(){
 }
 
 function setSyncStatus(status){
+  if(status === 'synced') fbLastErrorCode = null; // conexión sana: se limpia el último error
   const el = document.getElementById('sidebarSyncStatus');
   if(!el) return;
   const labels = {
     local: '💾 Solo en este dispositivo',
     connecting: '🔄 Conectando a Firebase...',
     synced: '🔥 Sincronizado con Firebase',
-    error: '⚠️ Error de sincronización'
+    error: fbLastErrorCode === 'resource-exhausted'
+      ? '⚠️ Cuota gratis de Firebase agotada (se reinicia en unas horas)'
+      : '⚠️ Error de sincronización'
   };
   el.textContent = labels[status] || '';
 }
@@ -1013,6 +1023,7 @@ async function connectFirebase(){
       applySnapshot(snap);
     }, err=>{
       console.error('Error de sincronización Firebase', err);
+      fbLastErrorCode = (err && err.code) || 'error';
       setSyncStatus('error');
     });
 
@@ -1072,6 +1083,7 @@ async function connectFirebase(){
     startGastosPrestamosListener(currentModo);
   }catch(err){
     console.error('No se pudo conectar a Firebase', err);
+    fbLastErrorCode = (err && err.code) || 'error';
     setSyncStatus('error');
   }
 }
@@ -1093,8 +1105,15 @@ function startSyncWatchdog(){
     if(fbReconnecting) return;
     const stEl = document.getElementById('sidebarSyncStatus');
     const statusTxt = stEl ? (stEl.textContent || '') : '';
-    const looksError = statusTxt.indexOf('Error') !== -1;
+    const looksError = statusTxt.indexOf('Error') !== -1 || statusTxt.indexOf('Cuota') !== -1;
     if(!fbReady || looksError){
+      // Si el problema NO se arregla reintentando (cuota gratis agotada o
+      // permiso denegado), no tiene sentido reconectar cada 12 s: cada intento
+      // dispara lecturas y empeora el agotamiento. Se espera 10 minutos.
+      const noSeArreglaReintentando = fbLastErrorCode === 'resource-exhausted' ||
+                                      fbLastErrorCode === 'permission-denied';
+      if(noSeArreglaReintentando && (Date.now() - fbLastAttempt) < 600000) return;
+      fbLastAttempt = Date.now();
       fbReconnecting = true;
       setTimeout(()=>{ fbReconnecting = false; }, 8000);
       if(currentModo === 'invitado'){

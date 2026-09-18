@@ -1939,6 +1939,19 @@ async function backfillProductos(modo){
   let done = false;
   try{ done = await kvGet(markKey) === '1'; }catch(e){}
   if(done) return;
+  // Tras un reinicio total, la NUBE es la autoridad: ningún dispositivo puede
+  // volver a subir su catálogo viejo (era lo que re-contaminaba con productos
+  // mezclados Manuales/Eléctricas). El dueño re-siembra con "Importar Excel".
+  try{
+    const fs = fbFirestoreOrNull();
+    if(fs){
+      const ctrl = await withTimeout(fs.collection('stockferre').doc('control').get(), 8000);
+      if(ctrl.exists && ctrl.data() && ctrl.data().reset && ctrl.data().reset.ts){
+        try{ await kvSet(markKey, '1'); }catch(e){}
+        return;
+      }
+    }
+  }catch(e){ /* si no se pudo leer, se sigue normal */ }
   const local = modo === currentModo ? db : loadModoDB(modo);
   const arr = (local && local.productos) || [];
   if(arr.length === 0){
@@ -9332,6 +9345,9 @@ function importProductsCSV(file){
           // Quita de la nube los documentos repetidos que quedaron de imports
           // viejos con otros ids (mantenía convergencia a uno por producto).
           try{ await consolidarNube(modoTarget); }catch(e){}
+          // Asegura que lo importado quedó en SU modo (ningún eléc--/manual en
+          // la colección equivocada, aunque un Excel se importara en el otro).
+          try{ await separarModos(); }catch(e){}
           renderProductos();
           renderCategorias();
           toast(`Importación en ${MODO_LABELS[modoTarget]}: ${creados} nuevos, ${actualizados} actualizados`, 'success');
@@ -9649,6 +9665,12 @@ async function obtenerUltimaActualizacion(){
     }
   }
   forceAssimilarCatalogo = false; // se consumió con ambos modos
+  // Separa Manuales y Eléctricas: productos en el modo equivocado vuelven a su
+  // colección y los que están duplicados entre modos se corrigen.
+  const sep = await separarModos();
+  if(sep.movidos || sep.borrados){
+    filas.push('🔀 Modos separados: ' + sep.movidos + ' movidos, ' + sep.borrados + ' repetidos entre modos eliminados');
+  }
   // Limpieza de repetidos: si en la nube quedaron productos duplicados de
   // importaciones viejas, se borran los sobrantes (queda uno por producto).
   let limpiados = 0;
@@ -9710,6 +9732,79 @@ async function consolidarNube(modo){
   }catch(e){
     if(e && e.code !== 'permission-denied') console.error('Error consolidando la nube (' + modo + ')', e);
     return 0;
+  }
+}
+
+// Separa las colecciones de Manuales y Eléctricas en la nube:
+//  - Un documento con modo EXPLÍCITO del otro modo se MUEVE a su colección.
+//  - Un mismo código en AMBAS colecciones es una mezcla: gana el que coincide
+//    con su colección (modo explícito) o el más reciente; el otro se BORRA.
+// Devuelve { movidos, borrados } para reportar lo que se corrigió.
+async function separarModos(){
+  if(!fbConfigOk()) return { movidos: 0, borrados: 0 };
+  const fs = fbFirestoreOrNull();
+  if(!fs) return { movidos: 0, borrados: 0 };
+  const colM = fs.collection('stockferre_productos_manual');
+  const colE = fs.collection('stockferre_productos_electrico');
+  let movidos = 0, borrados = 0;
+  try{
+    const [snapM, snapE] = await Promise.all([
+      withTimeout(colM.get(), 20000),
+      withTimeout(colE.get(), 20000)
+    ]);
+    const byCodeM = new Map(); // código -> { docId, data }
+    const byCodeE = new Map();
+    const explicitoM = []; // docs de manual que dicen ser de elécricas
+    const explicitoE = []; // docs de eléctricas que dicen ser de manuales
+    snapM.docs.forEach(d => {
+      const data = d.data() || {};
+      if(!data || !data.id) return;
+      if(data.modo === 'electrico'){ explicitoM.push(d); return; }
+      const c = normalize(data.codigo);
+      if(c) byCodeM.set(c, { docId: String(data.id), data });
+    });
+    snapE.docs.forEach(d => {
+      const data = d.data() || {};
+      if(!data || !data.id) return;
+      if(data.modo === 'manual'){ explicitoE.push(d); return; }
+      const c = normalize(data.codigo);
+      if(c) byCodeE.set(c, { docId: String(data.id), data });
+    });
+    // 1) Mover los que traen modo explícito de la otra colección.
+    const mover = async (doc, colDest, colOrig) => {
+      const data = Object.assign({}, doc.data() || {}, { modo: colDest.id.slice('stockferre_productos_'.length) });
+      await colDest.doc(String(data.id)).set(data, { merge: true });
+      await colOrig.doc(String(data.id)).delete();
+      movidos++;
+    };
+    for(const d of explicitoM){ try{ await mover(d, colE, colM); }catch(e){ console.error('Error moviendo elécrica→manual', e); } }
+    for(const d of explicitoE){ try{ await mover(d, colM, colE); }catch(e){ console.error('Error moviendo manual→eléctrica', e); } }
+    // 2) Mismo código en ambas = mezcla. Se queda uno, se borra el otro.
+    const aBorrar = [];
+    byCodeE.forEach((eItem, code) => {
+      const mItem = byCodeM.get(code);
+      if(!mItem) return;
+      const eModoOk = eItem.data.modo === 'electrico';
+      const mModoOk = mItem.data.modo === 'manual';
+      let ganador;
+      if(eModoOk !== mModoOk){
+        ganador = eModoOk ? eItem : mItem;
+      }else{
+        const et = Number(eItem.data._updatedAt) || 0;
+        const mt = Number(mItem.data._updatedAt) || 0;
+        ganador = et > mt ? eItem : (mt > et ? mItem : eItem); // empate → eléctrico (había eléctricas en manuales)
+      }
+      if(ganador === eItem) aBorrar.push(colM.doc(mItem.docId).delete());
+      else aBorrar.push(colE.doc(eItem.docId).delete());
+    });
+    if(aBorrar.length){
+      const res = await Promise.allSettled(aBorrar);
+      borrados += res.filter(r => r.status === 'fulfilled').length;
+    }
+    return { movidos, borrados };
+  }catch(e){
+    if(e && e.code !== 'permission-denied') console.error('Error separando los modos en la nube', e);
+    return { movidos, borrados };
   }
 }
 

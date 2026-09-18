@@ -2493,29 +2493,26 @@ async function assimilateCatalogFromCloud(modo){
       // puede subir con await y el orden queda determinista).
       localesSolo.push({ local: local, code: normalize(local.codigo) });
     });
-    // Productos locales que la nube no conoce → decidir su destino:
-    //  • Este dispositivo YA sincronizó: la nube es la verdad. Si parece creado
-    //    aquí hace poco (< 24 h, p. ej. hecho sin conexión) se sube y se
-    //    conserva; si es un RESIDUO viejo (la nube ya lo borró o mezcla de
-    //    modos) se descarta → TODOS terminan con el MISMO catálogo (1467→1387).
-    //  • Nunca sincronizó (arranque): se conserva local como estaba.
+    // Productos locales que la nube no conoce → la NUBE ES LA VERDAD siempre
+    // que ya tenga catálogo para este modo, SIN importar si este dispositivo ya
+    // se marcó. Se conservan y se suben SOLO los que parecen creados aquí: los
+    // del mismo usuario (invitado-<dispositivo>/'dueno') o los tocados hace
+    // poco (< 24 h, p. ej. hecho sin conexión). Los RESIDUOS de importaciones
+    // viejas (sin dueño y con más de 24 h) se descartan, para que TODOS los
+    // dispositivos terminen con el MISMO catálogo (los ~2100 viejos bajan a los
+    // ~1387 de la nube). El único caso que se conserva tal cual es "nube vacía
+    // + nunca sincronizó" (arranque, ya resuelto arriba).
     for(const item of localesSolo){
       const local = item.local;
-      if(!yaMarcado){
-        stampProductoModo(local, modo);
-        merged.push(local);
-        seen.add(local.id);
-        continue;
-      }
       const ts = Number(local._updatedAt) || 0;
-      const esMio = !!local._creadoPor && local._creadoPor === etiquetaCreadorInvitado();
+      const esMio = !!local._creadoPor && (local._creadoPor === etiquetaCreadorInvitado() || local._creadoPor === 'dueno');
       if(esMio || (ts && ts > Date.now() - 24 * 3600 * 1000)){
         try{ await syncProductoDoc(local, modo); }catch(e){}
         const copiaNube = (cloudByCode.get(item.code) || cloudById.get(local.id));
         if(copiaNube && !seen.has(copiaNube.id)){ merged.push(copiaNube); seen.add(copiaNube.id); }
         else{ stampProductoModo(local, modo); merged.push(local); seen.add(local.id); }
       }
-      cambios = true; // se subió o se descartó → se persiste
+      cambios = true; // se subió, se conservó o se descartó → se persiste
     }
     // Productos que la nube tiene y este dispositivo no: se agregan.
     cloudByCode.forEach(p => {

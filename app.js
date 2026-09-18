@@ -829,6 +829,7 @@ async function connectGuestFirebase(){
       withTimeout(ref.get(), 12000).then(snap=>{
         if(snap && snap.exists){
           const prev = loadModoDB(modo);
+          const prevRev = (prev && prev._catalogRev) || 0;
           const remote = normalizeDB(snap.data());
           const merged = mergeRemoteIntoLocal(prev, remote, modo);
           merged.historialEscaneos = prev.historialEscaneos;
@@ -836,12 +837,15 @@ async function connectGuestFirebase(){
           merged.historialInventario = prev.historialInventario;
           persistBlob('stockferre_catalogo_v1_' + modo, merged);
           if(currentModo === 'invitado'){ db = buildGuestDB(); rerenderCurrentView(); }
+          const newRev = (remote && remote._catalogRev) || 0;
+          if(newRev > prevRev) reasimilarModoAhora(modo);
         }
       }).catch(()=>{ /* local sigue funcionando */ });
       const unsub = ref.onSnapshot(snap=>{
         if(snap.metadata.hasPendingWrites) return;
         if(!snap.exists) return;
         const prev = loadModoDB(modo);
+        const prevRev = (prev && prev._catalogRev) || 0;
         const remote = normalizeDB(snap.data());
         const merged = mergeRemoteIntoLocal(prev, remote, modo);
         merged.historialEscaneos = prev.historialEscaneos;
@@ -849,6 +853,8 @@ async function connectGuestFirebase(){
         merged.historialInventario = prev.historialInventario;
         persistBlob('stockferre_catalogo_v1_' + modo, merged);
         if(currentModo === 'invitado'){ db = buildGuestDB(); rerenderCurrentView(); }
+        const newRev = (remote && remote._catalogRev) || 0;
+        if(newRev > prevRev) reasimilarModoAhora(modo);
       }, ()=>{ /* ignorar */ });
       guestUnsubs.push(unsub);
       backfillProductos(modo);
@@ -1128,6 +1134,7 @@ async function connectFirebase(){
     const applySnapshot = (snap) => {
       if(!snap.exists) return;
       const prevVentas = (db.ventas || []).map(v => v.id);
+      const prevRev = (db._catalogRev || 0);
       const remote = normalizeDB(snap.data());
       const merged = mergeRemoteIntoLocal(db, remote, currentModo);
       merged.historialEscaneos = db.historialEscaneos;
@@ -1138,6 +1145,10 @@ async function connectFirebase(){
       rerenderCurrentView();
       notifyNewRemoteSales(prevVentas, merged.ventas); // avisa ventas hechas en otro dispositivo
       setSyncStatus('synced');
+      // El dueño cambió el catálogo: se relee la colección de productos de este
+      // modo para quedar igual que él, sin esperar a reconectar.
+      const newRev = (remote && remote._catalogRev) || 0;
+      if(newRev > prevRev) reasimilarModoAhora(currentModo);
     };
     fbUnsub = fbDocRef.onSnapshot(snap=>{
       // Si este snapshot incluye una escritura propia todavía sin confirmar,
@@ -1225,6 +1236,21 @@ async function connectFirebase(){
    ------------------------------------------------------------------------- */
 let fbWatchdogTimer = null;
 let fbReconnecting = false;
+let fbUltimoChequeoReset = 0;
+
+// Verifica (sin quemar lecturas) si el dueño pidió un reinicio global: se
+// dispara por el vigía cada ~30 s y al volver a la app (focus/visibilidad).
+// Si lo detecta, vacía este dispositivo y recarga la página.
+function chequeoReinicioYListo(){
+  if(typeof firebase === 'undefined' || typeof firebaseConfig === 'undefined') return;
+  if(!fbConfigOk() || !firebaseToggleOn()) return;
+  if(fbReconnecting) return;
+  const now = Date.now();
+  if(now - fbUltimoChequeoReset < 30000) return;
+  fbUltimoChequeoReset = now;
+  const fs = fbFirestoreOrNull();
+  if(fs) verificarControlReset(fs);
+}
 
 function startSyncWatchdog(){
   stopSyncWatchdog();
@@ -1232,6 +1258,10 @@ function startSyncWatchdog(){
     if(typeof firebase === 'undefined' || typeof firebaseConfig === 'undefined') return;
     if(!fbConfigOk() || !firebaseToggleOn()) return;
     if(fbReconnecting) return;
+    // Aunque la conexión esté sana, se revisa de vez en cuando si el dueño
+    // pidió un reinicio global (para que ningún dispositivo se quede con los
+    // productos viejos si estaba abierto en ese momento).
+    chequeoReinicioYListo();
     const stEl = document.getElementById('sidebarSyncStatus');
     const statusTxt = stEl ? (stEl.textContent || '') : '';
     const looksError = statusTxt.indexOf('Error') !== -1 || statusTxt.indexOf('Cuota') !== -1;
@@ -1257,6 +1287,13 @@ function startSyncWatchdog(){
 function stopSyncWatchdog(){
   if(fbWatchdogTimer){ clearInterval(fbWatchdogTimer); fbWatchdogTimer = null; }
 }
+
+// Al volver a la app se verifica el reinicio global al instante (no hay que
+// esperar al vigía).
+window.addEventListener('focus', chequeoReinicioYListo);
+document.addEventListener('visibilitychange', ()=>{
+  if(!document.hidden) chequeoReinicioYListo();
+});
 
 // Guarda en LocalStorage los datos de UN modo recibidos de Firebase,
 // conservando los historiales locales de ese modo.
@@ -2036,6 +2073,14 @@ async function syncProductoDocs(list, modo){
     for(let i = 0; i < list.length; i += 450){
       await escribirProductosConReintentos(col, fs, list.slice(i, i + 450), modo);
     }
+    // Sello el catálogo para avisar a los demás dispositivos: el documento
+    // grande lleva _catalogRev y, quien lo reciba, re-lectura SOLO esa
+    // colección en cuanto vea la versión nueva (convergencia rápida).
+    try{
+      const store = modo === currentModo ? db : loadModoDB(modo);
+      store._catalogRev = Date.now();
+      if(modo === currentModo){ saveDB(); } else { persistModoDB(modo, store); }
+    }catch(e){ /* ignorar */ }
   }catch(e){ console.error('Error sincronizando lista de productos en la nube', e); }
 }
 
@@ -2223,6 +2268,21 @@ function cloudProductoToDB(data, modo){
 // Se vuelve "true" al apretar "Recibir y mandar actualizaciones" para que la
 // asimilación corra aunque acabe de correr hace poco.
 let forceAssimilarCatalogo = false;
+// Modo concreto cuya re-lectura se fuerza aunque esté dentro del cooldown de
+// 60 s (lo usa el aviso de "catálogo cambiado" del documento grande).
+let fuerzaAsimilaModo = null;
+
+// Re-lee la colección por producto de UN modo en cuanto llega el aviso de que
+// el dueño cambió el catálogo (campo _catalogRev del documento grande). Así
+// cualquier dispositivo conectado converge al catálogo del dueño sin esperar
+// a reconectar y sin quemar lecturas continuas.
+function reasimilarModoAhora(modo){
+  fuerzaAsimilaModo = modo;
+  assimilateCatalogFromCloud(modo).catch(()=>{}).finally(()=>{
+    fuerzaAsimilaModo = null;
+    updateSidebarProductCount();
+  });
+}
 
 // Re-sincroniza el catálogo de UN modo tomando como VERDAD la colección de
 // documentos por producto (stockferre_productos_<modo>). Corrige los tres
@@ -2242,7 +2302,7 @@ async function assimilateCatalogFromCloud(modo){
   // una vez por conexión y como mínimo cada 60 segundos. El botón de
   // sincronización manual fuerza la corrida aunque haya corrido hace un momento.
   const markKey = 'fs_catalog_pull_' + modo;
-  if(!forceAssimilarCatalogo){
+  if(!forceAssimilarCatalogo && fuerzaAsimilaModo !== modo){
     try{
       const done = await kvGet(markKey);
       if(done){
@@ -2277,9 +2337,29 @@ async function assimilateCatalogFromCloud(modo){
         if(!prev || (p._updatedAt || 0) >= (prev._updatedAt || 0)) cloudByCode.set(c, p);
       }
     });
-    // Si la nube todavía no tiene catálogo (nunca se subió), no hay nada que
-    // adoptar: se deja lo local como está.
-    if(cloudById.size === 0) return null;
+    // Si la nube todavía no tiene catálogo para este modo, hay dos casos:
+    //  - Este dispositivo NUNCA sincronizó: se deja lo local como está (arranque).
+    //  - Este dispositivo YA sincronizó y la nube quedó EN CERO (reinicio total o
+    //    vaciado del dueño): la nube es la verdad → se adopta el catálogo vacío
+    //    para que nadie preserve ni resucite los productos viejos.
+    if(cloudById.size === 0){
+      let yaSincronizaba = false;
+      try{ yaSincronizaba = !!await kvGet(markKey); }catch(e){}
+      if(!yaSincronizaba) return null;
+      store.productos = [];
+      aplicarModoLocal(store, modo);
+      dedupeProductosByCode(store.productos);
+      if(modo === currentModo){
+        db = store;
+        persistLocalCache();
+        rerenderCurrentView();
+      }else{
+        persistBlob('stockferre_catalog_v1_' + modo, store);
+        if(currentModo === 'invitado'){ db = buildGuestDB(); rerenderCurrentView(); }
+      }
+      try{ await kvSet(markKey, '1@' + Date.now()); }catch(e){}
+      return { modo, nuevos: 0, actualizados: 0 };
+    }
     const merged = [];
     const seen = new Set();
     let cambios = false;

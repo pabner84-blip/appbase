@@ -195,7 +195,8 @@
         <table class="table" id="productsTable">
           <thead>
             <tr>
-              <th>Imagen</th><th>Código</th><th>Descripción</th><th>Marca</th><th class="admin-only">Acciones</th>
+              <th>Imagen</th><th>Código</th><th>Cód. Barras</th><th>Descripción</th><th>Marca</th><th>Categoría</th>
+              <th class="price-guest-hide">P. Compra</th><th class="price-guest-hide">P. Marca</th><th>P. Venta</th><th>Stock</th><th>Stock mín.</th><th class="admin-only">Acciones</th>
             </tr>
           </thead>
           <tbody></tbody>
@@ -671,9 +672,9 @@
       <label>Marca<input type="text" id="pMarca" class="input"></label>
       <label>Categoría<input type="text" id="pCategoria" class="input" list="categoriasList" placeholder="Elige o escribe una nueva"></label>
       <datalist id="categoriasList"></datalist>
-      <label class="price-guest-hide" id="lblPrecioCompra">Precio de compra<input type="number" id="pPrecioCompra" class="input" step="0.01" min="0"></label>
-      <label class="price-guest-hide" id="lblPrecioMarca"><span id="lblPrecioMarcaText">Precio de marca</span><input type="number" id="pPrecioMarca" class="input" step="0.01" min="0"></label>
-      <label id="lblPrecioVenta">Precio de venta<input type="number" id="pPrecioVenta" class="input" step="0.01" min="0"></label>
+      <label class="price-guest-hide">Precio de compra<input type="number" id="pPrecioCompra" class="input" step="0.01" min="0"></label>
+      <label class="price-guest-hide">Precio de marca<input type="number" id="pPrecioMarca" class="input" step="0.01" min="0"></label>
+      <label>Precio de venta<input type="number" id="pPrecioVenta" class="input" step="0.01" min="0"></label>
       <div class="form-actions">
         <button type="submit" class="btn btn-primary">Guardar</button>
         <button type="button" class="btn btn-secondary" data-close-modal>Cancelar</button>
@@ -744,9 +745,9 @@
       <div class="detail-row"><span class="detail-label">Descripción</span><span id="detNombre" class="detail-value"></span></div>
       <div class="detail-row"><span class="detail-label">Marca</span><span id="detMarca" class="detail-value"></span></div>
       <div class="detail-row"><span class="detail-label">Categoría</span><span id="detCategoria" class="detail-value"></span></div>
-      <div class="detail-row price-guest-hide" id="detRowPCompra"><span class="detail-label">Precio de compra</span><span id="detPCompra" class="detail-value"></span></div>
-      <div class="detail-row price-guest-hide" id="detRowPMarca"><span class="detail-label" id="detPMarcaLabel">Precio de marca</span><span id="detPMarca" class="detail-value"></span></div>
-      <div class="detail-row" id="detRowPVenta"><span class="detail-label">Precio de venta</span><span id="detPVenta" class="detail-value"></span></div>
+      <div class="detail-row price-guest-hide"><span class="detail-label">Precio de compra</span><span id="detPCompra" class="detail-value"></span></div>
+      <div class="detail-row price-guest-hide"><span class="detail-label">Precio de marca</span><span id="detPMarca" class="detail-value"></span></div>
+      <div class="detail-row"><span class="detail-label">Precio de venta</span><span id="detPVenta" class="detail-value"></span></div>
       <div class="detail-row"><span class="detail-label">Stock</span><span id="detStock" class="detail-value"></span></div>
       <div class="detail-row"><span class="detail-label">Stock mín.</span><span id="detStockMin" class="detail-value"></span></div>
     </div>
@@ -807,9 +808,8 @@
           <option value="electrico">⚡ Herramientas Eléctricas</option>
         </select>
       </label>
-      <div class="form-actions" style="flex-wrap:wrap;">
+      <div class="form-actions">
         <button type="submit" class="btn btn-success">Registrar venta</button>
-        <button type="button" class="btn btn-secondary" id="btnVentaVerIngresos">📊 Ver ingresos</button>
         <button type="button" class="btn btn-secondary" data-close-modal>Cancelar</button>
       </div>
     </form>

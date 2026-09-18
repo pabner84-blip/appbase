@@ -190,13 +190,13 @@ body.modo-invitado .sidebar-logos{display:flex;}
 #histQrTable td:nth-child(4){white-space:normal;}
 
 /* ---- Miniatura de imagen de producto (columna Imagen) ---- */
-.prod-img-cell{min-width:150px;}
+.prod-img-cell{min-width:120px;}
 .prod-img-wrap{display:flex; flex-direction:column; align-items:flex-start; gap:6px; position:relative;}
-.prod-thumb{width:110px; height:110px; object-fit:cover; border-radius:10px; cursor:pointer; border:1px solid var(--border); box-shadow:var(--shadow); display:block; transition:transform .15s;}
-.prod-thumb:hover{transform:scale(1.05);}
-.prod-thumb-empty{display:flex; align-items:center; justify-content:center; background:var(--bg); font-size:34px; color:var(--text-muted); cursor:pointer; width:110px; height:110px; border-radius:10px; border:1px solid var(--border); transition:background .15s;}
+.prod-thumb{width:72px; height:72px; object-fit:cover; border-radius:8px; cursor:pointer; border:1px solid var(--border); box-shadow:var(--shadow); display:block; transition:transform .15s;}
+.prod-thumb:hover{transform:scale(1.08);}
+.prod-thumb-empty{display:flex; align-items:center; justify-content:center; background:var(--bg); font-size:20px; color:var(--text-muted); cursor:pointer; width:72px; height:72px; border-radius:8px; border:1px solid var(--border); transition:background .15s;}
 .prod-thumb-empty:hover{background:var(--border);}
-.prod-thumb-lazy{width:110px; height:110px; border-radius:10px; overflow:hidden;}
+.prod-thumb-lazy{width:72px; height:72px; border-radius:8px; overflow:hidden;}
 .ajuste-qr-detalle{display:flex; flex-wrap:wrap; gap:8px; margin-top:12px;}
 .ajuste-qr-chip{display:inline-flex; align-items:center; gap:4px; background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:4px 10px; font-size:13px; color:var(--text); font-family:inherit; cursor:pointer; transition:all .15s ease;}
 .ajuste-qr-chip:hover{border-color:var(--primary); color:var(--primary);}
@@ -446,10 +446,8 @@ body.role-guest .nav-item[data-view="gastos"],
 body.role-guest .nav-item[data-view="topventas"],
 body.role-guest .nav-item[data-view="pedidos"]{display:none;}
 body.role-guest .nav-pro-group{display:none;}
+body.role-guest .price-guest-hide{display:none;}
 body.role-guest .admin-only{display:none !important;}
-/* El invitado VE todo (precios, stock, ingresos) pero no puede modificar:
-   los controles de edición llevan la clase .guest-hide. */
-body.role-guest .guest-hide{display:none !important;}
 
 /* Filtro por mes en Retiros y Deudas */
 .mes-filtro{display:flex; align-items:center; gap:8px; margin-bottom:12px; flex-wrap:wrap;}

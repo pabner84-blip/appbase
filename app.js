@@ -347,6 +347,34 @@ function stampProductoModo(p, modo){
   return p;
 }
 
+// ---- Regla de autoridad (modelo FLEXIBLE) ----
+// currentRole: 'admin' = dueño, 'guest' = invitado. El dueño escribe todo; un
+// invitado SOLO puede crear productos nuevos (etiquetados con su dispositivo),
+// editar los que él creó y ajustar stock. NUNCA re-subir un catálogo completo.
+function esInvitadoActual(){ return currentRole === 'guest'; }
+function idDispositivo(){
+  try{
+    let d = localStorage.getItem('stockferre_device_id');
+    if(!d){ d = 'id-' + Math.random().toString(36).slice(2, 10); localStorage.setItem('stockferre_device_id', d); }
+    return d;
+  }catch(e){ return 'id-' + Math.random().toString(36).slice(2, 10); }
+}
+function etiquetaCreadorInvitado(){ return 'invitado-' + idDispositivo(); }
+// La etiqueta _creadoPor que llevará un producto al subirse a la nube.
+function etiquetaCreadorParaNube(p){
+  if(p && p._creadoPor && /^invitado-/.test(String(p._creadoPor))) return p._creadoPor;
+  return esInvitadoActual() ? etiquetaCreadorInvitado() : 'dueno';
+}
+// Resuelve la colección de productos correcta para un documento. Un invitado
+// no escribe en "stockferre_productos_invitado" (no existe): sus productos
+// nuevos van a Manuales o Eléctricas según la "Línea" elegida en el formulario.
+function colModoParaProducto(p, modo){
+  if(modo === 'manual' || modo === 'electrico') return modo;
+  if(p && (p.modo === 'manual' || p.modo === 'electrico')) return p.modo;
+  if(currentModo === 'manual' || currentModo === 'electrico') return currentModo;
+  return 'manual';
+}
+
 // Filtra los productos de una base para que queden SOLO los del modo indicado.
 // En modo invitado no filtra nada (su catálogo combina ambos modos a propósito).
 function aplicarModoLocal(dbObj, modo){
@@ -1384,6 +1412,9 @@ function productoDocData(p){
     // El modo viaja en cada documento del producto: si un documento termina en
     // la colección equivocada, los otros dispositivos lo rechazan al leerlo.
     modo: (p.modo === 'manual' || p.modo === 'electrico') ? p.modo : '',
+    // Quién creó/posee el producto: 'dueno' o 'invitado-<dispositivo>'. Con
+    // esto un invitado solo puede editar lo suyo y ajustar stock en lo ajeno.
+    _creadoPor: etiquetaCreadorParaNube(p),
     _updatedAt: typeof p._updatedAt === 'number' ? p._updatedAt : Date.now()
   };
 }
@@ -1450,9 +1481,36 @@ async function applyStockAbsolute(p, value, modo){
 
 // Guarda (crea o actualiza) el documento completo de un producto.
 async function syncProductoDoc(p, modo){
-  const col = fbProductsCol(modo);
+  const colModo = colModoParaProducto(p, modo);
+  const col = fbProductsCol(colModo);
   if(!col || !p || !p.id) return;
-  stampProductoModo(p, modo);
+  stampProductoModo(p, colModo);
+  if(esInvitadoActual()){
+    // Un invitado SOLO puede: crear productos nuevos (etiquetados con su
+    // dispositivo), editar los que él mismo creó y ajustar stock. Si intenta
+    // escribir un producto del dueño o de otro dispositivo, se reduce a un
+    // ajuste atómico de stock y NO se toca el catálogo.
+    try{
+      const ref = col.doc(p.id);
+      const exist = await withTimeout(ref.get(), 10000);
+      if(exist.exists){
+        const data = exist.data() || {};
+        const autor = String(data._creadoPor || 'dueno');
+        if(autor !== etiquetaCreadorInvitado()){
+          const delta = (Number(p.stock) || 0) - (Number(data.stock) || 0);
+          if(delta !== 0) await ref.update({ stock: firebase.firestore.FieldValue.increment(delta), _updatedAt: Date.now() });
+          return;
+        }
+        p._creadoPor = autor; // es suyo: conserva su etiqueta
+      }else{
+        p._creadoPor = etiquetaCreadorInvitado(); // producto nuevo de invitado
+      }
+    }catch(e){ return; } // sin conexión: solo se queda local
+  }else{
+    // El dueño se hace responsable de lo que escribe (los productos que el
+    // dueño edita pasan a ser suyos).
+    p._creadoPor = (p._creadoPor && /^invitado-/.test(String(p._creadoPor))) ? p._creadoPor : 'dueno';
+  }
   try{
     await col.doc(p.id).set(productoDocData(p), { merge: true });
   }catch(e){ console.error('Error sincronizando producto en la nube', e); }
@@ -1928,6 +1986,8 @@ function stopGastosPrestamosListeners(){
 async function backfillProductos(modo){
   const col = fbProductsCol(modo);
   if(!col) return;
+  // Los invitados no re-siembran catálogos locales en la nube: solo leen.
+  if(esInvitadoActual()){ return; }
   // Una sola vez por modo: releer la colección entera en cada apertura quema
   // miles de lecturas del cupo gratis de Firestore (eso dejaba el celular sin
   // poder ver los productos nuevos). Una vez migrado, los productos nuevos y
@@ -2016,6 +2076,8 @@ async function backfillProductos(modo){
 async function syncCaracteristicasCloud(modo){
   const col = fbProductsCol(modo);
   if(!col) return;
+  // Solo el dueño reenvía características (los invitados no tocan el catálogo).
+  if(esInvitadoActual()) return;
   const markKey = 'fs_caract_sync_' + modo;
   // La marca va en IndexedDB (no LocalStorage): puede que el LocalStorage esté
   // lleno, y si fallara no se marcaría y nos quemaríamos lecturas cada apertura.
@@ -2058,6 +2120,9 @@ async function syncCaracteristicasCloud(modo){
 // backups). Cada lote se reintenta solo si falla (cortón de red, cuota, etc.):
 // así una importación de 1300+ productos no deja la mitad en la nube.
 async function escribirProductosConReintentos(col, fs, chunk, modo){
+  // Los invitados NUNCA escriben lotes del catálogo: eso era lo que volvía a
+  // sembrar productos mezclados. Sus escrituras van producto por producto.
+  if(esInvitadoActual()) return;
   let intento = 0;
   for(;;){
     try{
@@ -2081,6 +2146,12 @@ async function escribirProductosConReintentos(col, fs, chunk, modo){
 async function syncProductoDocs(list, modo){
   const col = fbProductsCol(modo);
   if(!col || !list || !list.length) return;
+  // Un invitado jamás re-sube el catálogo en lote: solo crea/edita lo suyo y
+  // ajusta stock, y eso se hace producto por producto con sus propias reglas.
+  if(esInvitadoActual()){
+    for(const p of list){ if(p && p.id){ await syncProductoDoc(p, modo); } }
+    return;
+  }
   try{
     const fs = firebase.firestore();
     for(let i = 0; i < list.length; i += 450){
@@ -2269,6 +2340,9 @@ function cloudProductoToDB(data, modo){
     // El modo es el de la colección de la que viene el documento (la nube
     // anterior no lo guardaba), salvo que el documento ya lo traiga.
     modo: (data.modo === 'manual' || data.modo === 'electrico') ? data.modo : modo,
+    // Quién lo creó en la nube: 'dueno' o 'invitado-<dispositivo>'. Con esto
+    // un invitado reconoce los productos que él mismo dio de alta.
+    _creadoPor: (data._creadoPor && /^invitado-/.test(String(data._creadoPor))) ? data._creadoPor : '',
     fechaCreacion: todayISO(),
     _updatedAt: typeof data._updatedAt === 'number' ? data._updatedAt : Date.now()
   };
@@ -2434,7 +2508,8 @@ async function assimilateCatalogFromCloud(modo){
         continue;
       }
       const ts = Number(local._updatedAt) || 0;
-      if(ts && ts > Date.now() - 24 * 3600 * 1000){
+      const esMio = !!local._creadoPor && local._creadoPor === etiquetaCreadorInvitado();
+      if(esMio || (ts && ts > Date.now() - 24 * 3600 * 1000)){
         try{ await syncProductoDoc(local, modo); }catch(e){}
         const copiaNube = (cloudByCode.get(item.code) || cloudById.get(local.id));
         if(copiaNube && !seen.has(copiaNube.id)){ merged.push(copiaNube); seen.add(copiaNube.id); }
@@ -3577,10 +3652,9 @@ function renderScanResultInto(elementId, codigo, context){
     resultDiv.innerHTML = `
       <div class="scan-not-found">
         ⚠️ No se encontró ningún producto con el código <strong>${escapeHtml(codigo)}</strong>.
-        ${currentRole === 'guest' ? '' : `
         <div style="margin-top:10px;">
           <button class="btn btn-primary btn-sm" id="btnCreateFromScan_${elementId}">+ Crear producto con este código</button>
-        </div>`}
+        </div>
       </div>`;
     const btnCreate = document.getElementById(`btnCreateFromScan_${elementId}`);
     if(btnCreate) btnCreate.addEventListener('click', ()=>{
@@ -3626,7 +3700,7 @@ function renderScanResultInto(elementId, codigo, context){
       <div class="sr-row"><span>Código</span><strong>${escapeHtml(p.codigo)}</strong></div>
       ${detailRowsHtml}
       <div style="margin-top:12px; display:flex; gap:8px; flex-wrap:wrap;">
-        ${currentRole !== 'guest' && context !== 'compra' ? `<button class="btn btn-secondary btn-sm" id="btnEditFromScan_${elementId}">✏️ Editar producto</button>` : ''}
+        ${(currentRole !== 'guest' || (p && p._creadoPor === etiquetaCreadorInvitado())) && context !== 'compra' ? `<button class="btn btn-secondary btn-sm" id="btnEditFromScan_${elementId}">✏️ Editar producto</button>` : ''}
         ${secondBtnHtml}
       </div>
     </div>`;
@@ -7215,8 +7289,11 @@ function ocrConfirmarIngresos(){
         stock: it.cantidad,
         stockMin: 0,
         caracteristicas: '',
-        modo: (currentModo === 'manual' || currentModo === 'electrico') ? currentModo : '',
-        fechaCreacion: todayISO(),
+modo: (data.modo === 'manual' || data.modo === 'electrico')
+        ? data.modo
+        : ((currentModo === 'manual' || currentModo === 'electrico') ? currentModo : (esInvitadoActual() ? 'manual' : '')),
+      _creadoPor: esInvitadoActual() ? etiquetaCreadorInvitado() : 'dueno',
+      fechaCreacion: todayISO(),
         _updatedAt: Date.now()
       };
       db.productos.push(newProd);
@@ -8461,11 +8538,17 @@ function openProductModal(producto, prefillCodigo){
     document.getElementById('pPrecioCompra').value = producto.precioCompra || '';
     document.getElementById('pPrecioMarca').value = producto.precioMarca || '';
     document.getElementById('pPrecioVenta').value = producto.precioVenta || '';
+    const pModo = document.getElementById('pModo');
+    if(pModo) pModo.value = (producto.modo === 'manual' || producto.modo === 'electrico') ? producto.modo : '';
   }else{
     document.getElementById('modalProductoTitle').textContent = 'Nuevo producto';
     document.getElementById('pId').value = '';
     if(prefillCodigo) document.getElementById('pCodigo').value = prefillCodigo;
   }
+  // La "Línea" (Manuales/Eléctricas) solo la elige un invitado al CREAR un
+  // producto nuevo; el dueño la define siéndolo y no debe cambiarla al editar.
+  const lineaRow = document.getElementById('pModoRow');
+  if(lineaRow){ lineaRow.style.display = (!producto && esInvitadoActual()) ? '' : 'none'; }
   openModal('modalProducto');
 }
 
@@ -8480,7 +8563,8 @@ function handleProductSubmit(e){
     categoria: document.getElementById('pCategoria').value,
     precioCompra: document.getElementById('pPrecioCompra').value,
     precioMarca: document.getElementById('pPrecioMarca').value,
-    precioVenta: document.getElementById('pPrecioVenta').value
+    precioVenta: document.getElementById('pPrecioVenta').value,
+    modo: (document.getElementById('pModo') || {}).value || ''
   };
   if(!data.codigo.trim() || !data.nombre.trim()){
     toast('Código y descripción son obligatorios', 'error');

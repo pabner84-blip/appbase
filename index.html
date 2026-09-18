@@ -676,6 +676,13 @@
       <label>Descripción *<input type="text" id="pNombre" class="input" required></label>
       <label>Marca<input type="text" id="pMarca" class="input"></label>
       <label>Categoría<input type="text" id="pCategoria" class="input" list="categoriasList" placeholder="Elige o escribe una nueva"></label>
+      <label class="linea-pick-row" id="pModoRow" style="display:none;">Línea
+        <select id="pModo" class="input">
+          <option value="">Elige la línea…</option>
+          <option value="manual">Manuales</option>
+          <option value="electrico">Eléctricas</option>
+        </select>
+      </label>
       <datalist id="categoriasList"></datalist>
       <label class="price-guest-hide">Precio de compra<input type="number" id="pPrecioCompra" class="input" step="0.01" min="0"></label>
       <label class="price-guest-hide">Precio de marca<input type="number" id="pPrecioMarca" class="input" step="0.01" min="0"></label>

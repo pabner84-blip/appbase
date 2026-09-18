@@ -518,7 +518,13 @@ function saveDB(){
     try{
       if(!firebase.apps || !firebase.apps.length){ firebase.initializeApp(firebaseConfig); }
       const ref = fbDocRef || firebase.firestore().collection('stockferre').doc(firebaseDocId());
-      const { historialEscaneos, historialBusquedas, historialInventario, ventas, ajustes, gastosPrestamos, ...syncData } = db;
+      // IMPORTANTE: el documento grande NO lleva los productos. Con un catálogo
+      // grande (miles de artículos) ese documento pasaba 1 MiB, Firestore
+      // rechazaba la escritura y la app se quedaba pegada en "Conectando a
+      // Firebase..." sin que los productos llegaran a los otros dispositivos.
+      // Ahora el catálogo de productos vive en la colección por producto
+      // (stockferre_productos_<modo>), que cada dispositivo lee completa.
+      const { historialEscaneos, historialBusquedas, historialInventario, ventas, ajustes, gastosPrestamos, productos, ...syncData } = db;
       scheduleFirestoreWrite(firebaseDocId(), ref, syncData);
     }catch(err){
       console.error('Error guardando en Firebase', err);
@@ -611,7 +617,9 @@ function persistModoDB(modo, dbObj){
     try{
       if(!firebase.apps || !firebase.apps.length){ firebase.initializeApp(firebaseConfig); }
       const ref = firebase.firestore().collection('stockferre').doc('inventario_' + modo);
-      const { historialEscaneos, historialBusquedas, historialInventario, ventas, ajustes, gastosPrestamos, ...syncData } = dbObj;
+      // Igual que saveDB: los productos NO van en el documento grande (ver nota
+      // ahí); el catálogo vive en la colección por producto.
+      const { historialEscaneos, historialBusquedas, historialInventario, ventas, ajustes, gastosPrestamos, productos, ...syncData } = dbObj;
       scheduleFirestoreWrite('inventario_' + modo, ref, syncData);
     }catch(err){
       console.error('Error guardando en Firebase', err);
@@ -1134,7 +1142,8 @@ async function connectFirebase(){
       applySnapshot(snap);
     }else if(snap && !snap.exists){
       // Primera vez: sube los datos locales como semilla inicial de la nube
-      const { historialEscaneos, historialBusquedas, historialInventario, ventas, ajustes, gastosPrestamos, ...syncData } = db;
+      // (los productos van en su colección aparte, no en este documento).
+      const { historialEscaneos, historialBusquedas, historialInventario, ventas, ajustes, gastosPrestamos, productos, ...syncData } = db;
       try{ await withTimeout(fbDocRef.set(syncData), 12000); }catch(e){ /* el SDK reintenta */ }
     }
 
@@ -1465,11 +1474,21 @@ async function syncVentaDocs(list, modo){
   try{
     const fs = firebase.firestore();
     for(let i = 0; i < list.length; i += 450){
-      const batch = fs.batch();
-      list.slice(i, i + 450).forEach(v => {
-        if(v && v.id) batch.set(col.doc(String(v.id)), ventaDocData(v));
-      });
-      await batch.commit();
+      const chunk = list.slice(i, i + 450).filter(v => v && v.id);
+      if(!chunk.length) continue;
+      let intento = 0;
+      for(;;){
+        try{
+          const batch = fs.batch();
+          chunk.forEach(v => batch.set(col.doc(String(v.id)), ventaDocData(v)));
+          await batch.commit();
+          break;
+        }catch(err){
+          intento++;
+          if(intento >= 3){ console.error('Error subiendo ventas a la nube', err); break; }
+          await new Promise(r => setTimeout(r, 800 * intento));
+        }
+      }
     }
   }catch(e){ console.error('Error subiendo ventas a la nube', e); }
 }
@@ -2185,36 +2204,43 @@ function cloudProductoToDB(data, modo){
 // asimilación corra aunque acabe de correr hace poco.
 let forceAssimilarCatalogo = false;
 
+// Re-sincroniza el catálogo de UN modo tomando como VERDAD la colección de
+// documentos por producto (stockferre_productos_<modo>). Corrige los tres
+// problemas de la sincronización a la vez:
+//   • COMPLETITUD: relee la colección COMPLETA (sin límites de "últimas 24/72 h",
+//     que dejaban productos afuera para siempre) y los adopta; todos los
+//     dispositivos terminan viendo el MISMO catálogo.
+//   • SEPARACIÓN DE MODOS: solo entran documentos de esta colección; los
+//     productos locales de OTRO modo se quitan de esta base. Manuales y
+//     Eléctricas nunca se vuelven a mezclar.
+//   • DETERMINISMO: si dos documentos llevan el mismo código, gana el mismo
+//     ejemplar en todos los dispositivos (el más reciente / el "mejor").
 async function assimilateCatalogFromCloud(modo){
   const col = fbProductsCol(modo);
   if(!col) return;
-  // Barandilla de seguridad: en cada conexión se relee la colección COMPLETA de
-  // este modo y se agregan los productos que a este dispositivo le faltan. El
-  // listener de stock solo lee los últimos cambios (72 h), así que un producto
-  // subido hace más de 3 días en otro dispositivo podía quedarse fuera para
-  // siempre si este dispositivo no abría justo después. Esta lectura es
-  // idempotente (solo agrega lo que falta) y no borra nada local.
-  // Un mínimo de espera (2 min) evita gastar lecturas si el vigía reconecta en
-  // bucle; el botón de sincronización manual fuerza la corrida igual.
+  // Cooldown para no quemar lecturas si el vigía reconecta seguido: se relee
+  // una vez por conexión y como mínimo cada 60 segundos. El botón de
+  // sincronización manual fuerza la corrida aunque haya corrido hace un momento.
   const markKey = 'fs_catalog_pull_' + modo;
   if(!forceAssimilarCatalogo){
     try{
       const done = await kvGet(markKey);
       if(done){
         const parts = String(done).split('@');
-        if(parts[0] === '1' && Number(parts[1] || 0) && (Date.now() - Number(parts[1])) < 2 * 60 * 1000) return;
+        if(parts[0] === '1' && Number(parts[1] || 0) && (Date.now() - Number(parts[1])) < 60 * 1000) return;
       }
     }catch(e){}
   }
   try{
     const snap = await col.get();
     const store = modo === currentModo ? db : loadModoDB(modo);
-    aplicarModoLocal(store, modo);
     if(!store || !Array.isArray(store.productos)) return;
-    const byId = new Map(store.productos.filter(p => p && p.id).map(p => [p.id, p]));
     const tbs = (store.tombstones && store.tombstones.productos) || (db.tombstones || {}).productos;
-    const add = [];
-    let refilled = false;
+    // Catálogo de la nube: uno por id y uno por código. Si hay dos documentos
+    // con el mismo código, se queda el MÁS RECIENTE (determinista: todos los
+    // dispositivos eligen el mismo).
+    const cloudById = new Map();
+    const cloudByCode = new Map();
     snap.docs.forEach(doc => {
       const data = doc.data();
       if(!data || !data.id) return;
@@ -2223,28 +2249,66 @@ async function assimilateCatalogFromCloud(modo){
       if(data.modo && data.modo !== 'manual' && data.modo !== 'electrico') return;
       if(data.modo && data.modo !== modo) return;
       if(tbs && tbs[String(data.id)]) return;
-      const existing = byId.get(data.id);
-      if(existing){
-        // Producto ya presente: se etiqueta con el modo correcto y, si este
-        // dispositivo quedó sin características (por ej. las trajo antes de que
-        // existiera el campo), se rellenan con las de la nube.
-        stampProductoModo(existing, modo);
-        const localCar = String(existing.caracteristicas || '');
-        const cloudCar = String(data.caracteristicas || '');
-        if(cloudCar && !localCar){
-          existing.caracteristicas = cloudCar;
-          refilled = true;
+      const p = cloudProductoToDB(data, modo);
+      cloudById.set(p.id, p);
+      const c = normalize(p.codigo);
+      if(c){
+        const prev = cloudByCode.get(c);
+        if(!prev || (p._updatedAt || 0) >= (prev._updatedAt || 0)) cloudByCode.set(c, p);
+      }
+    });
+    // Si la nube todavía no tiene catálogo (nunca se subió), no hay nada que
+    // adoptar: se deja lo local como está.
+    if(cloudById.size === 0) return;
+    const merged = [];
+    const seen = new Set();
+    let cambios = false;
+    store.productos.forEach(local => {
+      if(!local || local.id == null){ merged.push(local); return; }
+      // Producto de OTRO modo en esta base (datos viejos mezclados): sale de
+      // aquí; vive en su propia colección/modo. Así se deshace el mezclado.
+      if(local.modo === 'manual' || local.modo === 'electrico'){
+        if(local.modo !== modo){ cambios = true; return; }
+      }
+      const c = normalize(local.codigo);
+      const cloud = (c && cloudByCode.get(c)) || cloudById.get(local.id);
+      if(cloud){
+        // La nube ya conoce este producto (mismo código o mismo id): gana el
+        // MÁS RECIENTE. Así un cambio hecho en la compu llega al celular y
+        // viceversa, sin que "el que guarda último" borre al otro.
+        const localTs = local._updatedAt || 0;
+        const cloudTs = cloud._updatedAt || 0;
+        seen.add(cloud.id);
+        seen.add(local.id);
+        if(cloudTs >= localTs){
+          merged.push(cloud);
+          cambios = cambios || cloud.id !== local.id || cloudTs > localTs;
+        }else{
+          merged.push(local);
+          cambios = cambios || localTs > cloudTs;
         }
         return;
       }
-      add.push(cloudProductoToDB(data, modo));
+      // No está en la nube aún (recién creado aquí): se conserva local y se le
+      // pone el modo de esta colección.
+      stampProductoModo(local, modo);
+      merged.push(local);
+      seen.add(local.id);
     });
-    if(add.length || refilled){
-      if(add.length) store.productos = store.productos.concat(add);
-      aplicarModoLocal(store, modo);
-      // Si la nube tenía DOS documentos del mismo código, se deja solo uno.
-      dedupeProductosByCode(store.productos);
+    // Productos que la nube tiene y este dispositivo no: se agregan.
+    cloudByCode.forEach(p => {
+      if(!seen.has(p.id)){ merged.push(p); cambios = true; }
+    });
+    store.productos = merged;
+    aplicarModoLocal(store, modo);
+    // Si la nube tenía dos documentos del mismo código, se deja solo uno (el
+    // mismo en todos los dispositivos, para que el catálogo converja).
+    dedupeProductosByCode(store.productos);
+    if(cambios){
       if(modo === currentModo){
+        // Apunta el catálogo activo al objeto sincronizado ANTES de guardar,
+        // para que coincidan el objeto en memoria y el que se escribe.
+        db = store;
         persistLocalCache();
         rerenderCurrentView();
       }else{
@@ -2253,7 +2317,7 @@ async function assimilateCatalogFromCloud(modo){
       }
     }
     try{ await kvSet(markKey, '1@' + Date.now()); }catch(e){}
-  }catch(e){ if(e && e.code !== 'permission-denied') console.error('Error asimilando catálogo de la nube (' + modo + ')', e); }
+  }catch(e){ if(e && e.code !== 'permission-denied') console.error('Error sincronizando catálogo de la nube (' + modo + ')', e); }
 }
 
 // Activa la persistencia offline UNA sola vez por sesión: las escrituras que

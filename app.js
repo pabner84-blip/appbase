@@ -2299,15 +2299,18 @@ async function assimilateCatalogFromCloud(modo){
         // viceversa, sin que "el que guarda último" borre al otro.
         const localTs = local._updatedAt || 0;
         const cloudTs = cloud._updatedAt || 0;
-        seen.add(cloud.id);
-        seen.add(local.id);
+        // Si este documento de la nube YA fue adoptado por un "gemelo" local con
+        // el mismo código (hubo importaciones repetidas con dos ids distintos),
+        // no se vuelve a agregar: así la lista no se infla con copias.
         if(cloudTs >= localTs){
-          merged.push(cloud);
-          cambios = cambios || cloud.id !== local.id || cloudTs > localTs;
+          if(!seen.has(cloud.id)){ merged.push(cloud); cambios = cambios || cloud.id !== local.id || cloudTs > localTs; }
+          else{ cambios = cambios || cloud.id !== local.id; }
+          seen.add(local.id);
           if(cloud.id !== local.id || cloudTs > localTs) actualizados++;
         }else{
-          merged.push(local);
-          cambios = cambios || localTs > cloudTs;
+          if(!seen.has(local.id)){ merged.push(local); cambios = cambios || localTs > cloudTs; }
+          else{ cambios = cambios || localTs > cloudTs; }
+          seen.add(cloud.id);
           if(localTs > cloudTs) actualizados++;
         }
         return;
@@ -9238,10 +9241,17 @@ function importProductsCSV(file){
             }
           }
           saveDB();
+          // Si el catálogo local arrastraba duplicados (mismo código, dos ids
+          // distintos de importaciones viejas), se deja UNO por producto antes
+          // de subir: así la nube no vuelve a recibir copias.
+          dedupeProductosByCode(db.productos);
           // Sube a la nube TODOS los productos del modo (no solo los recién
           // importados) para que los otros dispositivos reciban el catálogo
           // completo; cada lote se reintenta solo si la red falla.
           await syncProductoDocs(db.productos, modoTarget);
+          // Quita de la nube los documentos repetidos que quedaron de imports
+          // viejos con otros ids (mantenía convergencia a uno por producto).
+          try{ await consolidarNube(modoTarget); }catch(e){}
           renderProductos();
           renderCategorias();
           toast(`Importación en ${MODO_LABELS[modoTarget]}: ${creados} nuevos, ${actualizados} actualizados`, 'success');
@@ -9559,6 +9569,13 @@ async function obtenerUltimaActualizacion(){
     }
   }
   forceAssimilarCatalogo = false; // se consumió con ambos modos
+  // Limpieza de repetidos: si en la nube quedaron productos duplicados de
+  // importaciones viejas, se borran los sobrantes (queda uno por producto).
+  let limpiados = 0;
+  for(const modo of mods){
+    try{ limpiados += await consolidarNube(modo); }catch(e){}
+  }
+  if(limpiados) filas.push('🗑️ Se quitaron ' + limpiados + ' productos repetidos de la nube');
   if(currentModo === 'invitado'){ db = buildGuestDB(); }
   rerenderCurrentView();
   setSyncStatus('synced');
@@ -9566,6 +9583,54 @@ async function obtenerUltimaActualizacion(){
   const el = document.getElementById('syncLastUpdate');
   if(el){ el.textContent = texto; el.style.whiteSpace = 'pre-line'; }
   toast('✅ Actualización recibida', 'success');
+}
+
+// Elimina de la nube los documentos de producto REPETIDOS (mismo código y
+// mismo nombre, pero con dos ids distintos: quedaron de importaciones viejas
+// que creaban un id nuevo por dispositivo). Conserva UN solo documento por
+// producto (el canónico: más reciente, con más datos). Devuelve cuántos borró.
+async function consolidarNube(modo){
+  if(!fbConfigOk()) return 0;
+  const col = fbProductsCol(modo);
+  if(!col) return 0;
+  try{
+    const snap = await col.get();
+    const groups = new Map();
+    snap.docs.forEach(doc => {
+      const data = doc.data() || {};
+      if(!data || !data.id) return;
+      const code = normalize(data.codigo);
+      const name = normalize(data.nombre);
+      if(!code || !name) return;
+      const key = code + '|' + name;
+      const arr = groups.get(key) || [];
+      arr.push({
+        docId: String(data.id),
+        ts: Number(data._updatedAt) || 0,
+        stock: Number(data.stock) || 0,
+        car: String(data.caracteristicas || '').length
+      });
+      groups.set(key, arr);
+    });
+    const borrar = [];
+    groups.forEach(arr => {
+      if(arr.length < 2) return;
+      // El primero tras ordenar es el canónico; el resto son repetidos.
+      arr.sort((a, b) => (b.ts - a.ts) || (b.stock - a.stock) || (b.car - a.car));
+      arr.slice(1).forEach(d => borrar.push(d.docId));
+    });
+    if(!borrar.length) return 0;
+    const fs = firebase.firestore();
+    for(let i = 0; i < borrar.length; i += 450){
+      const batch = fs.batch();
+      borrar.slice(i, i + 450).forEach(docId => batch.delete(col.doc(docId)));
+      await batch.commit();
+    }
+    return borrar.length;
+  }catch(e){
+    if(e && e.code !== 'permission-denied') console.error('Error consolidando la nube (' + modo + ')', e);
+    return 0;
+  }
 }
 
 // Borra TODO lo guardado en ESTE dispositivo (LocalStorage + almacén
@@ -9624,6 +9689,10 @@ async function verificarControlReset(fs){
 // ajustes de los 3 dominios) y deja una marca para que TODOS los demás
 // dispositivos se vacíen solos al abrir. Después vuelve a importar desde cero.
 function resetAllDevices(){
+  if(typeof firebase === 'undefined' || typeof firebaseConfig === 'undefined' || !firebaseConfig.apiKey){
+    toast('Firebase no está disponible (revisa tu conexión a internet)', 'error');
+    return;
+  }
   confirmDialog('Reiniciar TODA la app',
     'Se borrarán PERMANENTEMENTE de la nube:\n' +
     '• Todos los productos de Manuales y Eléctricas\n• Todas las ventas, gastos y ajustes (los 3 dominios)\n' +
@@ -9636,6 +9705,7 @@ function resetAllDevices(){
         async ()=>{
           toast('Vaciando la nube…', 'warning');
           try{
+            if(!firebase.apps || !firebase.apps.length){ firebase.initializeApp(firebaseConfig); }
             const fs = firebase.firestore();
             const ts = Date.now();
             // 1) Marca global ANTES de borrar: los demás dispositivos se vaciarán solos.
@@ -11218,9 +11288,13 @@ function setupEventListeners(){
 
   // Confirm modal
   document.getElementById('confirmAcceptBtn').addEventListener('click', ()=>{
-    if(confirmCallback) confirmCallback();
+    const cb = confirmCallback;
     confirmCallback = null;
     closeAllModals();
+    // Se invoca DESPUÉS de cerrar/limpiar: así un confirmDialoog encadenado
+    // (como "Reiniciar TODA la app", que confirma dos veces) puede reabrir el
+    // modal SIN que se lo vuelva a cerrar ni se pierda su callback.
+    if(cb) cb();
   });
 
   // Escáner

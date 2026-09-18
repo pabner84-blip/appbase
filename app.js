@@ -2284,6 +2284,8 @@ let forceAssimilarCatalogo = false;
 // Modo concreto cuya re-lectura se fuerza aunque esté dentro del cooldown de
 // 60 s (lo usa el aviso de "catálogo cambiado" del documento grande).
 let fuerzaAsimilaModo = null;
+// Evita encolar varios retrasos de la misma lectura completa a la vez.
+let retryEnCola = {};
 
 // Re-lee la colección por producto de UN modo en cuanto llega el aviso de que
 // el dueño cambió el catálogo (campo _catalogRev del documento grande). Así
@@ -2325,6 +2327,12 @@ async function assimilateCatalogFromCloud(modo){
     }catch(e){}
   }
   try{
+    // Este dispositivo ya tuvo su primera sincronización (la marca se pone al
+    // final de cada asimilación). Con ella se distinguen los RESIDUOS locales
+    // (basura de importaciones viejas, que ya no están en la nube) de los
+    // productos creados aquí mismo (que sí hay que conservar y subir).
+    let yaMarcado = false;
+    try{ yaMarcado = !!await kvGet(markKey); }catch(e){}
     const snap = await col.get();
     const store = modo === currentModo ? db : loadModoDB(modo);
     if(!store || !Array.isArray(store.productos)) return null;
@@ -2356,9 +2364,7 @@ async function assimilateCatalogFromCloud(modo){
     //    vaciado del dueño): la nube es la verdad → se adopta el catálogo vacío
     //    para que nadie preserve ni resucite los productos viejos.
     if(cloudById.size === 0){
-      let yaSincronizaba = false;
-      try{ yaSincronizaba = !!await kvGet(markKey); }catch(e){}
-      if(!yaSincronizaba) return null;
+      if(!yaMarcado) return null;
       store.productos = [];
       aplicarModoLocal(store, modo);
       dedupeProductosByCode(store.productos);
@@ -2375,6 +2381,7 @@ async function assimilateCatalogFromCloud(modo){
     }
     const merged = [];
     const seen = new Set();
+    const localesSolo = []; // locales que la nube no conoce (se decide luego)
     let cambios = false;
     let nuevos = 0, actualizados = 0;
     store.productos.forEach(local => {
@@ -2408,12 +2415,33 @@ async function assimilateCatalogFromCloud(modo){
         }
         return;
       }
-      // No está en la nube aún (recién creado aquí): se conserva local y se le
-      // pone el modo de esta colección.
-      stampProductoModo(local, modo);
-      merged.push(local);
-      seen.add(local.id);
+      // No está en la nube: se junta para procesar DESPUÉS del ciclo (así se
+      // puede subir con await y el orden queda determinista).
+      localesSolo.push({ local: local, code: normalize(local.codigo) });
     });
+    // Productos locales que la nube no conoce → decidir su destino:
+    //  • Este dispositivo YA sincronizó: la nube es la verdad. Si parece creado
+    //    aquí hace poco (< 24 h, p. ej. hecho sin conexión) se sube y se
+    //    conserva; si es un RESIDUO viejo (la nube ya lo borró o mezcla de
+    //    modos) se descarta → TODOS terminan con el MISMO catálogo (1467→1387).
+    //  • Nunca sincronizó (arranque): se conserva local como estaba.
+    for(const item of localesSolo){
+      const local = item.local;
+      if(!yaMarcado){
+        stampProductoModo(local, modo);
+        merged.push(local);
+        seen.add(local.id);
+        continue;
+      }
+      const ts = Number(local._updatedAt) || 0;
+      if(ts && ts > Date.now() - 24 * 3600 * 1000){
+        try{ await syncProductoDoc(local, modo); }catch(e){}
+        const copiaNube = (cloudByCode.get(item.code) || cloudById.get(local.id));
+        if(copiaNube && !seen.has(copiaNube.id)){ merged.push(copiaNube); seen.add(copiaNube.id); }
+        else{ stampProductoModo(local, modo); merged.push(local); seen.add(local.id); }
+      }
+      cambios = true; // se subió o se descartó → se persiste
+    }
     // Productos que la nube tiene y este dispositivo no: se agregan.
     cloudByCode.forEach(p => {
       if(!seen.has(p.id)){ merged.push(p); cambios = true; nuevos++; }
@@ -2436,6 +2464,23 @@ async function assimilateCatalogFromCloud(modo){
       }
     }
     try{ await kvSet(markKey, '1@' + Date.now()); }catch(e){}
+    // Si esta lectura encontró productos que antes no estaban, el dueño
+    // todavía estaba subiendo su importación por lotes. Se reprograma UNA
+    // lectura completa ~25 s después: cuando la subida termine, este
+    // dispositivo captura lo que faltaba y converge solo (1210 → 1387).
+    if(nuevos > 0 && !retryEnCola[modo]){
+      retryEnCola[modo] = true;
+      setTimeout(()=>{
+        retryEnCola[modo] = false;
+        fuerzaAsimilaModo = modo;
+        forceAssimilarCatalogo = true;
+        assimilateCatalogFromCloud(modo).catch(()=>{}).finally(()=>{
+          fuerzaAsimilaModo = null;
+          forceAssimilarCatalogo = false;
+          updateSidebarProductCount();
+        });
+      }, 25000);
+    }
     return { modo, nuevos, actualizados };
   }catch(e){
     if(e && e.code !== 'permission-denied') console.error('Error sincronizando catálogo de la nube (' + modo + ')', e);

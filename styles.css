@@ -448,6 +448,9 @@ body.role-guest .nav-item[data-view="pedidos"]{display:none;}
 body.role-guest .nav-pro-group{display:none;}
 body.role-guest .price-guest-hide{display:none;}
 body.role-guest .admin-only{display:none !important;}
+/* En Configuración el invitado VE y USA también los botones del dueño
+   (importar CSV, vaciar catálogo, fotos y zona de riesgo). */
+body.role-guest #view-config .admin-only{display:block !important;}
 
 /* Filtro por mes en Retiros y Deudas */
 .mes-filtro{display:flex; align-items:center; gap:8px; margin-bottom:12px; flex-wrap:wrap;}

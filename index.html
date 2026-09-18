@@ -610,6 +610,9 @@
           <div class="panel-body">
             <p class="hint">Baja los últimos cambios de otros dispositivos (productos, stock, ventas) y sube los de este equipo a Firebase. Ideal para que el invitado reciba las actualizaciones del dueño.</p>
             <button class="btn btn-primary" id="btnManualSync">🔄 Recibir y mandar actualizaciones</button>
+            <button class="btn btn-secondary" id="btnObtenerActualizacion" style="margin-left:8px;">⬇️ Obtener la última actualización</button>
+            <p class="hint" style="margin:8px 0 0;"><strong>Obtener la última actualización</strong> fuerza la bajada completa del catálogo (Manuales y Eléctricas) desde la nube y te dice qué recibiste. <strong>Recibir y mandar</strong> también sube los cambios de este equipo.</p>
+            <p class="hint" style="margin:10px 0 0; white-space:pre-line;" id="syncLastUpdate"></p>
             <p class="hint" style="margin:10px 0 0;" id="manualSyncHint">Si está apagada, esta acción enciende la sincronización de este dispositivo.</p>
           </div>
         </div>
@@ -645,7 +648,9 @@
           <div class="panel-header"><h3>⚠️ Zona de riesgo</h3></div>
           <div class="panel-body">
             <p class="hint">Esto borra todos los productos y categorías guardados en este dispositivo.</p>
-            <button class="btn btn-danger" id="btnFactoryReset">🗑️ Borrar todos los datos</button>
+            <button class="btn btn-danger" id="btnFactoryReset">🗑️ Borrar todos los datos (este dispositivo)</button>
+            <p class="hint" style="margin:12px 0 0;">Reinicio TOTAL: vacía la nube (productos, ventas, gastos y ajustes de los 3 dominios) y marca a TODOS los dispositivos para que también se vacíen al abrir. Úsalo solo para empezar de cero; después vuelve a importar los Excel.</p>
+            <button class="btn btn-danger" id="btnResetAllDevices">☢️ Reiniciar TODA la app (nube + todos los dispositivos)</button>
           </div>
         </div>
       </div>

@@ -170,6 +170,20 @@ function kvGet(key){
   })).catch(() => null);
 }
 
+// Borra TODAS las bases del almacén ampliado (IndexedDB). Necesario para el
+// reinicio total: si quedara una copia vieja, al recargar la app la volvería
+// a leer (primeKVCache) y "resucitaría" los productos que se quieren borrar.
+function kvClearAll(){
+  return openKV().then(d => new Promise((resolve, reject) => {
+    try{
+      const tx = d.transaction(KV_STORE, 'readwrite');
+      tx.objectStore(KV_STORE).clear();
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    }catch(e){ reject(e); }
+  })).catch(err => { console.warn('No se pudo limpiar el almacén ampliado', err); });
+}
+
 const blobCache = {}; // espejo en memoria de las bases guardadas (útil cuando el LocalStorage está lleno)
 
 // Al arrancar, precarga en memoria (blobCache) todo lo de IndexedDB. Así
@@ -789,7 +803,7 @@ function disconnectGuestFirebase(){
 // En modo invitado conecta a Firestore: escucha los documentos de Manuales y
 // Eléctricas (solo para catálogo/productos) y también el documento propio del
 // invitado (ventas/gastos/finanzas). Cada uno se mantiene aislado.
-function connectGuestFirebase(){
+async function connectGuestFirebase(){
   if(!firebaseToggleOn()){
     setSyncStatus('local'); // el usuario apagó la sincronización en este dispositivo
     return;
@@ -805,6 +819,9 @@ function connectGuestFirebase(){
     if(!firebase.apps || !firebase.apps.length){ firebase.initializeApp(firebaseConfig); }
     const fbFirestore = firebase.firestore();
     enableOfflinePersistence(fbFirestore); // no bloquea la conexión
+    // Si el dueño reinició TODA la app desde otro dispositivo, este se vacía
+    // y recarga SOLO, ANTES de volver a subir datos viejos a la nube.
+    if(await verificarControlReset(fbFirestore)) return;
     setSyncStatus('connecting');
     // 1) Escucha documentos de Manuales y Eléctricas (solo para catálogo/productos)
     ['manual','electrico'].forEach(modo => {
@@ -1099,6 +1116,9 @@ async function connectFirebase(){
     if(!firebase.apps || !firebase.apps.length){ firebase.initializeApp(firebaseConfig); }
     const fbFirestore = firebase.firestore();
     await withTimeout(enableOfflinePersistence(fbFirestore), 5000);
+    // Si el dueño reinició TODA la app desde otro dispositivo, este se vacía
+    // y recarga SOLO, ANTES de volver a subir datos viejos a la nube.
+    if(await verificarControlReset(fbFirestore)) return;
     fbDocRef = fbFirestore.collection('stockferre').doc(firebaseDocId());
     fbReady = true;
 
@@ -2217,7 +2237,7 @@ let forceAssimilarCatalogo = false;
 //     ejemplar en todos los dispositivos (el más reciente / el "mejor").
 async function assimilateCatalogFromCloud(modo){
   const col = fbProductsCol(modo);
-  if(!col) return;
+  if(!col) return null;
   // Cooldown para no quemar lecturas si el vigía reconecta seguido: se relee
   // una vez por conexión y como mínimo cada 60 segundos. El botón de
   // sincronización manual fuerza la corrida aunque haya corrido hace un momento.
@@ -2227,14 +2247,14 @@ async function assimilateCatalogFromCloud(modo){
       const done = await kvGet(markKey);
       if(done){
         const parts = String(done).split('@');
-        if(parts[0] === '1' && Number(parts[1] || 0) && (Date.now() - Number(parts[1])) < 60 * 1000) return;
+        if(parts[0] === '1' && Number(parts[1] || 0) && (Date.now() - Number(parts[1])) < 60 * 1000) return null;
       }
     }catch(e){}
   }
   try{
     const snap = await col.get();
     const store = modo === currentModo ? db : loadModoDB(modo);
-    if(!store || !Array.isArray(store.productos)) return;
+    if(!store || !Array.isArray(store.productos)) return null;
     const tbs = (store.tombstones && store.tombstones.productos) || (db.tombstones || {}).productos;
     // Catálogo de la nube: uno por id y uno por código. Si hay dos documentos
     // con el mismo código, se queda el MÁS RECIENTE (determinista: todos los
@@ -2259,10 +2279,11 @@ async function assimilateCatalogFromCloud(modo){
     });
     // Si la nube todavía no tiene catálogo (nunca se subió), no hay nada que
     // adoptar: se deja lo local como está.
-    if(cloudById.size === 0) return;
+    if(cloudById.size === 0) return null;
     const merged = [];
     const seen = new Set();
     let cambios = false;
+    let nuevos = 0, actualizados = 0;
     store.productos.forEach(local => {
       if(!local || local.id == null){ merged.push(local); return; }
       // Producto de OTRO modo en esta base (datos viejos mezclados): sale de
@@ -2283,9 +2304,11 @@ async function assimilateCatalogFromCloud(modo){
         if(cloudTs >= localTs){
           merged.push(cloud);
           cambios = cambios || cloud.id !== local.id || cloudTs > localTs;
+          if(cloud.id !== local.id || cloudTs > localTs) actualizados++;
         }else{
           merged.push(local);
           cambios = cambios || localTs > cloudTs;
+          if(localTs > cloudTs) actualizados++;
         }
         return;
       }
@@ -2297,7 +2320,7 @@ async function assimilateCatalogFromCloud(modo){
     });
     // Productos que la nube tiene y este dispositivo no: se agregan.
     cloudByCode.forEach(p => {
-      if(!seen.has(p.id)){ merged.push(p); cambios = true; }
+      if(!seen.has(p.id)){ merged.push(p); cambios = true; nuevos++; }
     });
     store.productos = merged;
     aplicarModoLocal(store, modo);
@@ -2317,7 +2340,11 @@ async function assimilateCatalogFromCloud(modo){
       }
     }
     try{ await kvSet(markKey, '1@' + Date.now()); }catch(e){}
-  }catch(e){ if(e && e.code !== 'permission-denied') console.error('Error sincronizando catálogo de la nube (' + modo + ')', e); }
+    return { modo, nuevos, actualizados };
+  }catch(e){
+    if(e && e.code !== 'permission-denied') console.error('Error sincronizando catálogo de la nube (' + modo + ')', e);
+    return null;
+  }
 }
 
 // Activa la persistencia offline UNA sola vez por sesión: las escrituras que
@@ -9434,29 +9461,45 @@ function importFotosProductos(file){
 // mezclados productos del otro modo. Ventas, compras, gastos e historial NO
 // se tocan.
 function vaciarCatalogo(){
-  if(currentRole === 'guest'){ toast('Los invitados no pueden vaciar el catálogo', 'error'); return; }
-  const nombre = currentModo === 'electrico' ? 'Eléctricas' : 'Manuales';
-  confirmDialog('Vaciar catálogo del modo ' + nombre,
+  // En invitado se vacían LOS DOS catálogos (Manuales y Eléctricas), porque el
+  // invitado los ve combinados. En manual/electrico solo el modo actual.
+  const modos = (currentModo === 'invitado') ? ['manual', 'electrico'] : [currentModo];
+  const nombre = currentModo === 'invitado'
+    ? 'Manuales y Eléctricas'
+    : (currentModo === 'electrico' ? 'Eléctricas' : 'Manuales');
+  confirmDialog('Vaciar catálogo ' + (currentModo === 'invitado' ? 'de Manuales y Eléctricas' : 'del modo ' + nombre),
     '¿Estás seguro de vaciar todos los productos de ' + nombre + '?\n\nSe eliminarán TODOS los productos y categorías de ' + nombre + ' (en este dispositivo y en la nube). Ventas, compras, gastos e historial NO se tocan. Esta acción no se puede deshacer.',
     ()=>{
-      const ids = (db.productos || []).map(p => p.id);
-      ids.forEach(id => marcarBorrado('productos', id)); // el vaciado viaja a los otros dispositivos
-      db.productos = [];
-      db.categorias = [];
-      saveDB(); // sube el catálogo vacío (con las tumbas) a la nube
-      vaciarProductosNube(ids); // borra también los documentos de producto de la nube
-      ids.forEach(id => removeImageLocal(id)); // quita las fotos locales de esos productos
+      modos.forEach(modo => {
+        const store = modo === currentModo ? db : loadModoDB(modo);
+        const ids = (store.productos || []).map(p => p.id);
+        ids.forEach(id => { // el vaciado viaja a los otros dispositivos (tumba)
+          store.tombstones = store.tombstones || {};
+          store.tombstones.productos = store.tombstones.productos || {};
+          store.tombstones.productos[String(id)] = Date.now();
+        });
+        store.productos = [];
+        store.categorias = [];
+        if(modo === currentModo){
+          saveDB(); // sube el catálogo vacío (con las tumbas) a la nube
+        }else{
+          persistModoDB(modo, store); // baja el otro modo y lo sube vacío
+        }
+        vaciarProductosNube(ids, modo); // borra también los documentos de producto de la nube
+        try{ ids.forEach(id => removeImageLocal(id)); }catch(e){}
+      });
+      if(currentModo === 'invitado'){ db = buildGuestDB(); rerenderCurrentView(); }
       renderProductos();
       renderCategorias();
       renderInventario();
       document.getElementById('scanResult').innerHTML = '';
-      toast('Catálogo de ' + nombre + ' vaciado. Reimporta el Excel de ' + nombre, 'success');
+      toast('Catálogo de ' + nombre + ' vaciado. Reimporta el/los Excel de ' + nombre, 'success');
     });
 }
 
-// Borra de la nube los documentos de producto del modo actual (en lotes).
-async function vaciarProductosNube(ids){
-  const col = fbProductsCol(currentModo);
+// Borra de la nube los documentos de producto de un modo (en lotes).
+async function vaciarProductosNube(ids, modo){
+  const col = fbProductsCol(modo || currentModo);
   if(!col || !fbConfigOk() || !ids || !ids.length) return;
   try{
     const fs = firebase.firestore();
@@ -9483,6 +9526,146 @@ function factoryReset(){
     document.getElementById('scanResult').innerHTML = '';
     toast('Datos borrados', 'success');
   });
+}
+
+// Botón "Obtener la última actualización": fuerza la bajada COMPLETA del
+// catálogo desde la nube (colección por producto de cada modo) y le dice al
+// dueño qué recibió, aunque haya sido hace un momento.
+async function obtenerUltimaActualizacion(){
+  if(!fbConfigOk()){
+    toast('El SDK de Firebase no cargó (revisa tu conexión a internet)', 'error');
+    return;
+  }
+  const mods = currentModo === 'invitado'
+    ? ['manual', 'electrico']
+    : [currentModo, currentModo === 'manual' ? 'electrico' : 'manual'];
+  forceAssimilarCatalogo = true;
+  setSyncStatus('connecting');
+  const filas = [];
+  for(const modo of mods){
+    try{
+      const r = await assimilateCatalogFromCloud(modo);
+      if(r){
+        const partes = [];
+        if(r.nuevos) partes.push('+' + r.nuevos + ' nuevos');
+        if(r.actualizados) partes.push(r.actualizados + ' actualizados');
+        filas.push(MODO_LABELS[modo] + ': ' + (partes.length ? partes.join(', ') : 'sin cambios'));
+      }else{
+        filas.push(MODO_LABELS[modo] + ': sin cambios');
+      }
+    }catch(e){
+      console.error('Error obteniendo la última actualización (' + modo + ')', e);
+      filas.push(MODO_LABELS[modo] + ': error');
+    }
+  }
+  forceAssimilarCatalogo = false; // se consumió con ambos modos
+  if(currentModo === 'invitado'){ db = buildGuestDB(); }
+  rerenderCurrentView();
+  setSyncStatus('synced');
+  const texto = '🔄 Última actualización recibida:\n' + filas.join('\n');
+  const el = document.getElementById('syncLastUpdate');
+  if(el){ el.textContent = texto; el.style.whiteSpace = 'pre-line'; }
+  toast('✅ Actualización recibida', 'success');
+}
+
+// Borra TODO lo guardado en ESTE dispositivo (LocalStorage + almacén
+// ampliado + imágenes). Se usa para el reinicio total.
+function borrarTodoLocal(){
+  try{
+    const prefijos = ['stockferre', 'fs_', 'fs-', 'inventario_', 'inv_'];
+    Object.keys(localStorage).forEach(k => {
+      if(k === 'fs_reset_ts') return; // la marca del reinicio se conserva
+      const kl = k.toLowerCase();
+      if(prefijos.some(p => kl.indexOf(p) === 0)) localStorage.removeItem(k);
+    });
+  }catch(e){ console.error('Error limpiando LocalStorage', e); }
+  try{ Object.keys(blobCache).forEach(k => { delete blobCache[k]; }); }catch(e){}
+  try{ kvClearAll(); }catch(e){}
+  try{ clearAllImages(); }catch(e){}
+}
+
+// Vacía UNA colección de Firestore completo (borra documento por documento,
+// en lotes y repetidas veces por si otro dispositivo añade más mientras tanto).
+async function vaciarColeccion(col, fs, maxVueltas){
+  if(!col) return;
+  for(let v = 0; v < (maxVueltas || 30); v++){
+    let snap = null;
+    try{ snap = await withTimeout(col.limit(450).get(), 15000); }catch(e){ return; }
+    if(snap.empty) return;
+    const batch = fs.batch();
+    snap.docs.forEach(d => batch.delete(d.ref));
+    try{ await batch.commit(); }catch(e){ /* otro reintento */ }
+  }
+}
+
+// Revisa si el dueño reinició TODA la app desde otro dispositivo: la marca
+// queda en stockferre/control. Si es más nueva que la que este dispositivo ya
+// aplicó, borra lo local y recarga. Devuelve true si se aplicó el reinicio.
+async function verificarControlReset(fs){
+  try{
+    const snap = await withTimeout(fs.collection('stockferre').doc('control').get(), 8000);
+    if(!snap.exists) return false;
+    const reset = snap.data() && snap.data().reset;
+    if(!reset || !reset.ts) return false;
+    let aplicado = 0;
+    try{ aplicado = Number(localStorage.getItem('fs_reset_ts') || 0) || 0; }catch(e){}
+    if(reset.ts > aplicado){
+      borrarTodoLocal();
+      try{ localStorage.setItem('fs_reset_ts', String(reset.ts)); }catch(e){}
+      toast('🔄 El dueño reinició la app: aquí también quedó vacía. Importa los Excel de nuevo.', 'warning');
+      setTimeout(()=>{ try{ location.reload(); }catch(e){} }, 1500);
+      return true;
+    }
+  }catch(e){}
+  return false;
+}
+
+// Botón "Reiniciar TODA la app": borra la nube (catálogos, ventas, gastos,
+// ajustes de los 3 dominios) y deja una marca para que TODOS los demás
+// dispositivos se vacíen solos al abrir. Después vuelve a importar desde cero.
+function resetAllDevices(){
+  confirmDialog('Reiniciar TODA la app',
+    'Se borrarán PERMANENTEMENTE de la nube:\n' +
+    '• Todos los productos de Manuales y Eléctricas\n• Todas las ventas, gastos y ajustes (los 3 dominios)\n' +
+    '• Los datos locales de TODOS los dispositivos\n\n' +
+    'Ningún equipo volverá a mostrar nada hasta que importes los Excel de nuevo.\n¿Continuar?',
+    ()=>{
+      confirmDialog('ÚLTIMA CONFIRMACIÓN',
+        'No hay manera de deshacer esto. Todo el historial de ventas se pierde.\n\n' +
+        'Si estás 100% seguro, pulsa Confirmar.',
+        async ()=>{
+          toast('Vaciando la nube…', 'warning');
+          try{
+            const fs = firebase.firestore();
+            const ts = Date.now();
+            // 1) Marca global ANTES de borrar: los demás dispositivos se vaciarán solos.
+            await fs.collection('stockferre').doc('control').set({
+              reset: { ts, por: currentModo }
+            }, { merge: true });
+            // 2) Vacía las colecciones por producto, ventas, ajustes y gastos.
+            const fsInstance = fs;
+            const borrados = [
+              'stockferre_productos_manual','stockferre_productos_electrico',
+              'stockferre_ventas_manual','stockferre_ventas_electrico','stockferre_ventas_invitado',
+              'stockferre_ajustes_manual','stockferre_ajustes_electrico','stockferre_ajustes_invitado',
+              'stockferre_gastos_manual','stockferre_gastos_electrico','stockferre_gastos_invitado'
+            ].map(c => vaciarColeccion(fs.collection(c), fsInstance));
+            try{ await withTimeout(Promise.all(borrados), 30000); }catch(e){} 
+            // 3) Borra los documentos consolidados de los 3 dominios.
+            ['inventario_manual','inventario_electrico','inventario_invitado'].forEach(docId=>{
+              try{ fs.collection('stockferre').doc(docId).delete().catch(()=>{}); }catch(e){}
+            });
+            // 4) Este dispositivo queda marcado para no reaccionar a su propia marca.
+            try{ localStorage.setItem('fs_reset_ts', String(ts)); }catch(e){}
+            borrarTodoLocal();
+            toast('✅ Nube vaciada. Este dispositivo se reinicia…', 'success');
+            setTimeout(()=>{ try{ location.reload(); }catch(e){} }, 1500);
+          }catch(err){
+            console.error('Error reiniciando la app', err);
+            toast('No se pudo vaciar la nube (revisa tu conexión)', 'error');
+          }
+        });
+    });
 }
 
 /* -------------------------------------------------------------------------
@@ -11673,6 +11856,10 @@ function setupEventListeners(){
     e.target.value = '';
   });
   document.getElementById('btnManualSync').addEventListener('click', manualSync);
+  const btnAct = document.getElementById('btnObtenerActualizacion');
+  if(btnAct){ btnAct.addEventListener('click', obtenerUltimaActualizacion); }
+  const btnResetAll = document.getElementById('btnResetAllDevices');
+  if(btnResetAll){ btnResetAll.addEventListener('click', resetAllDevices); }
   document.getElementById('btnVaciarCatalogo').addEventListener('click', vaciarCatalogo);
   document.getElementById('btnFactoryReset').addEventListener('click', factoryReset);
 }

@@ -35,14 +35,8 @@ set "HASNODE="
 where node >nul 2>nul && set "HASNODE=1"
 
 if defined HASNODE (
-  rem Si el servidor local ya está corriendo (portfolio 8765), NO abrir otro:
-  rem dos instancias de node pelean por el mismo puerto.
-  set "ALREADYUP="
-  curl -s http://localhost:8765/api/ping >nul 2>nul && set "ALREADYUP=1"
-  if not defined ALREADYUP (
-    start "TIENDA 1 - Servidor" /min node "%~dp0server.js"
-    timeout /t 2 /nobreak >nul
-  )
+  start "TIENDA 1 - Servidor" /min node "%~dp0server.js"
+  timeout /t 2 /nobreak >nul
   if defined NAV (
     start "" "%NAV%" --app=http://localhost:8765
   ) else (

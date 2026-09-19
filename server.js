@@ -27,13 +27,13 @@ function decodeEntities(s) {
 // Descarga una página (viaja con el User-Agent de navegador, sigue redirecciones)
 // y extrae los metadatos del producto: <title>, og:title, og:image (+dimensiones)
 // y las imágenes declaradas en los datos estructurados JSON-LD.
-async function fetchPageInfo(url) {
+async function fetchPageInfo(url, codigoParam) {
   const resp = await fetch(url, {
     headers: { 'User-Agent': UA, 'Accept': 'text/html,application/xhtml+xml', 'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8' },
     redirect: 'follow',
     signal: AbortSignal.timeout(15000)
   });
-  if (resp.status !== 200 && resp.status !== 404) throw new Error('Page HTTP ' + resp.status);
+  if (!resp.ok && resp.status !== 200 && resp.status !== 404) throw new Error('Page HTTP ' + resp.status);
   const html = await resp.text();
   const finalUrl = resp.url;
 
@@ -55,6 +55,11 @@ async function fetchPageInfo(url) {
   ogWidth = parseInt(metaProps['og:image:width'], 10) || 0;
   ogHeight = parseInt(metaProps['og:image:height'], 10) || 0;
   if (!ogImage) ogImage = decodeEntities(metaProps['image']);
+
+  // <head> completo (title, metas, JSON-LD) para detección del código sin ruido
+  // del cuerpo de la página (listados de otros productos, JS, facturas...).
+  const headMatch = html.match(/<head[^>]*>([\s\S]*?)<\/head>/i);
+  const headHtml = headMatch ? headMatch[1] : html.slice(0, 200000);
 
   const images = [];
   if (ogImage) images.push(ogImage);
@@ -111,9 +116,17 @@ async function fetchPageInfo(url) {
     return true;
   }).map(i => new URL(i, finalUrl).toString());
 
-  // NOTA: NO se usa "código en el <head>" como evidencia (ver app.js): en
-  // sitios como Truper el <head> incluye listas de varios productos con todos
-  // sus códigos, lo que confirmaba páginas de productos DISTINTOS al buscado.
+  // ¿Aparece el código como palabra completa en el <head> (title, metas, JSON-LD)?
+  let codeInHead = false;
+  if (codigoParam) {
+    const c = String(codigoParam).trim().toLowerCase();
+    if (c) {
+      try {
+        const headText = decodeEntities(headHtml).toLowerCase();
+        codeInHead = (' ' + headText.replace(/[^a-z0-9]+/g, ' ') + ' ').indexOf(' ' + c + ' ') !== -1;
+      } catch (e) { codeInHead = false; }
+    }
+  }
 
   const sku = jldSku || jldMpn || jldModel;
 
@@ -131,7 +144,8 @@ async function fetchPageInfo(url) {
     modelo: jldModel,
     marcaJld: jldBrand,
     nombreJld: jldName,
-    descripcion: decodeEntities(metaProps['description'] || metaProps['og:description'])
+    descripcion: decodeEntities(metaProps['description'] || metaProps['og:description']),
+    codeInHead
   };
 }
 
@@ -375,13 +389,14 @@ const server = http.createServer(async (req, res) => {
 
   if (reqUrl.pathname === '/api/product-page') {
     const target = reqUrl.searchParams.get('url') || '';
+    const codigo = (reqUrl.searchParams.get('codigo') || '').trim();
     if (!target || !/^https?:\/\//i.test(target)) {
       res.writeHead(400, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'Invalid url' }));
       return;
     }
     try {
-      const info = await fetchPageInfo(target);
+      const info = await fetchPageInfo(target, codigo);
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(info));
     } catch (e) {

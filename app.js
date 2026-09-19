@@ -170,20 +170,6 @@ function kvGet(key){
   })).catch(() => null);
 }
 
-// Borra TODAS las bases del almacén ampliado (IndexedDB). Necesario para el
-// reinicio total: si quedara una copia vieja, al recargar la app la volvería
-// a leer (primeKVCache) y "resucitaría" los productos que se quieren borrar.
-function kvClearAll(){
-  return openKV().then(d => new Promise((resolve, reject) => {
-    try{
-      const tx = d.transaction(KV_STORE, 'readwrite');
-      tx.objectStore(KV_STORE).clear();
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error);
-    }catch(e){ reject(e); }
-  })).catch(err => { console.warn('No se pudo limpiar el almacén ampliado', err); });
-}
-
 const blobCache = {}; // espejo en memoria de las bases guardadas (útil cuando el LocalStorage está lleno)
 
 // Al arrancar, precarga en memoria (blobCache) todo lo de IndexedDB. Así
@@ -329,67 +315,6 @@ function mejorProducto(a, b){
   return a;
 }
 
-/* -------------------------------------------------------------------------
-   ETIQUETA DE MODO EN CADA PRODUCTO (evita mezclar Manuales y Eléctricas)
-   Cada producto lleva p.modo ('manual' o 'electrico') para saber a qué listado
-   pertenece. Al cargar una base, fusionar con la nube, importar un Excel o
-   recibir productos de otro dispositivo, los productos de OTRO modo se
-   descartan de esa base: Manuales solo muestra manuales y Eléctricas solo
-   eléctricas. Los productos sin etiqueta (bases viejas de un solo listado o
-   nube anterior) se asumen del modo que los está cargando y se etiquetan.
-   ------------------------------------------------------------------------- */
-function stampProductoModo(p, modo){
-  if(p && typeof p === 'object'){
-    if(p.modo !== 'manual' && p.modo !== 'electrico'){
-      p.modo = (modo === 'manual' || modo === 'electrico') ? modo : p.modo;
-    }
-  }
-  return p;
-}
-
-// ---- Regla de autoridad (modelo FLEXIBLE) ----
-// currentRole: 'admin' = dueño, 'guest' = invitado. El dueño escribe todo; un
-// invitado SOLO puede crear productos nuevos (etiquetados con su dispositivo),
-// editar los que él creó y ajustar stock. NUNCA re-subir un catálogo completo.
-function esInvitadoActual(){ return currentRole === 'guest'; }
-function idDispositivo(){
-  try{
-    let d = localStorage.getItem('stockferre_device_id');
-    if(!d){ d = 'id-' + Math.random().toString(36).slice(2, 10); localStorage.setItem('stockferre_device_id', d); }
-    return d;
-  }catch(e){ return 'id-' + Math.random().toString(36).slice(2, 10); }
-}
-function etiquetaCreadorInvitado(){ return 'invitado-' + idDispositivo(); }
-// La etiqueta _creadoPor que llevará un producto al subirse a la nube.
-function etiquetaCreadorParaNube(p){
-  if(p && p._creadoPor && /^invitado-/.test(String(p._creadoPor))) return p._creadoPor;
-  return esInvitadoActual() ? etiquetaCreadorInvitado() : 'dueno';
-}
-// Resuelve la colección de productos correcta para un documento. Un invitado
-// no escribe en "stockferre_productos_invitado" (no existe): sus productos
-// nuevos van a Manuales o Eléctricas según la "Línea" elegida en el formulario.
-function colModoParaProducto(p, modo){
-  if(modo === 'manual' || modo === 'electrico') return modo;
-  if(p && (p.modo === 'manual' || p.modo === 'electrico')) return p.modo;
-  if(currentModo === 'manual' || currentModo === 'electrico') return currentModo;
-  return 'manual';
-}
-
-// Filtra los productos de una base para que queden SOLO los del modo indicado.
-// En modo invitado no filtra nada (su catálogo combina ambos modos a propósito).
-function aplicarModoLocal(dbObj, modo){
-  if(!dbObj || !Array.isArray(dbObj.productos)) return dbObj;
-  if(modo !== 'manual' && modo !== 'electrico') return dbObj;
-  const keep = [];
-  dbObj.productos.forEach(p => {
-    if(!p || p.id == null){ keep.push(p); return; }
-    if(p.modo !== 'manual' && p.modo !== 'electrico') p.modo = modo;
-    if(p.modo === modo) keep.push(p);
-  });
-  dbObj.productos = keep;
-  return dbObj;
-}
-
 // Trae de la nube el mapa código -> id de los documentos de producto de un
 // modo. Se usa justo antes de crear productos (imports, backfill) para
 // REUTILIZAR el documento que ya existe con ese código y no crear duplicados.
@@ -427,9 +352,9 @@ function loadDB(){
     if(!raw && currentModo === 'manual'){
       raw = localStorage.getItem(LEGACY_STORAGE_KEY); // migración única
     }
-    if(raw){ db = aplicarModoLocal(normalizeDB(JSON.parse(raw)), currentModo); persistLocalCache(); }
-    else { db = aplicarModoLocal(defaultDB(), currentModo); persistLocalCache(); }
-  }catch(e){ console.error('Error leyendo LocalStorage', e); db = aplicarModoLocal(defaultDB(), currentModo); persistLocalCache(); }
+    if(raw){ db = normalizeDB(JSON.parse(raw)); persistLocalCache(); }
+    else { db = defaultDB(); persistLocalCache(); }
+  }catch(e){ console.error('Error leyendo LocalStorage', e); db = defaultDB(); persistLocalCache(); }
 
   // Si el localStorage estaba lleno, la copia real quedó en IndexedDB; cuando
   // esta esté disponible se aplica la más reciente de las dos.
@@ -441,7 +366,7 @@ function loadDB(){
         const a = typeof parsed._savedAt === 'number' ? parsed._savedAt : 0;
         const b = db && typeof db._savedAt === 'number' ? db._savedAt : 0;
         if(a > b){
-          db = aplicarModoLocal(normalizeDB(parsed), currentModo);
+          db = normalizeDB(parsed);
           persistLocalCache();
           if(typeof rerenderCurrentView === 'function') rerenderCurrentView();
         }
@@ -545,10 +470,6 @@ function finishQueuedWrite(docId, ref, toSend){
 }
 
 function saveDB(){
-  // Red de seguridad: antes de guardar, la base del modo solo lleva sus
-  // productos (nunca se filtra a un modo la lista del otro). En modo invitado
-  // no se toca su catálogo combinado.
-  if(currentModo === 'manual' || currentModo === 'electrico') aplicarModoLocal(db, currentModo);
   persistLocalCache();
   // Sube SIEMPRE que Firebase esté configurado (no hace falta esperar a que
   // "fbReady" termine de arrancar): si la conexión todavía no está lista, la
@@ -560,13 +481,7 @@ function saveDB(){
     try{
       if(!firebase.apps || !firebase.apps.length){ firebase.initializeApp(firebaseConfig); }
       const ref = fbDocRef || firebase.firestore().collection('stockferre').doc(firebaseDocId());
-      // IMPORTANTE: el documento grande NO lleva los productos. Con un catálogo
-      // grande (miles de artículos) ese documento pasaba 1 MiB, Firestore
-      // rechazaba la escritura y la app se quedaba pegada en "Conectando a
-      // Firebase..." sin que los productos llegaran a los otros dispositivos.
-      // Ahora el catálogo de productos vive en la colección por producto
-      // (stockferre_productos_<modo>), que cada dispositivo lee completa.
-      const { historialEscaneos, historialBusquedas, historialInventario, ventas, ajustes, gastosPrestamos, productos, ...syncData } = db;
+      const { historialEscaneos, historialBusquedas, historialInventario, ventas, ajustes, gastosPrestamos, ...syncData } = db;
       scheduleFirestoreWrite(firebaseDocId(), ref, syncData);
     }catch(err){
       console.error('Error guardando en Firebase', err);
@@ -593,13 +508,13 @@ function loadModoDB(modo){
   let raw = null;
   try{ raw = localStorage.getItem('stockferre_catalogo_v1_' + modo); }catch(e){}
   if(!raw && modo === 'manual'){ try{ raw = localStorage.getItem(LEGACY_STORAGE_KEY); }catch(e){} }
-  if(raw){ try{ return aplicarModoLocal(normalizeDB(JSON.parse(raw)), modo); }catch(e){ return defaultDB(); } }
+  if(raw){ try{ return normalizeDB(JSON.parse(raw)); }catch(e){ return defaultDB(); } }
   // LocalStorage lleno o vacío: la copia real puede estar en el almacén ampliado
   // (IndexedDB), precargada en memoria por primeKVCache() al arrancar.
   const cached = blobCache['stockferre_catalogo_v1_' + modo];
-  if(cached){ try{ return aplicarModoLocal(normalizeDB(cached), modo); }catch(e){} }
+  if(cached){ try{ return normalizeDB(cached); }catch(e){} }
   if(modo === 'manual' && blobCache[LEGACY_STORAGE_KEY]){
-    try{ return aplicarModoLocal(normalizeDB(blobCache[LEGACY_STORAGE_KEY]), modo); }catch(e){}
+    try{ return normalizeDB(blobCache[LEGACY_STORAGE_KEY]); }catch(e){}
   }
   return defaultDB();
 }
@@ -659,9 +574,7 @@ function persistModoDB(modo, dbObj){
     try{
       if(!firebase.apps || !firebase.apps.length){ firebase.initializeApp(firebaseConfig); }
       const ref = firebase.firestore().collection('stockferre').doc('inventario_' + modo);
-      // Igual que saveDB: los productos NO van en el documento grande (ver nota
-      // ahí); el catálogo vive en la colección por producto.
-      const { historialEscaneos, historialBusquedas, historialInventario, ventas, ajustes, gastosPrestamos, productos, ...syncData } = dbObj;
+      const { historialEscaneos, historialBusquedas, historialInventario, ventas, ajustes, gastosPrestamos, ...syncData } = dbObj;
       scheduleFirestoreWrite('inventario_' + modo, ref, syncData);
     }catch(err){
       console.error('Error guardando en Firebase', err);
@@ -765,14 +678,9 @@ function applyTombstones(list, map){
 // incluir cambios recién hechos aquí) con una copia REMOTA que acaba de
 // llegar de Firebase. Devuelve una base combinada que no pierde datos de
 // ningún lado.
-function mergeRemoteIntoLocal(local, remote, modo){
-  // Filtra por modo ANTES de deduplicar: si la nube trae un producto de otro
-  // modo, no entra a esta base ni participa del merge (Manuales/Eléctricas
-  // nunca se mezclan).
-  local = aplicarModoLocal(Object.assign({}, local || defaultDB()), modo);
-  remote = aplicarModoLocal(Object.assign({}, remote || defaultDB()), modo);
-  local = normalizeDB(local);
-  remote = normalizeDB(remote);
+function mergeRemoteIntoLocal(local, remote){
+  local = normalizeDB(Object.assign({}, local || defaultDB()));
+  remote = normalizeDB(Object.assign({}, remote || defaultDB()));
   const merged = Object.assign({}, remote);
   merged.productos = mergeById(local.productos, remote.productos, '_updatedAt');
   merged.categorias = Array.from(new Set(
@@ -831,7 +739,7 @@ function disconnectGuestFirebase(){
 // En modo invitado conecta a Firestore: escucha los documentos de Manuales y
 // Eléctricas (solo para catálogo/productos) y también el documento propio del
 // invitado (ventas/gastos/finanzas). Cada uno se mantiene aislado.
-async function connectGuestFirebase(){
+function connectGuestFirebase(){
   if(!firebaseToggleOn()){
     setSyncStatus('local'); // el usuario apagó la sincronización en este dispositivo
     return;
@@ -847,9 +755,6 @@ async function connectGuestFirebase(){
     if(!firebase.apps || !firebase.apps.length){ firebase.initializeApp(firebaseConfig); }
     const fbFirestore = firebase.firestore();
     enableOfflinePersistence(fbFirestore); // no bloquea la conexión
-    // Si el dueño reinició TODA la app desde otro dispositivo, este se vacía
-    // y recarga SOLO, ANTES de volver a subir datos viejos a la nube.
-    if(await verificarControlReset(fbFirestore)) return;
     setSyncStatus('connecting');
     // 1) Escucha documentos de Manuales y Eléctricas (solo para catálogo/productos)
     ['manual','electrico'].forEach(modo => {
@@ -857,32 +762,26 @@ async function connectGuestFirebase(){
       withTimeout(ref.get(), 12000).then(snap=>{
         if(snap && snap.exists){
           const prev = loadModoDB(modo);
-          const prevRev = (prev && prev._catalogRev) || 0;
           const remote = normalizeDB(snap.data());
-          const merged = mergeRemoteIntoLocal(prev, remote, modo);
+          const merged = mergeRemoteIntoLocal(prev, remote);
           merged.historialEscaneos = prev.historialEscaneos;
           merged.historialBusquedas = prev.historialBusquedas;
           merged.historialInventario = prev.historialInventario;
           persistBlob('stockferre_catalogo_v1_' + modo, merged);
           if(currentModo === 'invitado'){ db = buildGuestDB(); rerenderCurrentView(); }
-          const newRev = (remote && remote._catalogRev) || 0;
-          if(newRev > prevRev) reasimilarModoAhora(modo);
         }
       }).catch(()=>{ /* local sigue funcionando */ });
       const unsub = ref.onSnapshot(snap=>{
         if(snap.metadata.hasPendingWrites) return;
         if(!snap.exists) return;
         const prev = loadModoDB(modo);
-        const prevRev = (prev && prev._catalogRev) || 0;
         const remote = normalizeDB(snap.data());
-        const merged = mergeRemoteIntoLocal(prev, remote, modo);
+        const merged = mergeRemoteIntoLocal(prev, remote);
         merged.historialEscaneos = prev.historialEscaneos;
         merged.historialBusquedas = prev.historialBusquedas;
         merged.historialInventario = prev.historialInventario;
         persistBlob('stockferre_catalogo_v1_' + modo, merged);
         if(currentModo === 'invitado'){ db = buildGuestDB(); rerenderCurrentView(); }
-        const newRev = (remote && remote._catalogRev) || 0;
-        if(newRev > prevRev) reasimilarModoAhora(modo);
       }, ()=>{ /* ignorar */ });
       guestUnsubs.push(unsub);
       backfillProductos(modo);
@@ -890,7 +789,6 @@ async function connectGuestFirebase(){
       startStockListener(modo);
       assimilateCatalogFromCloud(modo);
     });
-    forceAssimilarCatalogo = false; // se consumió con ambos modos
     // 2) Escucha el documento PROPIO del invitado (ventas/gastos/finanzas)
     //    y habilita escritura para que saveDB() suba ventas/gastos a Firebase.
     const ownRef = fbFirestore.collection('stockferre').doc('inventario_invitado');
@@ -1062,7 +960,6 @@ function manualSync(){
   if(currentModo === 'invitado'){
     // El modo invitado avisa con setSyncStatus() al terminar de leer
     // el documento propio; se confirma cuando aparece "synced" o "error".
-    forceAssimilarCatalogo = true;
     connectGuestFirebase();
     const statusEl = document.getElementById('sidebarSyncStatus');
     const started = Date.now();
@@ -1083,7 +980,6 @@ function manualSync(){
     }, 300);
     return;
   }
-  forceAssimilarCatalogo = true; // la sincronización manual relee el catálogo completo
   connectFirebase().catch(()=>{ /* conecta vs no conecta; el estado se ve en setSyncStatus */ }).then(()=>{
     finish();
     if(fbReady) toast('🔥 Actualizaciones recibidas y enviadas', 'success');
@@ -1150,9 +1046,6 @@ async function connectFirebase(){
     if(!firebase.apps || !firebase.apps.length){ firebase.initializeApp(firebaseConfig); }
     const fbFirestore = firebase.firestore();
     await withTimeout(enableOfflinePersistence(fbFirestore), 5000);
-    // Si el dueño reinició TODA la app desde otro dispositivo, este se vacía
-    // y recarga SOLO, ANTES de volver a subir datos viejos a la nube.
-    if(await verificarControlReset(fbFirestore)) return;
     fbDocRef = fbFirestore.collection('stockferre').doc(firebaseDocId());
     fbReady = true;
 
@@ -1162,9 +1055,8 @@ async function connectFirebase(){
     const applySnapshot = (snap) => {
       if(!snap.exists) return;
       const prevVentas = (db.ventas || []).map(v => v.id);
-      const prevRev = (db._catalogRev || 0);
       const remote = normalizeDB(snap.data());
-      const merged = mergeRemoteIntoLocal(db, remote, currentModo);
+      const merged = mergeRemoteIntoLocal(db, remote);
       merged.historialEscaneos = db.historialEscaneos;
       merged.historialBusquedas = db.historialBusquedas;
       merged.historialInventario = db.historialInventario;
@@ -1173,10 +1065,6 @@ async function connectFirebase(){
       rerenderCurrentView();
       notifyNewRemoteSales(prevVentas, merged.ventas); // avisa ventas hechas en otro dispositivo
       setSyncStatus('synced');
-      // El dueño cambió el catálogo: se relee la colección de productos de este
-      // modo para quedar igual que él, sin esperar a reconectar.
-      const newRev = (remote && remote._catalogRev) || 0;
-      if(newRev > prevRev) reasimilarModoAhora(currentModo);
     };
     fbUnsub = fbDocRef.onSnapshot(snap=>{
       // Si este snapshot incluye una escritura propia todavía sin confirmar,
@@ -1201,8 +1089,7 @@ async function connectFirebase(){
       applySnapshot(snap);
     }else if(snap && !snap.exists){
       // Primera vez: sube los datos locales como semilla inicial de la nube
-      // (los productos van en su colección aparte, no en este documento).
-      const { historialEscaneos, historialBusquedas, historialInventario, ventas, ajustes, gastosPrestamos, productos, ...syncData } = db;
+      const { historialEscaneos, historialBusquedas, historialInventario, ventas, ajustes, gastosPrestamos, ...syncData } = db;
       try{ await withTimeout(fbDocRef.set(syncData), 12000); }catch(e){ /* el SDK reintenta */ }
     }
 
@@ -1235,9 +1122,6 @@ async function connectFirebase(){
     // base local esté llena o el documento consolidado pese demasiado.
     assimilateCatalogFromCloud(currentModo);
     assimilateCatalogFromCloud(otherModo);
-    // La orden de "forzar la asimilación" (botón de sincronización manual) ya
-    // se consumió con los dos modos de esta conexión.
-    forceAssimilarCatalogo = false;
     // VENTAS COMPARTIDAS del dueño: cada modo (manual/electrico) tiene su
     // PROPIA colección y sus propios dispositivos. Solo se escucha el dominio
     // del modo actual; al cambiar de modo se re-conecta con su colección.
@@ -1264,21 +1148,6 @@ async function connectFirebase(){
    ------------------------------------------------------------------------- */
 let fbWatchdogTimer = null;
 let fbReconnecting = false;
-let fbUltimoChequeoReset = 0;
-
-// Verifica (sin quemar lecturas) si el dueño pidió un reinicio global: se
-// dispara por el vigía cada ~30 s y al volver a la app (focus/visibilidad).
-// Si lo detecta, vacía este dispositivo y recarga la página.
-function chequeoReinicioYListo(){
-  if(typeof firebase === 'undefined' || typeof firebaseConfig === 'undefined') return;
-  if(!fbConfigOk() || !firebaseToggleOn()) return;
-  if(fbReconnecting) return;
-  const now = Date.now();
-  if(now - fbUltimoChequeoReset < 30000) return;
-  fbUltimoChequeoReset = now;
-  const fs = fbFirestoreOrNull();
-  if(fs) verificarControlReset(fs);
-}
 
 function startSyncWatchdog(){
   stopSyncWatchdog();
@@ -1286,10 +1155,6 @@ function startSyncWatchdog(){
     if(typeof firebase === 'undefined' || typeof firebaseConfig === 'undefined') return;
     if(!fbConfigOk() || !firebaseToggleOn()) return;
     if(fbReconnecting) return;
-    // Aunque la conexión esté sana, se revisa de vez en cuando si el dueño
-    // pidió un reinicio global (para que ningún dispositivo se quede con los
-    // productos viejos si estaba abierto en ese momento).
-    chequeoReinicioYListo();
     const stEl = document.getElementById('sidebarSyncStatus');
     const statusTxt = stEl ? (stEl.textContent || '') : '';
     const looksError = statusTxt.indexOf('Error') !== -1 || statusTxt.indexOf('Cuota') !== -1;
@@ -1316,20 +1181,13 @@ function stopSyncWatchdog(){
   if(fbWatchdogTimer){ clearInterval(fbWatchdogTimer); fbWatchdogTimer = null; }
 }
 
-// Al volver a la app se verifica el reinicio global al instante (no hay que
-// esperar al vigía).
-window.addEventListener('focus', chequeoReinicioYListo);
-document.addEventListener('visibilitychange', ()=>{
-  if(!document.hidden) chequeoReinicioYListo();
-});
-
 // Guarda en LocalStorage los datos de UN modo recibidos de Firebase,
 // conservando los historiales locales de ese modo.
 function cacheRemoteModo(data, modo){
   try{
     const prev = loadModoDB(modo);
     const remote = normalizeDB(data);
-    const merged = mergeRemoteIntoLocal(prev, remote, modo);
+    const merged = mergeRemoteIntoLocal(prev, remote);
     merged.historialEscaneos = prev.historialEscaneos;
     merged.historialBusquedas = prev.historialBusquedas;
     merged.historialInventario = prev.historialInventario;
@@ -1409,12 +1267,6 @@ function productoDocData(p){
     stock: Number(p.stock) || 0,
     stockMin: Number(p.stockMin) || 0,
     caracteristicas: String(p.caracteristicas || ''),
-    // El modo viaja en cada documento del producto: si un documento termina en
-    // la colección equivocada, los otros dispositivos lo rechazan al leerlo.
-    modo: (p.modo === 'manual' || p.modo === 'electrico') ? p.modo : '',
-    // Quién creó/posee el producto: 'dueno' o 'invitado-<dispositivo>'. Con
-    // esto un invitado solo puede editar lo suyo y ajustar stock en lo ajeno.
-    _creadoPor: etiquetaCreadorParaNube(p),
     _updatedAt: typeof p._updatedAt === 'number' ? p._updatedAt : Date.now()
   };
 }
@@ -1425,7 +1277,6 @@ async function ensureProductoDoc(p, modo){
   const col = fbProductsCol(modo);
   if(!col || !p || !p.id) return false;
   try{
-    stampProductoModo(p, modo);
     const data = productoDocData(p);
     delete data.stock; // el stock se maneja con incrementos, no con reemplazo
     await col.doc(p.id).set(data, { merge: true });
@@ -1470,7 +1321,6 @@ async function applyStockDelta(p, delta, modo){
 async function applyStockAbsolute(p, value, modo){
   const col = fbProductsCol(modo);
   if(!col || !p || !p.id) return;
-  stampProductoModo(p, modo);
   const data = productoDocData(p);
   data.stock = Number(value) || 0;
   data._updatedAt = Date.now();
@@ -1481,36 +1331,8 @@ async function applyStockAbsolute(p, value, modo){
 
 // Guarda (crea o actualiza) el documento completo de un producto.
 async function syncProductoDoc(p, modo){
-  const colModo = colModoParaProducto(p, modo);
-  const col = fbProductsCol(colModo);
+  const col = fbProductsCol(modo);
   if(!col || !p || !p.id) return;
-  stampProductoModo(p, colModo);
-  if(esInvitadoActual()){
-    // Un invitado SOLO puede: crear productos nuevos (etiquetados con su
-    // dispositivo), editar los que él mismo creó y ajustar stock. Si intenta
-    // escribir un producto del dueño o de otro dispositivo, se reduce a un
-    // ajuste atómico de stock y NO se toca el catálogo.
-    try{
-      const ref = col.doc(p.id);
-      const exist = await withTimeout(ref.get(), 10000);
-      if(exist.exists){
-        const data = exist.data() || {};
-        const autor = String(data._creadoPor || 'dueno');
-        if(autor !== etiquetaCreadorInvitado()){
-          const delta = (Number(p.stock) || 0) - (Number(data.stock) || 0);
-          if(delta !== 0) await ref.update({ stock: firebase.firestore.FieldValue.increment(delta), _updatedAt: Date.now() });
-          return;
-        }
-        p._creadoPor = autor; // es suyo: conserva su etiqueta
-      }else{
-        p._creadoPor = etiquetaCreadorInvitado(); // producto nuevo de invitado
-      }
-    }catch(e){ return; } // sin conexión: solo se queda local
-  }else{
-    // El dueño se hace responsable de lo que escribe (los productos que el
-    // dueño edita pasan a ser suyos).
-    p._creadoPor = (p._creadoPor && /^invitado-/.test(String(p._creadoPor))) ? p._creadoPor : 'dueno';
-  }
   try{
     await col.doc(p.id).set(productoDocData(p), { merge: true });
   }catch(e){ console.error('Error sincronizando producto en la nube', e); }
@@ -1589,21 +1411,11 @@ async function syncVentaDocs(list, modo){
   try{
     const fs = firebase.firestore();
     for(let i = 0; i < list.length; i += 450){
-      const chunk = list.slice(i, i + 450).filter(v => v && v.id);
-      if(!chunk.length) continue;
-      let intento = 0;
-      for(;;){
-        try{
-          const batch = fs.batch();
-          chunk.forEach(v => batch.set(col.doc(String(v.id)), ventaDocData(v)));
-          await batch.commit();
-          break;
-        }catch(err){
-          intento++;
-          if(intento >= 3){ console.error('Error subiendo ventas a la nube', err); break; }
-          await new Promise(r => setTimeout(r, 800 * intento));
-        }
-      }
+      const batch = fs.batch();
+      list.slice(i, i + 450).forEach(v => {
+        if(v && v.id) batch.set(col.doc(String(v.id)), ventaDocData(v));
+      });
+      await batch.commit();
     }
   }catch(e){ console.error('Error subiendo ventas a la nube', e); }
 }
@@ -1986,8 +1798,6 @@ function stopGastosPrestamosListeners(){
 async function backfillProductos(modo){
   const col = fbProductsCol(modo);
   if(!col) return;
-  // Los invitados no re-siembran catálogos locales en la nube: solo leen.
-  if(esInvitadoActual()){ return; }
   // Una sola vez por modo: releer la colección entera en cada apertura quema
   // miles de lecturas del cupo gratis de Firestore (eso dejaba el celular sin
   // poder ver los productos nuevos). Una vez migrado, los productos nuevos y
@@ -1999,19 +1809,6 @@ async function backfillProductos(modo){
   let done = false;
   try{ done = await kvGet(markKey) === '1'; }catch(e){}
   if(done) return;
-  // Tras un reinicio total, la NUBE es la autoridad: ningún dispositivo puede
-  // volver a subir su catálogo viejo (era lo que re-contaminaba con productos
-  // mezclados Manuales/Eléctricas). El dueño re-siembra con "Importar Excel".
-  try{
-    const fs = fbFirestoreOrNull();
-    if(fs){
-      const ctrl = await withTimeout(fs.collection('stockferre').doc('control').get(), 8000);
-      if(ctrl.exists && ctrl.data() && ctrl.data().reset && ctrl.data().reset.ts){
-        try{ await kvSet(markKey, '1'); }catch(e){}
-        return;
-      }
-    }
-  }catch(e){ /* si no se pudo leer, se sigue normal */ }
   const local = modo === currentModo ? db : loadModoDB(modo);
   const arr = (local && local.productos) || [];
   if(arr.length === 0){
@@ -2043,27 +1840,14 @@ async function backfillProductos(modo){
     // duplicado: se fusionan en el documento canónico que ya existe.
     const fs = firebase.firestore();
     for(let i = 0; i < missing.length; i += 450){
-      const chunk = missing.slice(i, i + 450).map(p => {
-        const copia = Object.assign({}, p);
-        stampProductoModo(copia, modo);
-        const data = productoDocData(copia);
+      const batch = fs.batch();
+      missing.slice(i, i + 450).forEach(p => {
+        const data = productoDocData(p);
         delete data.stock; // el stock se sincroniza después con incrementos
-        const canonicalId = existingByCode.get(normalize(copia.codigo));
-        return { docId: canonicalId ? canonicalId : copia.id, data };
+        const canonicalId = existingByCode.get(normalize(p.codigo));
+        batch.set(col.doc(canonicalId ? canonicalId : p.id), data, { merge: true });
       });
-      let intento = 0;
-      for(;;){
-        try{
-          const batch = fs.batch();
-          chunk.forEach(it => batch.set(col.doc(it.docId), it.data, { merge: true }));
-          await batch.commit();
-          break;
-        }catch(err){
-          intento++;
-          if(intento >= 3){ console.error('Error respaldando productos en la nube', err); break; }
-          await new Promise(r => setTimeout(r, 800 * intento));
-        }
-      }
+      await batch.commit();
     }
     try{ await kvSet(markKey, '1'); }catch(e){}
   }catch(e){ if(e && e.code !== 'permission-denied') console.error('Error respaldando productos en la nube', e); }
@@ -2076,8 +1860,6 @@ async function backfillProductos(modo){
 async function syncCaracteristicasCloud(modo){
   const col = fbProductsCol(modo);
   if(!col) return;
-  // Solo el dueño reenvía características (los invitados no tocan el catálogo).
-  if(esInvitadoActual()) return;
   const markKey = 'fs_caract_sync_' + modo;
   // La marca va en IndexedDB (no LocalStorage): puede que el LocalStorage esté
   // lleno, y si fallara no se marcaría y nos quemaríamos lecturas cada apertura.
@@ -2116,55 +1898,20 @@ async function syncCaracteristicasCloud(modo){
   }catch(e){ if(e && e.code !== 'permission-denied') console.error('Error sincronizando características a la nube', e); }
 }
 
-// Escribe los documentos de una lista de productos (para importaciones CSV y
-// backups). Cada lote se reintenta solo si falla (cortón de red, cuota, etc.):
-// así una importación de 1300+ productos no deja la mitad en la nube.
-async function escribirProductosConReintentos(col, fs, chunk, modo){
-  // Los invitados NUNCA escriben lotes del catálogo: eso era lo que volvía a
-  // sembrar productos mezclados. Sus escrituras van producto por producto.
-  if(esInvitadoActual()) return;
-  let intento = 0;
-  for(;;){
-    try{
-      const batch = fs.batch();
-      chunk.forEach(p => {
-        if(!p || !p.id) return;
-        stampProductoModo(p, modo);
-        batch.set(col.doc(p.id), productoDocData(p), { merge: true });
-      });
-      await batch.commit();
-      return;
-    }catch(err){
-      intento++;
-      if(intento >= 3){ console.error('Error subiendo productos a la nube', err); return; }
-      await new Promise(r => setTimeout(r, 800 * intento));
-    }
-  }
-}
-
 // Escribe los documentos de una lista de productos (para importaciones CSV).
 async function syncProductoDocs(list, modo){
   const col = fbProductsCol(modo);
   if(!col || !list || !list.length) return;
-  // Un invitado jamás re-sube el catálogo en lote: solo crea/edita lo suyo y
-  // ajusta stock, y eso se hace producto por producto con sus propias reglas.
-  if(esInvitadoActual()){
-    for(const p of list){ if(p && p.id){ await syncProductoDoc(p, modo); } }
-    return;
-  }
   try{
     const fs = firebase.firestore();
     for(let i = 0; i < list.length; i += 450){
-      await escribirProductosConReintentos(col, fs, list.slice(i, i + 450), modo);
+      const batch = fs.batch();
+      list.slice(i, i + 450).forEach(p => {
+        if(!p || !p.id) return;
+        batch.set(col.doc(p.id), productoDocData(p), { merge: true });
+      });
+      await batch.commit();
     }
-    // Sello el catálogo para avisar a los demás dispositivos: el documento
-    // grande lleva _catalogRev y, quien lo reciba, re-lectura SOLO esa
-    // colección en cuanto vea la versión nueva (convergencia rápida).
-    try{
-      const store = modo === currentModo ? db : loadModoDB(modo);
-      store._catalogRev = Date.now();
-      if(modo === currentModo){ saveDB(); } else { persistModoDB(modo, store); }
-    }catch(e){ /* ignorar */ }
   }catch(e){ console.error('Error sincronizando lista de productos en la nube', e); }
 }
 
@@ -2224,8 +1971,8 @@ function startStockListener(modo){
   // relojes desincronizados entre dispositivos. Así, tras la primera carga, cada
   // apertura lee solo unos pocos documentos recientes en vez de todo lo tocado en
   // las últimas 24 h (antes: miles de lecturas por apertura).
-  const MAX_WINDOW = 72 * 3600 * 1000; // 3 días (barandilla: lo más viejo lo trae la asimilación)
-  const MARGIN = 60 * 60 * 1000;       // 1 hora de margen por relojes desincronizados
+  const MAX_WINDOW = 24 * 3600 * 1000;
+  const MARGIN = 5 * 60 * 1000;
   let sinceTs = 0;
   try{ sinceTs = Number(localStorage.getItem(sinceKey) || 0) || 0; }catch(e){}
   const fromTs = sinceTs > 0 ? Math.max(sinceTs - MARGIN, Date.now() - MAX_WINDOW) : (Date.now() - MAX_WINDOW);
@@ -2290,10 +2037,6 @@ function startStockListener(modo){
           stock: Number(data.stock) || 0,
           stockMin: Number(data.stockMin) || 0,
           caracteristicas: data.caracteristicas || '',
-          // El modo se toma de la colección de la que llegó: un documento que
-          // aparezca en "stockferre_productos_manual" ES manual aunque su
-          // documento no lo diga (nube anterior).
-          modo: (data.modo === 'manual' || data.modo === 'electrico') ? data.modo : modo,
           fechaCreacion: todayISO(),
           _updatedAt: typeof data._updatedAt === 'number' ? data._updatedAt : Date.now()
         };
@@ -2323,7 +2066,7 @@ function stopStockListeners(){
 
 // Convierte el documento de producto de la nube (delgado) a un producto local
 // completo, para agregarlo al catálogo cuando llega desde otro dispositivo.
-function cloudProductoToDB(data, modo){
+function cloudProductoToDB(data){
   return {
     id: data.id,
     codigo: data.codigo || '',
@@ -2337,12 +2080,6 @@ function cloudProductoToDB(data, modo){
     stock: Number(data.stock) || 0,
     stockMin: Number(data.stockMin) || 0,
     caracteristicas: data.caracteristicas || '',
-    // El modo es el de la colección de la que viene el documento (la nube
-    // anterior no lo guardaba), salvo que el documento ya lo traiga.
-    modo: (data.modo === 'manual' || data.modo === 'electrico') ? data.modo : modo,
-    // Quién lo creó en la nube: 'dueno' o 'invitado-<dispositivo>'. Con esto
-    // un invitado reconoce los productos que él mismo dio de alta.
-    _creadoPor: (data._creadoPor && /^invitado-/.test(String(data._creadoPor))) ? data._creadoPor : '',
     fechaCreacion: todayISO(),
     _updatedAt: typeof data._updatedAt === 'number' ? data._updatedAt : Date.now()
   };
@@ -2352,182 +2089,55 @@ function cloudProductoToDB(data, modo){
 // agrega los que a este dispositivo le faltan (p. ej. los registrados en la compu
 // con una base que quedó grande). El marcador se guarda en IndexedDB para que
 // funcione aunque el LocalStorage esté lleno.
-// Se vuelve "true" al apretar "Recibir y mandar actualizaciones" para que la
-// asimilación corra aunque acabe de correr hace poco.
-let forceAssimilarCatalogo = false;
-// Modo concreto cuya re-lectura se fuerza aunque esté dentro del cooldown de
-// 60 s (lo usa el aviso de "catálogo cambiado" del documento grande).
-let fuerzaAsimilaModo = null;
-// Evita encolar varios retrasos de la misma lectura completa a la vez.
-let retryEnCola = {};
-
-// Re-lee la colección por producto de UN modo en cuanto llega el aviso de que
-// el dueño cambió el catálogo (campo _catalogRev del documento grande). Así
-// cualquier dispositivo conectado converge al catálogo del dueño sin esperar
-// a reconectar y sin quemar lecturas continuas.
-function reasimilarModoAhora(modo){
-  fuerzaAsimilaModo = modo;
-  assimilateCatalogFromCloud(modo).catch(()=>{}).finally(()=>{
-    fuerzaAsimilaModo = null;
-    updateSidebarProductCount();
-  });
-}
-
-// Re-sincroniza el catálogo de UN modo tomando como VERDAD la colección de
-// documentos por producto (stockferre_productos_<modo>). Corrige los tres
-// problemas de la sincronización a la vez:
-//   • COMPLETITUD: relee la colección COMPLETA (sin límites de "últimas 24/72 h",
-//     que dejaban productos afuera para siempre) y los adopta; todos los
-//     dispositivos terminan viendo el MISMO catálogo.
-//   • SEPARACIÓN DE MODOS: solo entran documentos de esta colección; los
-//     productos locales de OTRO modo se quitan de esta base. Manuales y
-//     Eléctricas nunca se vuelven a mezclar.
-//   • DETERMINISMO: si dos documentos llevan el mismo código, gana el mismo
-//     ejemplar en todos los dispositivos (el más reciente / el "mejor").
 async function assimilateCatalogFromCloud(modo){
   const col = fbProductsCol(modo);
-  if(!col) return null;
-  // Cooldown para no quemar lecturas si el vigía reconecta seguido: se relee
-  // una vez por conexión y como mínimo cada 60 segundos. El botón de
-  // sincronización manual fuerza la corrida aunque haya corrido hace un momento.
+  if(!col) return;
   const markKey = 'fs_catalog_pull_' + modo;
-  if(!forceAssimilarCatalogo && fuerzaAsimilaModo !== modo){
-    try{
-      const done = await kvGet(markKey);
-      if(done){
-        const parts = String(done).split('@');
-        if(parts[0] === '1' && Number(parts[1] || 0) && (Date.now() - Number(parts[1])) < 60 * 1000) return null;
-      }
-    }catch(e){}
-  }
+  // Marca con tiempo: se re-asimila una vez por semana para que los productos
+  // registrados mientras este dispositivo estuvo apagado (más de 24 h) también
+  // lleguen aunque ya hayan salido de la ventana del listener.
   try{
-    // Este dispositivo ya tuvo su primera sincronización (la marca se pone al
-    // final de cada asimilación). Con ella se distinguen los RESIDUOS locales
-    // (basura de importaciones viejas, que ya no están en la nube) de los
-    // productos creados aquí mismo (que sí hay que conservar y subir).
-    let yaMarcado = false;
-    try{ yaMarcado = !!await kvGet(markKey); }catch(e){}
+    const done = await kvGet(markKey);
+    if(done){
+      const parts = String(done).split('@');
+      if(parts[0] === '1'){
+        const doneAt = Number(parts[1] || 0);
+        if(!doneAt || (Date.now() - doneAt) < 7 * 24 * 3600 * 1000) return;
+      }
+    }
+  }catch(e){}
+  try{
     const snap = await col.get();
     const store = modo === currentModo ? db : loadModoDB(modo);
-    if(!store || !Array.isArray(store.productos)) return null;
+    if(!store || !Array.isArray(store.productos)) return;
+    const byId = new Map(store.productos.filter(p => p && p.id).map(p => [p.id, p]));
     const tbs = (store.tombstones && store.tombstones.productos) || (db.tombstones || {}).productos;
-    // Catálogo de la nube: uno por id y uno por código. Si hay dos documentos
-    // con el mismo código, se queda el MÁS RECIENTE (determinista: todos los
-    // dispositivos eligen el mismo).
-    const cloudById = new Map();
-    const cloudByCode = new Map();
+    const add = [];
+    let refilled = false;
     snap.docs.forEach(doc => {
       const data = doc.data();
       if(!data || !data.id) return;
-      // Defensa ante documentos mal ubicados: si el documento trae un modo
-      // distinto al de esta colección, no entra aquí (no mezcla catálogos).
-      if(data.modo && data.modo !== 'manual' && data.modo !== 'electrico') return;
-      if(data.modo && data.modo !== modo) return;
       if(tbs && tbs[String(data.id)]) return;
-      const p = cloudProductoToDB(data, modo);
-      cloudById.set(p.id, p);
-      const c = normalize(p.codigo);
-      if(c){
-        const prev = cloudByCode.get(c);
-        if(!prev || (p._updatedAt || 0) >= (prev._updatedAt || 0)) cloudByCode.set(c, p);
-      }
-    });
-    // Si la nube todavía no tiene catálogo para este modo, hay dos casos:
-    //  - Este dispositivo NUNCA sincronizó: se deja lo local como está (arranque).
-    //  - Este dispositivo YA sincronizó y la nube quedó EN CERO (reinicio total o
-    //    vaciado del dueño): la nube es la verdad → se adopta el catálogo vacío
-    //    para que nadie preserve ni resucite los productos viejos.
-    if(cloudById.size === 0){
-      if(!yaMarcado) return null;
-      store.productos = [];
-      aplicarModoLocal(store, modo);
-      dedupeProductosByCode(store.productos);
-      if(modo === currentModo){
-        db = store;
-        persistLocalCache();
-        rerenderCurrentView();
-      }else{
-        persistBlob('stockferre_catalog_v1_' + modo, store);
-        if(currentModo === 'invitado'){ db = buildGuestDB(); rerenderCurrentView(); }
-      }
-      try{ await kvSet(markKey, '1@' + Date.now()); }catch(e){}
-      return { modo, nuevos: 0, actualizados: 0 };
-    }
-    const merged = [];
-    const seen = new Set();
-    const localesSolo = []; // locales que la nube no conoce (se decide luego)
-    let cambios = false;
-    let nuevos = 0, actualizados = 0;
-    store.productos.forEach(local => {
-      if(!local || local.id == null){ merged.push(local); return; }
-      // Producto de OTRO modo en esta base (datos viejos mezclados): sale de
-      // aquí; vive en su propia colección/modo. Así se deshace el mezclado.
-      if(local.modo === 'manual' || local.modo === 'electrico'){
-        if(local.modo !== modo){ cambios = true; return; }
-      }
-      const c = normalize(local.codigo);
-      const cloud = (c && cloudByCode.get(c)) || cloudById.get(local.id);
-      if(cloud){
-        // La nube ya conoce este producto (mismo código o mismo id): gana el
-        // MÁS RECIENTE. Así un cambio hecho en la compu llega al celular y
-        // viceversa, sin que "el que guarda último" borre al otro.
-        const localTs = local._updatedAt || 0;
-        const cloudTs = cloud._updatedAt || 0;
-        // Si este documento de la nube YA fue adoptado por un "gemelo" local con
-        // el mismo código (hubo importaciones repetidas con dos ids distintos),
-        // no se vuelve a agregar: así la lista no se infla con copias.
-        if(cloudTs >= localTs){
-          if(!seen.has(cloud.id)){ merged.push(cloud); cambios = cambios || cloud.id !== local.id || cloudTs > localTs; }
-          else{ cambios = cambios || cloud.id !== local.id; }
-          seen.add(local.id);
-          if(cloud.id !== local.id || cloudTs > localTs) actualizados++;
-        }else{
-          if(!seen.has(local.id)){ merged.push(local); cambios = cambios || localTs > cloudTs; }
-          else{ cambios = cambios || localTs > cloudTs; }
-          seen.add(cloud.id);
-          if(localTs > cloudTs) actualizados++;
+      const existing = byId.get(data.id);
+      if(existing){
+        // Producto ya presente: si este dispositivo quedó sin características
+        // (por ej. las trajo antes de que existiera el campo), se rellenan con
+        // las de la nube sin pisar las que ya estén.
+        const localCar = String(existing.caracteristicas || '');
+        const cloudCar = String(data.caracteristicas || '');
+        if(cloudCar && !localCar){
+          existing.caracteristicas = cloudCar;
+          refilled = true;
         }
         return;
       }
-      // No está en la nube: se junta para procesar DESPUÉS del ciclo (así se
-      // puede subir con await y el orden queda determinista).
-      localesSolo.push({ local: local, code: normalize(local.codigo) });
+      add.push(cloudProductoToDB(data));
     });
-    // Productos locales que la nube no conoce → la NUBE ES LA VERDAD siempre
-    // que ya tenga catálogo para este modo, SIN importar si este dispositivo ya
-    // se marcó. Se conservan y se suben SOLO los que parecen creados aquí: los
-    // del mismo usuario (invitado-<dispositivo>/'dueno') o los tocados hace
-    // poco (< 24 h, p. ej. hecho sin conexión). Los RESIDUOS de importaciones
-    // viejas (sin dueño y con más de 24 h) se descartan, para que TODOS los
-    // dispositivos terminen con el MISMO catálogo (los ~2100 viejos bajan a los
-    // ~1387 de la nube). El único caso que se conserva tal cual es "nube vacía
-    // + nunca sincronizó" (arranque, ya resuelto arriba).
-    for(const item of localesSolo){
-      const local = item.local;
-      const ts = Number(local._updatedAt) || 0;
-      const esMio = !!local._creadoPor && (local._creadoPor === etiquetaCreadorInvitado() || local._creadoPor === 'dueno');
-      if(esMio || (ts && ts > Date.now() - 24 * 3600 * 1000)){
-        try{ await syncProductoDoc(local, modo); }catch(e){}
-        const copiaNube = (cloudByCode.get(item.code) || cloudById.get(local.id));
-        if(copiaNube && !seen.has(copiaNube.id)){ merged.push(copiaNube); seen.add(copiaNube.id); }
-        else{ stampProductoModo(local, modo); merged.push(local); seen.add(local.id); }
-      }
-      cambios = true; // se subió, se conservó o se descartó → se persiste
-    }
-    // Productos que la nube tiene y este dispositivo no: se agregan.
-    cloudByCode.forEach(p => {
-      if(!seen.has(p.id)){ merged.push(p); cambios = true; nuevos++; }
-    });
-    store.productos = merged;
-    aplicarModoLocal(store, modo);
-    // Si la nube tenía dos documentos del mismo código, se deja solo uno (el
-    // mismo en todos los dispositivos, para que el catálogo converja).
-    dedupeProductosByCode(store.productos);
-    if(cambios){
+    if(add.length || refilled){
+      if(add.length) store.productos = store.productos.concat(add);
+      // Si la nube tenía DOS documentos del mismo código, se deja solo uno.
+      dedupeProductosByCode(store.productos);
       if(modo === currentModo){
-        // Apunta el catálogo activo al objeto sincronizado ANTES de guardar,
-        // para que coincidan el objeto en memoria y el que se escribe.
-        db = store;
         persistLocalCache();
         rerenderCurrentView();
       }else{
@@ -2536,28 +2146,7 @@ async function assimilateCatalogFromCloud(modo){
       }
     }
     try{ await kvSet(markKey, '1@' + Date.now()); }catch(e){}
-    // Si esta lectura encontró productos que antes no estaban, el dueño
-    // todavía estaba subiendo su importación por lotes. Se reprograma UNA
-    // lectura completa ~25 s después: cuando la subida termine, este
-    // dispositivo captura lo que faltaba y converge solo (1210 → 1387).
-    if(nuevos > 0 && !retryEnCola[modo]){
-      retryEnCola[modo] = true;
-      setTimeout(()=>{
-        retryEnCola[modo] = false;
-        fuerzaAsimilaModo = modo;
-        forceAssimilarCatalogo = true;
-        assimilateCatalogFromCloud(modo).catch(()=>{}).finally(()=>{
-          fuerzaAsimilaModo = null;
-          forceAssimilarCatalogo = false;
-          updateSidebarProductCount();
-        });
-      }, 25000);
-    }
-    return { modo, nuevos, actualizados };
-  }catch(e){
-    if(e && e.code !== 'permission-denied') console.error('Error sincronizando catálogo de la nube (' + modo + ')', e);
-    return null;
-  }
+  }catch(e){ if(e && e.code !== 'permission-denied') console.error('Error asimilando catálogo de la nube (' + modo + ')', e); }
 }
 
 // Activa la persistencia offline UNA sola vez por sesión: las escrituras que
@@ -3071,7 +2660,6 @@ function saveProducto(data){
   if(data.id){
     const p = getProductoById(data.id);
     if(!p) return null;
-    stampProductoModo(p, currentModo);
     p.codigo = data.codigo.trim();
     p.nombre = data.nombre.trim();
     p.marca = data.marca.trim();
@@ -3088,7 +2676,6 @@ function saveProducto(data){
     // Si ya existe un producto con ese código, actualízalo en vez de duplicar
     const existing = getProductoByCodigo(data.codigo);
     if(existing){
-      stampProductoModo(existing, currentModo);
       existing.nombre = data.nombre.trim();
       existing.marca = data.marca.trim();
       existing.categoria = data.categoria.trim();
@@ -3113,7 +2700,6 @@ function saveProducto(data){
       precioVenta: parseFloat(data.precioVenta) || 0,
       caracteristicas: '',
       stock: 0,
-      modo: (currentModo === 'manual' || currentModo === 'electrico') ? currentModo : '',
       fechaCreacion: todayISO(),
       _updatedAt: Date.now()
     };
@@ -3649,9 +3235,10 @@ function renderScanResultInto(elementId, codigo, context){
     resultDiv.innerHTML = `
       <div class="scan-not-found">
         ⚠️ No se encontró ningún producto con el código <strong>${escapeHtml(codigo)}</strong>.
+        ${currentRole === 'guest' ? '' : `
         <div style="margin-top:10px;">
           <button class="btn btn-primary btn-sm" id="btnCreateFromScan_${elementId}">+ Crear producto con este código</button>
-        </div>
+        </div>`}
       </div>`;
     const btnCreate = document.getElementById(`btnCreateFromScan_${elementId}`);
     if(btnCreate) btnCreate.addEventListener('click', ()=>{
@@ -3697,7 +3284,7 @@ function renderScanResultInto(elementId, codigo, context){
       <div class="sr-row"><span>Código</span><strong>${escapeHtml(p.codigo)}</strong></div>
       ${detailRowsHtml}
       <div style="margin-top:12px; display:flex; gap:8px; flex-wrap:wrap;">
-        ${(currentRole !== 'guest' || (p && p._creadoPor === etiquetaCreadorInvitado())) && context !== 'compra' ? `<button class="btn btn-secondary btn-sm" id="btnEditFromScan_${elementId}">✏️ Editar producto</button>` : ''}
+        ${currentRole !== 'guest' && context !== 'compra' ? `<button class="btn btn-secondary btn-sm" id="btnEditFromScan_${elementId}">✏️ Editar producto</button>` : ''}
         ${secondBtnHtml}
       </div>
     </div>`;
@@ -6722,7 +6309,6 @@ function handleCompraSubmit(e){
       precioMarca: 0,
       precioVenta: !isNaN(precioVenta) && precioVenta >= 0 ? precioVenta : 0,
       stock: 0,
-      modo: (currentModo === 'manual' || currentModo === 'electrico') ? currentModo : '',
       fechaCreacion: todayISO(),
       _updatedAt: Date.now()
     };
@@ -7285,13 +6871,7 @@ function ocrConfirmarIngresos(){
         precioVenta: it.precio,
         stock: it.cantidad,
         stockMin: 0,
-        caracteristicas: '',
-modo: (data.modo === 'manual' || data.modo === 'electrico')
-        ? data.modo
-        : ((currentModo === 'manual' || currentModo === 'electrico') ? currentModo : (esInvitadoActual() ? 'manual' : '')),
-      _creadoPor: esInvitadoActual() ? etiquetaCreadorInvitado() : 'dueno',
-      fechaCreacion: todayISO(),
-        _updatedAt: Date.now()
+        caracteristicas: ''
       };
       db.productos.push(newProd);
       db.compras.push({
@@ -8535,17 +8115,11 @@ function openProductModal(producto, prefillCodigo){
     document.getElementById('pPrecioCompra').value = producto.precioCompra || '';
     document.getElementById('pPrecioMarca').value = producto.precioMarca || '';
     document.getElementById('pPrecioVenta').value = producto.precioVenta || '';
-    const pModo = document.getElementById('pModo');
-    if(pModo) pModo.value = (producto.modo === 'manual' || producto.modo === 'electrico') ? producto.modo : '';
   }else{
     document.getElementById('modalProductoTitle').textContent = 'Nuevo producto';
     document.getElementById('pId').value = '';
     if(prefillCodigo) document.getElementById('pCodigo').value = prefillCodigo;
   }
-  // La "Línea" (Manuales/Eléctricas) solo la elige un invitado al CREAR un
-  // producto nuevo; el dueño la define siéndolo y no debe cambiarla al editar.
-  const lineaRow = document.getElementById('pModoRow');
-  if(lineaRow){ lineaRow.style.display = (!producto && esInvitadoActual()) ? '' : 'none'; }
   openModal('modalProducto');
 }
 
@@ -8560,8 +8134,7 @@ function handleProductSubmit(e){
     categoria: document.getElementById('pCategoria').value,
     precioCompra: document.getElementById('pPrecioCompra').value,
     precioMarca: document.getElementById('pPrecioMarca').value,
-    precioVenta: document.getElementById('pPrecioVenta').value,
-    modo: (document.getElementById('pModo') || {}).value || ''
+    precioVenta: document.getElementById('pPrecioVenta').value
   };
   if(!data.codigo.trim() || !data.nombre.trim()){
     toast('Código y descripción son obligatorios', 'error');
@@ -9066,6 +8639,81 @@ async function localSearchImages(query){
   };
 }
 
+// Búsqueda de imágenes DuckDuckGo via proxies CORS externos (fallback).
+async function ddgImageSearchProxy(query){
+  const pageUrl = 'https://duckduckgo.com/?q='+encodeURIComponent(query)+'&iar=images&iax=images&ia=images';
+  const proxies = [
+    'https://api.allorigins.win/raw?url=',
+    'https://corsproxy.io/?url='
+  ];
+  let pageHtml = null;
+  for(const proxy of proxies){
+    try{
+      const resp = await fetch(proxy + encodeURIComponent(pageUrl), {signal: AbortSignal.timeout(8000)});
+      if(resp.ok){ pageHtml = await resp.text(); break; }
+    }catch(e){ continue; }
+  }
+  if(!pageHtml) throw new Error('No se pudo acceder a DuckDuckGo');
+  const vqdMatch = pageHtml.match(/vqd[=:]["']?([0-9a-zA-Z_-]+)/i);
+  if(!vqdMatch) throw new Error('No VQD token');
+  const apiUrl = 'https://duckduckgo.com/i.js?l=us-en&o=json&q='+encodeURIComponent(query)+'&vqd='+vqdMatch[1];
+  for(const proxy of proxies){
+    try{
+      const resp = await fetch(proxy + encodeURIComponent(apiUrl), {signal: AbortSignal.timeout(8000)});
+      if(resp.ok){
+        const apiData = await resp.json();
+        if(apiData.results && apiData.results.length > 0){
+          for(const r of apiData.results){
+            if((r.width||0) >= 100 && (r.height||0) >= 100) return r.image;
+          }
+          return apiData.results[0].image;
+        }
+      }
+    }catch(e){ continue; }
+  }
+  return null;
+}
+
+// Búsqueda de imágenes en BING vía proxies CORS (fallback desde el navegador,
+// sin depender del servidor local). Bing es útil cuando DuckDuckGo está
+// bloqueado o lento en la red del local.
+async function bingImageSearchProxy(query){
+  const proxies = [
+    'https://api.allorigins.win/raw?url=',
+    'https://corsproxy.io/?url='
+  ];
+  let html = null;
+  for(const proxy of proxies){
+    try{
+      const pageUrl = 'https://www.bing.com/images/search?q='+encodeURIComponent(query)+'&qft=%2Bfilterui%3aphoto-photo&form=HDRSC2';
+      const resp = await fetch(proxy + encodeURIComponent(pageUrl), {signal: AbortSignal.timeout(12000)});
+      if(resp.ok){ html = await resp.text(); break; }
+    }catch(e){ continue; }
+  }
+  if(!html) throw new Error('No se pudo acceder a Bing');
+  const urls = [];
+  const re = /murl&quot;:&quot;([^&]+)/g;
+  let m;
+  while((m = re.exec(html)) !== null){
+    const decoded = m[1].replace(/\\u0026/g,'&').replace(/&amp;/g,'&');
+    if(!/^https?:\/\//i.test(decoded)) continue;
+    if(!/\.(jpe?g|png|webp|gif|avif)(\?|$)/i.test(decoded)) continue;
+    if(!urls.includes(decoded)) urls.push(decoded);
+    if(urls.length >= 5) break;
+  }
+  return urls;
+}
+async function ddgInstantImage(query){
+  const url = 'https://api.duckduckgo.com/?q='+encodeURIComponent(query)+'&format=json';
+  const resp = await fetch(url, {signal: AbortSignal.timeout(5000)});
+  const data = await resp.json();
+  if(data.Image && /^https?:\/\//i.test(data.Image)) return data.Image;
+  if(data.AbstractImage && data.AbstractImage.Src && /^https?:\/\//i.test(data.AbstractImage.Src)){
+    return data.AbstractImage.Src;
+  }
+  return null;
+}
+
 // Mide las dimensiones reales de un dataURL (para descartar iconos/logos).
 function imageDimsDataURL(dataURL){
   return new Promise(res => {
@@ -9323,168 +8971,144 @@ function readTableFile(file, cb){
 }
 
 function importProductsCSV(file){
-  // El importador SIEMPRE trabaja sobre el modo en el que se está (Manuales o
-  // Eléctricas). Se pregunta primero para que un archivo del otro modo no se
-  // importe en el listado equivocado (ahí nace el "mezclado" de catálogos).
-  const modoTarget = (currentModo === 'manual' || currentModo === 'electrico') ? currentModo : 'manual';
-  confirmDialog('Importar productos',
-    'El archivo se importará en: ' + MODO_LABELS[modoTarget] + '.\n\n' +
-    'Para que Manuales y Eléctricas nunca se mezclen, importa cada Excel estando en su modo correcto.',
-    ()=>{
-      const reader = new FileReader();
-      reader.onload = async (e)=>{
-        try{
-          // Acepta tres formatos:
-          //  - .xlsx real (ZIP): exportado por la app o re-guardado por Excel
-          //  - .xls XML 2003 (exportado por versiones viejas de la app)
-          //  - CSV (coma, punto y coma o tabulador)
-          const u8 = new Uint8Array(e.target.result);
-          let rows;
-          if(u8.length > 30 && u8[0] === 0x50 && u8[1] === 0x4b && u8[2] === 0x03 && u8[3] === 0x04){
-            const files = unzipEntries(e.target.result);
-            let sheet = null;
-            for(const k in files){
-              if(/^xl\/worksheets\/sheet\d+\.xml$/.test(k)){ sheet = files[k]; break; }
-            }
-            if(!sheet){
-              toast('El archivo .xlsx no tiene una hoja de cálculo válida', 'error');
-              return;
-            }
-            const shared = files['xl/sharedStrings.xml']
-              ? parseSharedStringsXML(decText(files['xl/sharedStrings.xml']))
-              : null;
-            rows = parseSheetXML(decText(sheet), shared);
-          }else{
-            const text = decText(u8).replace(/^\uFEFF/, '');
-            rows = isExcelXMLFile(file, text) ? parseExcelXML(text) : parseCSV(text);
-          }
-          if(rows.length < 2){
-            toast('El archivo no tiene datos', 'error');
-            return;
-          }
-          const headers = rows[0].map(normalizeHeader);
-          const idx = {
-            codigo: headers.indexOf('CODIGO'),
-            codigoBarras: headers.findIndex(h => h.includes('BARRA') || h.includes('BARCODE')),
-            nombre: headers.findIndex(h => h.includes('DESCRIPCION') || h === 'NOMBRE'),
-            marca: headers.indexOf('MARCA'),
-            categoria: headers.indexOf('CATEGORIA'),
-            // Acepta "PRECIO COMPRA", "PRECIO DE COMPRA", "PRECIO_COMPRA", etc.
-            precioCompra: headers.findIndex(h => h.includes('PRECIO') && h.includes('COMPRA')),
-            precioMarca: headers.findIndex(h => h.includes('PRECIO') && h.includes('MARCA') && !h.includes('BARRA')),
-            precioVenta: headers.findIndex(h => h.includes('PRECIO') && h.includes('VENTA')),
-            stock: headers.findIndex(h => h.includes('STOCK') && !h.includes('MIN')),
-            stockMin: headers.findIndex(h => h.includes('STOCK') && h.includes('MIN')),
-            caracteristicas: headers.findIndex(h => h.includes('CARACTERISTICA') || h.includes('OBSERVACION') || h.includes('NOTA')),
-            imagen: headers.findIndex(h => h.includes('IMAGEN') || h.includes('FOTO'))
-          };
-          if(idx.codigo === -1 || idx.nombre === -1){
-            toast('El archivo debe tener al menos columnas CODIGO y DESCRIPCION', 'error');
-            return;
-          }
-          if(idx.precioCompra === -1 || idx.precioVenta === -1){
-            toast('No se encontraron las columnas de precio (se importarán los productos, pero revisa los precios manualmente)', 'warning');
-          }
-
-          // RAÍZ del problema de duplicados: reimportar el mismo Excel en otro
-          // dispositivo generaba ids NUEVOS y subía documentos duplicados. Ahora,
-          // antes de importar, se consultan los códigos que YA existen en la nube:
-          // si el código ya tiene documento, el producto local adopta ESE id y la
-          // importación actualiza el documento existente en vez de duplicarlo.
-          let cloudCodeMap = null;
-          try{ if(firebaseToggleOn() && typeof firebase !== 'undefined') cloudCodeMap = await buildCloudCodeMap(modoTarget); }catch(e){ cloudCodeMap = null; }
-          let creados = 0, actualizados = 0;
-          const importadosList = [];
-          for(let i = 1; i < rows.length; i++){
-            const r = rows[i];
-            const codigo = String(r[idx.codigo] || '').trim();
-            if(!codigo) continue;
-            const codigoBarras = idx.codigoBarras > -1 ? String(r[idx.codigoBarras] || '').trim() : '';
-            const nombre = String(r[idx.nombre] || '').trim();
-            const marca = idx.marca > -1 ? String(r[idx.marca] || '').trim() : '';
-            const categoria = idx.categoria > -1 ? String(r[idx.categoria] || '').trim() : '';
-            const precioCompra = idx.precioCompra > -1 ? parsePrecio(r[idx.precioCompra]) : 0;
-            const precioMarca = idx.precioMarca > -1 ? parsePrecio(r[idx.precioMarca]) : 0;
-            const precioVenta = idx.precioVenta > -1 ? parsePrecio(r[idx.precioVenta]) : 0;
-            const stockVal = idx.stock > -1 ? parsePrecio(r[idx.stock]) : null;
-            const stockMinVal = idx.stockMin > -1 ? parsePrecio(r[idx.stockMin]) : null;
-            const caracteristicas = idx.caracteristicas > -1 ? String(r[idx.caracteristicas] || '').trim() : '';
-
-            if(categoria) upsertCategoria(categoria);
-
-            let productoId = null;
-            const existing = getProductoByCodigo(codigo);
-            if(existing){
-              stampProductoModo(existing, modoTarget);
-              existing.nombre = nombre || existing.nombre;
-              existing.marca = marca || existing.marca;
-              existing.categoria = categoria || existing.categoria;
-              existing.codigoBarras = codigoBarras || existing.codigoBarras;
-              existing.precioCompra = precioCompra || existing.precioCompra;
-              existing.precioMarca = precioMarca || existing.precioMarca;
-              existing.precioVenta = precioVenta || existing.precioVenta;
-              if(stockVal !== null) existing.stock = stockVal;
-              if(stockMinVal !== null) existing.stockMin = stockMinVal;
-              if(caracteristicas) existing.caracteristicas = caracteristicas;
-              touchProducto(existing);
-              productoId = existing.id;
-              importadosList.push(existing);
-              actualizados++;
-            }else{
-              const p = {
-                id: (cloudCodeMap && cloudCodeMap.get(normalize(codigo))) || uid(),
-                codigo, codigoBarras, nombre, marca, categoria,
-                precioCompra, precioMarca, precioVenta,
-                caracteristicas,
-                stock: stockVal !== null ? stockVal : 0,
-                stockMin: stockMinVal !== null ? stockMinVal : 0,
-                modo: modoTarget,
-                fechaCreacion: todayISO(),
-                _updatedAt: Date.now()
-              };
-              db.productos.push(p);
-              productoId = p.id;
-              importadosList.push(p);
-              creados++;
-            }
-            // Si el CSV trae una columna IMAGEN, se guarda la foto en este
-            // dispositivo (local, no Firebase). Si el valor es un link (https),
-            // se guarda también como el link original de la foto para poder
-            // re-exportarlo después (columna IMAGEN con la URL de respaldo).
-            if(idx.imagen > -1 && productoId){
-              const imgVal = String(r[idx.imagen] || '').trim();
-              if(imgVal && (imgVal.startsWith('data:') || /^https?:\/\//i.test(imgVal))){
-                // Reemplaza las fotos del producto con la del CSV (una sola foto).
-                saveImagesLocal(productoId, [imgVal], /^https?:\/\//i.test(imgVal) ? [imgVal] : ['']);
-              }
-            }
-          }
-          saveDB();
-          // Si el catálogo local arrastraba duplicados (mismo código, dos ids
-          // distintos de importaciones viejas), se deja UNO por producto antes
-          // de subir: así la nube no vuelve a recibir copias.
-          dedupeProductosByCode(db.productos);
-          // Sube a la nube TODOS los productos del modo (no solo los recién
-          // importados) para que los otros dispositivos reciban el catálogo
-          // completo; cada lote se reintenta solo si la red falla.
-          await syncProductoDocs(db.productos, modoTarget);
-          // Quita de la nube los documentos repetidos que quedaron de imports
-          // viejos con otros ids (mantenía convergencia a uno por producto).
-          try{ await consolidarNube(modoTarget); }catch(e){}
-          // Asegura que lo importado quedó en SU modo (ningún eléc--/manual en
-          // la colección equivocada, aunque un Excel se importara en el otro).
-          try{ await separarModos(); }catch(e){}
-          renderProductos();
-          renderCategorias();
-          toast(`Importación en ${MODO_LABELS[modoTarget]}: ${creados} nuevos, ${actualizados} actualizados`, 'success');
-        }catch(err){
-          console.error(err);
-          toast('No se pudo leer el archivo Excel/CSV. Verifica el formato.', 'error');
+  const reader = new FileReader();
+  reader.onload = async (e)=>{
+    try{
+      // Acepta tres formatos:
+      //  - .xlsx real (ZIP): exportado por la app o re-guardado por Excel
+      //  - .xls XML 2003 (exportado por versiones viejas de la app)
+      //  - CSV (coma, punto y coma o tabulador)
+      const u8 = new Uint8Array(e.target.result);
+      let rows;
+      if(u8.length > 30 && u8[0] === 0x50 && u8[1] === 0x4b && u8[2] === 0x03 && u8[3] === 0x04){
+        const files = unzipEntries(e.target.result);
+        let sheet = null;
+        for(const k in files){
+          if(/^xl\/worksheets\/sheet\d+\.xml$/.test(k)){ sheet = files[k]; break; }
         }
+        if(!sheet){
+          toast('El archivo .xlsx no tiene una hoja de cálculo válida', 'error');
+          return;
+        }
+        const shared = files['xl/sharedStrings.xml']
+          ? parseSharedStringsXML(decText(files['xl/sharedStrings.xml']))
+          : null;
+        rows = parseSheetXML(decText(sheet), shared);
+      }else{
+        const text = decText(u8).replace(/^\uFEFF/, '');
+        rows = isExcelXMLFile(file, text) ? parseExcelXML(text) : parseCSV(text);
+      }
+      if(rows.length < 2){
+        toast('El archivo no tiene datos', 'error');
+        return;
+      }
+      const headers = rows[0].map(normalizeHeader);
+      const idx = {
+        codigo: headers.indexOf('CODIGO'),
+        codigoBarras: headers.findIndex(h => h.includes('BARRA') || h.includes('BARCODE')),
+        nombre: headers.findIndex(h => h.includes('DESCRIPCION') || h === 'NOMBRE'),
+        marca: headers.indexOf('MARCA'),
+        categoria: headers.indexOf('CATEGORIA'),
+        // Acepta "PRECIO COMPRA", "PRECIO DE COMPRA", "PRECIO_COMPRA", etc.
+        precioCompra: headers.findIndex(h => h.includes('PRECIO') && h.includes('COMPRA')),
+        precioMarca: headers.findIndex(h => h.includes('PRECIO') && h.includes('MARCA') && !h.includes('BARRA')),
+        precioVenta: headers.findIndex(h => h.includes('PRECIO') && h.includes('VENTA')),
+        stock: headers.findIndex(h => h.includes('STOCK') && !h.includes('MIN')),
+        stockMin: headers.findIndex(h => h.includes('STOCK') && h.includes('MIN')),
+        caracteristicas: headers.findIndex(h => h.includes('CARACTERISTICA') || h.includes('OBSERVACION') || h.includes('NOTA')),
+        imagen: headers.findIndex(h => h.includes('IMAGEN') || h.includes('FOTO'))
       };
-      reader.onerror = ()=> toast('Error al leer el archivo', 'error');
-      reader.readAsArrayBuffer(file);
-    });
+      if(idx.codigo === -1 || idx.nombre === -1){
+        toast('El archivo debe tener al menos columnas CODIGO y DESCRIPCION', 'error');
+        return;
+      }
+      if(idx.precioCompra === -1 || idx.precioVenta === -1){
+        toast('No se encontraron las columnas de precio (se importarán los productos, pero revisa los precios manualmente)', 'warning');
+      }
+
+      // RAÍZ del problema de duplicados: reimportar el mismo Excel en otro
+      // dispositivo generaba ids NUEVOS y subía documentos duplicados. Ahora,
+      // antes de importar, se consultan los códigos que YA existen en la nube:
+      // si el código ya tiene documento, el producto local adopta ESE id y la
+      // importación actualiza el documento existente en vez de duplicarlo.
+      let cloudCodeMap = null;
+      try{ if(firebaseToggleOn() && typeof firebase !== 'undefined') cloudCodeMap = await buildCloudCodeMap(currentModo); }catch(e){ cloudCodeMap = null; }
+      let creados = 0, actualizados = 0;
+      const importadosList = [];
+      for(let i = 1; i < rows.length; i++){
+        const r = rows[i];
+        const codigo = String(r[idx.codigo] || '').trim();
+        if(!codigo) continue;
+        const codigoBarras = idx.codigoBarras > -1 ? String(r[idx.codigoBarras] || '').trim() : '';
+        const nombre = String(r[idx.nombre] || '').trim();
+        const marca = idx.marca > -1 ? String(r[idx.marca] || '').trim() : '';
+        const categoria = idx.categoria > -1 ? String(r[idx.categoria] || '').trim() : '';
+        const precioCompra = idx.precioCompra > -1 ? parsePrecio(r[idx.precioCompra]) : 0;
+        const precioMarca = idx.precioMarca > -1 ? parsePrecio(r[idx.precioMarca]) : 0;
+        const precioVenta = idx.precioVenta > -1 ? parsePrecio(r[idx.precioVenta]) : 0;
+        const stockVal = idx.stock > -1 ? parsePrecio(r[idx.stock]) : null;
+        const stockMinVal = idx.stockMin > -1 ? parsePrecio(r[idx.stockMin]) : null;
+        const caracteristicas = idx.caracteristicas > -1 ? String(r[idx.caracteristicas] || '').trim() : '';
+
+        if(categoria) upsertCategoria(categoria);
+
+        let productoId = null;
+        const existing = getProductoByCodigo(codigo);
+        if(existing){
+          existing.nombre = nombre || existing.nombre;
+          existing.marca = marca || existing.marca;
+          existing.categoria = categoria || existing.categoria;
+          existing.codigoBarras = codigoBarras || existing.codigoBarras;
+          existing.precioCompra = precioCompra || existing.precioCompra;
+          existing.precioMarca = precioMarca || existing.precioMarca;
+          existing.precioVenta = precioVenta || existing.precioVenta;
+          if(stockVal !== null) existing.stock = stockVal;
+          if(stockMinVal !== null) existing.stockMin = stockMinVal;
+          if(caracteristicas) existing.caracteristicas = caracteristicas;
+          touchProducto(existing);
+          productoId = existing.id;
+          importadosList.push(existing);
+          actualizados++;
+        }else{
+          const p = {
+            id: (cloudCodeMap && cloudCodeMap.get(normalize(codigo))) || uid(),
+            codigo, codigoBarras, nombre, marca, categoria,
+            precioCompra, precioMarca, precioVenta,
+            caracteristicas,
+            stock: stockVal !== null ? stockVal : 0,
+            stockMin: stockMinVal !== null ? stockMinVal : 0,
+            fechaCreacion: todayISO(),
+            _updatedAt: Date.now()
+          };
+          db.productos.push(p);
+          productoId = p.id;
+          importadosList.push(p);
+          creados++;
+        }
+        // Si el CSV trae una columna IMAGEN, se guarda la foto en este
+        // dispositivo (local, no Firebase). Si el valor es un link (https),
+        // se guarda también como el link original de la foto para poder
+        // re-exportarlo después (columna IMAGEN con la URL de respaldo).
+        if(idx.imagen > -1 && productoId){
+          const imgVal = String(r[idx.imagen] || '').trim();
+          if(imgVal && (imgVal.startsWith('data:') || /^https?:\/\//i.test(imgVal))){
+            // Reemplaza las fotos del producto con la del CSV (una sola foto).
+            saveImagesLocal(productoId, [imgVal], /^https?:\/\//i.test(imgVal) ? [imgVal] : ['']);
+          }
+        }
+      }
+      saveDB();
+      syncProductoDocs(importadosList, currentModo); // los productos importados también van a la nube
+      renderProductos();
+      renderCategorias();
+      toast(`Importación completa: ${creados} nuevos, ${actualizados} actualizados`, 'success');
+    }catch(err){
+      console.error(err);
+      toast('No se pudo leer el archivo Excel/CSV. Verifica el formato.', 'error');
+    }
+  };
+  reader.onerror = ()=> toast('Error al leer el archivo', 'error');
+  reader.readAsArrayBuffer(file);
 }
 
 /* -------------------------------------------------------------------------
@@ -9517,12 +9141,12 @@ function importBackup(file){
         return;
       }
       confirmDialog('Restaurar backup', 'Esto reemplazará todos los productos y categorías actuales. ¿Continuar?', ()=>{
-        db = aplicarModoLocal(normalizeDB({
+        db = normalizeDB({
           productos: parsed.productos || [],
           categorias: parsed.categorias || [],
           contador: parsed.contador || { producto: (parsed.productos.length || 0) + 1, venta: 1 },
           ventas: parsed.ventas || []
-        }), currentModo);
+        });
         saveDB();
         syncProductoDocs(db.productos, currentModo); // los productos restaurados también van a la nube
         backfillVentas(currentModo); // las ventas restauradas también suben a la colección compartida
@@ -9693,45 +9317,29 @@ function importFotosProductos(file){
 // mezclados productos del otro modo. Ventas, compras, gastos e historial NO
 // se tocan.
 function vaciarCatalogo(){
-  // En invitado se vacían LOS DOS catálogos (Manuales y Eléctricas), porque el
-  // invitado los ve combinados. En manual/electrico solo el modo actual.
-  const modos = (currentModo === 'invitado') ? ['manual', 'electrico'] : [currentModo];
-  const nombre = currentModo === 'invitado'
-    ? 'Manuales y Eléctricas'
-    : (currentModo === 'electrico' ? 'Eléctricas' : 'Manuales');
-  confirmDialog('Vaciar catálogo ' + (currentModo === 'invitado' ? 'de Manuales y Eléctricas' : 'del modo ' + nombre),
+  if(currentRole === 'guest'){ toast('Los invitados no pueden vaciar el catálogo', 'error'); return; }
+  const nombre = currentModo === 'electrico' ? 'Eléctricas' : 'Manuales';
+  confirmDialog('Vaciar catálogo del modo ' + nombre,
     '¿Estás seguro de vaciar todos los productos de ' + nombre + '?\n\nSe eliminarán TODOS los productos y categorías de ' + nombre + ' (en este dispositivo y en la nube). Ventas, compras, gastos e historial NO se tocan. Esta acción no se puede deshacer.',
     ()=>{
-      modos.forEach(modo => {
-        const store = modo === currentModo ? db : loadModoDB(modo);
-        const ids = (store.productos || []).map(p => p.id);
-        ids.forEach(id => { // el vaciado viaja a los otros dispositivos (tumba)
-          store.tombstones = store.tombstones || {};
-          store.tombstones.productos = store.tombstones.productos || {};
-          store.tombstones.productos[String(id)] = Date.now();
-        });
-        store.productos = [];
-        store.categorias = [];
-        if(modo === currentModo){
-          saveDB(); // sube el catálogo vacío (con las tumbas) a la nube
-        }else{
-          persistModoDB(modo, store); // baja el otro modo y lo sube vacío
-        }
-        vaciarProductosNube(ids, modo); // borra también los documentos de producto de la nube
-        try{ ids.forEach(id => removeImageLocal(id)); }catch(e){}
-      });
-      if(currentModo === 'invitado'){ db = buildGuestDB(); rerenderCurrentView(); }
+      const ids = (db.productos || []).map(p => p.id);
+      ids.forEach(id => marcarBorrado('productos', id)); // el vaciado viaja a los otros dispositivos
+      db.productos = [];
+      db.categorias = [];
+      saveDB(); // sube el catálogo vacío (con las tumbas) a la nube
+      vaciarProductosNube(ids); // borra también los documentos de producto de la nube
+      ids.forEach(id => removeImageLocal(id)); // quita las fotos locales de esos productos
       renderProductos();
       renderCategorias();
       renderInventario();
       document.getElementById('scanResult').innerHTML = '';
-      toast('Catálogo de ' + nombre + ' vaciado. Reimporta el/los Excel de ' + nombre, 'success');
+      toast('Catálogo de ' + nombre + ' vaciado. Reimporta el Excel de ' + nombre, 'success');
     });
 }
 
-// Borra de la nube los documentos de producto de un modo (en lotes).
-async function vaciarProductosNube(ids, modo){
-  const col = fbProductsCol(modo || currentModo);
+// Borra de la nube los documentos de producto del modo actual (en lotes).
+async function vaciarProductosNube(ids){
+  const col = fbProductsCol(currentModo);
   if(!col || !fbConfigOk() || !ids || !ids.length) return;
   try{
     const fs = firebase.firestore();
@@ -9758,285 +9366,6 @@ function factoryReset(){
     document.getElementById('scanResult').innerHTML = '';
     toast('Datos borrados', 'success');
   });
-}
-
-// Botón "Obtener la última actualización": fuerza la bajada COMPLETA del
-// catálogo desde la nube (colección por producto de cada modo) y le dice al
-// dueño qué recibió, aunque haya sido hace un momento.
-async function obtenerUltimaActualizacion(){
-  if(!fbConfigOk()){
-    toast('El SDK de Firebase no cargó (revisa tu conexión a internet)', 'error');
-    return;
-  }
-  const mods = currentModo === 'invitado'
-    ? ['manual', 'electrico']
-    : [currentModo, currentModo === 'manual' ? 'electrico' : 'manual'];
-  forceAssimilarCatalogo = true;
-  setSyncStatus('connecting');
-  const filas = [];
-  for(const modo of mods){
-    try{
-      const r = await assimilateCatalogFromCloud(modo);
-      if(r){
-        const partes = [];
-        if(r.nuevos) partes.push('+' + r.nuevos + ' nuevos');
-        if(r.actualizados) partes.push(r.actualizados + ' actualizados');
-        filas.push(MODO_LABELS[modo] + ': ' + (partes.length ? partes.join(', ') : 'sin cambios'));
-      }else{
-        filas.push(MODO_LABELS[modo] + ': sin cambios');
-      }
-    }catch(e){
-      console.error('Error obteniendo la última actualización (' + modo + ')', e);
-      filas.push(MODO_LABELS[modo] + ': error');
-    }
-  }
-  forceAssimilarCatalogo = false; // se consumió con ambos modos
-  // Separa Manuales y Eléctricas: productos en el modo equivocado vuelven a su
-  // colección y los que están duplicados entre modos se corrigen.
-  const sep = await separarModos();
-  if(sep.movidos || sep.borrados){
-    filas.push('🔀 Modos separados: ' + sep.movidos + ' movidos, ' + sep.borrados + ' repetidos entre modos eliminados');
-  }
-  // Limpieza de repetidos: si en la nube quedaron productos duplicados de
-  // importaciones viejas, se borran los sobrantes (queda uno por producto).
-  let limpiados = 0;
-  for(const modo of mods){
-    try{ limpiados += await consolidarNube(modo); }catch(e){}
-  }
-  if(limpiados) filas.push('🗑️ Se quitaron ' + limpiados + ' productos repetidos de la nube');
-  if(currentModo === 'invitado'){ db = buildGuestDB(); }
-  rerenderCurrentView();
-  setSyncStatus('synced');
-  const texto = '🔄 Última actualización recibida:\n' + filas.join('\n');
-  const el = document.getElementById('syncLastUpdate');
-  if(el){ el.textContent = texto; el.style.whiteSpace = 'pre-line'; }
-  toast('✅ Actualización recibida', 'success');
-}
-
-// Elimina de la nube los documentos de producto REPETIDOS (mismo código y
-// mismo nombre, pero con dos ids distintos: quedaron de importaciones viejas
-// que creaban un id nuevo por dispositivo). Conserva UN solo documento por
-// producto (el canónico: más reciente, con más datos). Devuelve cuántos borró.
-async function consolidarNube(modo){
-  if(!fbConfigOk()) return 0;
-  const col = fbProductsCol(modo);
-  if(!col) return 0;
-  try{
-    const snap = await col.get();
-    const groups = new Map();
-    snap.docs.forEach(doc => {
-      const data = doc.data() || {};
-      if(!data || !data.id) return;
-      const code = normalize(data.codigo);
-      const name = normalize(data.nombre);
-      if(!code || !name) return;
-      const key = code + '|' + name;
-      const arr = groups.get(key) || [];
-      arr.push({
-        docId: String(data.id),
-        ts: Number(data._updatedAt) || 0,
-        stock: Number(data.stock) || 0,
-        car: String(data.caracteristicas || '').length
-      });
-      groups.set(key, arr);
-    });
-    const borrar = [];
-    groups.forEach(arr => {
-      if(arr.length < 2) return;
-      // El primero tras ordenar es el canónico; el resto son repetidos.
-      arr.sort((a, b) => (b.ts - a.ts) || (b.stock - a.stock) || (b.car - a.car));
-      arr.slice(1).forEach(d => borrar.push(d.docId));
-    });
-    if(!borrar.length) return 0;
-    const fs = firebase.firestore();
-    for(let i = 0; i < borrar.length; i += 450){
-      const batch = fs.batch();
-      borrar.slice(i, i + 450).forEach(docId => batch.delete(col.doc(docId)));
-      await batch.commit();
-    }
-    return borrar.length;
-  }catch(e){
-    if(e && e.code !== 'permission-denied') console.error('Error consolidando la nube (' + modo + ')', e);
-    return 0;
-  }
-}
-
-// Separa las colecciones de Manuales y Eléctricas en la nube:
-//  - Un documento con modo EXPLÍCITO del otro modo se MUEVE a su colección.
-//  - Un mismo código en AMBAS colecciones es una mezcla: gana el que coincide
-//    con su colección (modo explícito) o el más reciente; el otro se BORRA.
-// Devuelve { movidos, borrados } para reportar lo que se corrigió.
-async function separarModos(){
-  if(!fbConfigOk()) return { movidos: 0, borrados: 0 };
-  const fs = fbFirestoreOrNull();
-  if(!fs) return { movidos: 0, borrados: 0 };
-  const colM = fs.collection('stockferre_productos_manual');
-  const colE = fs.collection('stockferre_productos_electrico');
-  let movidos = 0, borrados = 0;
-  try{
-    const [snapM, snapE] = await Promise.all([
-      withTimeout(colM.get(), 20000),
-      withTimeout(colE.get(), 20000)
-    ]);
-    const byCodeM = new Map(); // código -> { docId, data }
-    const byCodeE = new Map();
-    const explicitoM = []; // docs de manual que dicen ser de elécricas
-    const explicitoE = []; // docs de eléctricas que dicen ser de manuales
-    snapM.docs.forEach(d => {
-      const data = d.data() || {};
-      if(!data || !data.id) return;
-      if(data.modo === 'electrico'){ explicitoM.push(d); return; }
-      const c = normalize(data.codigo);
-      if(c) byCodeM.set(c, { docId: String(data.id), data });
-    });
-    snapE.docs.forEach(d => {
-      const data = d.data() || {};
-      if(!data || !data.id) return;
-      if(data.modo === 'manual'){ explicitoE.push(d); return; }
-      const c = normalize(data.codigo);
-      if(c) byCodeE.set(c, { docId: String(data.id), data });
-    });
-    // 1) Mover los que traen modo explícito de la otra colección.
-    const mover = async (doc, colDest, colOrig) => {
-      const data = Object.assign({}, doc.data() || {}, { modo: colDest.id.slice('stockferre_productos_'.length) });
-      await colDest.doc(String(data.id)).set(data, { merge: true });
-      await colOrig.doc(String(data.id)).delete();
-      movidos++;
-    };
-    for(const d of explicitoM){ try{ await mover(d, colE, colM); }catch(e){ console.error('Error moviendo elécrica→manual', e); } }
-    for(const d of explicitoE){ try{ await mover(d, colM, colE); }catch(e){ console.error('Error moviendo manual→eléctrica', e); } }
-    // 2) Mismo código en ambas = mezcla. Se queda uno, se borra el otro.
-    const aBorrar = [];
-    byCodeE.forEach((eItem, code) => {
-      const mItem = byCodeM.get(code);
-      if(!mItem) return;
-      const eModoOk = eItem.data.modo === 'electrico';
-      const mModoOk = mItem.data.modo === 'manual';
-      let ganador;
-      if(eModoOk !== mModoOk){
-        ganador = eModoOk ? eItem : mItem;
-      }else{
-        const et = Number(eItem.data._updatedAt) || 0;
-        const mt = Number(mItem.data._updatedAt) || 0;
-        ganador = et > mt ? eItem : (mt > et ? mItem : eItem); // empate → eléctrico (había eléctricas en manuales)
-      }
-      if(ganador === eItem) aBorrar.push(colM.doc(mItem.docId).delete());
-      else aBorrar.push(colE.doc(eItem.docId).delete());
-    });
-    if(aBorrar.length){
-      const res = await Promise.allSettled(aBorrar);
-      borrados += res.filter(r => r.status === 'fulfilled').length;
-    }
-    return { movidos, borrados };
-  }catch(e){
-    if(e && e.code !== 'permission-denied') console.error('Error separando los modos en la nube', e);
-    return { movidos, borrados };
-  }
-}
-
-// Borra TODO lo guardado en ESTE dispositivo (LocalStorage + almacén
-// ampliado + imágenes). Se usa para el reinicio total.
-function borrarTodoLocal(){
-  try{
-    const prefijos = ['stockferre', 'fs_', 'fs-', 'inventario_', 'inv_'];
-    Object.keys(localStorage).forEach(k => {
-      if(k === 'fs_reset_ts') return; // la marca del reinicio se conserva
-      const kl = k.toLowerCase();
-      if(prefijos.some(p => kl.indexOf(p) === 0)) localStorage.removeItem(k);
-    });
-  }catch(e){ console.error('Error limpiando LocalStorage', e); }
-  try{ Object.keys(blobCache).forEach(k => { delete blobCache[k]; }); }catch(e){}
-  try{ kvClearAll(); }catch(e){}
-  try{ clearAllImages(); }catch(e){}
-}
-
-// Vacía UNA colección de Firestore completo (borra documento por documento,
-// en lotes y repetidas veces por si otro dispositivo añade más mientras tanto).
-async function vaciarColeccion(col, fs, maxVueltas){
-  if(!col) return;
-  for(let v = 0; v < (maxVueltas || 30); v++){
-    let snap = null;
-    try{ snap = await withTimeout(col.limit(450).get(), 15000); }catch(e){ return; }
-    if(snap.empty) return;
-    const batch = fs.batch();
-    snap.docs.forEach(d => batch.delete(d.ref));
-    try{ await batch.commit(); }catch(e){ /* otro reintento */ }
-  }
-}
-
-// Revisa si el dueño reinició TODA la app desde otro dispositivo: la marca
-// queda en stockferre/control. Si es más nueva que la que este dispositivo ya
-// aplicó, borra lo local y recarga. Devuelve true si se aplicó el reinicio.
-async function verificarControlReset(fs){
-  try{
-    const snap = await withTimeout(fs.collection('stockferre').doc('control').get(), 8000);
-    if(!snap.exists) return false;
-    const reset = snap.data() && snap.data().reset;
-    if(!reset || !reset.ts) return false;
-    let aplicado = 0;
-    try{ aplicado = Number(localStorage.getItem('fs_reset_ts') || 0) || 0; }catch(e){}
-    if(reset.ts > aplicado){
-      borrarTodoLocal();
-      try{ localStorage.setItem('fs_reset_ts', String(reset.ts)); }catch(e){}
-      toast('🔄 El dueño reinició la app: aquí también quedó vacía. Importa los Excel de nuevo.', 'warning');
-      setTimeout(()=>{ try{ location.reload(); }catch(e){} }, 1500);
-      return true;
-    }
-  }catch(e){}
-  return false;
-}
-
-// Botón "Reiniciar TODA la app": borra la nube (catálogos, ventas, gastos,
-// ajustes de los 3 dominios) y deja una marca para que TODOS los demás
-// dispositivos se vacíen solos al abrir. Después vuelve a importar desde cero.
-function resetAllDevices(){
-  if(typeof firebase === 'undefined' || typeof firebaseConfig === 'undefined' || !firebaseConfig.apiKey){
-    toast('Firebase no está disponible (revisa tu conexión a internet)', 'error');
-    return;
-  }
-  confirmDialog('Reiniciar TODA la app',
-    'Se borrarán PERMANENTEMENTE de la nube:\n' +
-    '• Todos los productos de Manuales y Eléctricas\n• Todas las ventas, gastos y ajustes (los 3 dominios)\n' +
-    '• Los datos locales de TODOS los dispositivos\n\n' +
-    'Ningún equipo volverá a mostrar nada hasta que importes los Excel de nuevo.\n¿Continuar?',
-    ()=>{
-      confirmDialog('ÚLTIMA CONFIRMACIÓN',
-        'No hay manera de deshacer esto. Todo el historial de ventas se pierde.\n\n' +
-        'Si estás 100% seguro, pulsa Confirmar.',
-        async ()=>{
-          toast('Vaciando la nube…', 'warning');
-          try{
-            if(!firebase.apps || !firebase.apps.length){ firebase.initializeApp(firebaseConfig); }
-            const fs = firebase.firestore();
-            const ts = Date.now();
-            // 1) Marca global ANTES de borrar: los demás dispositivos se vaciarán solos.
-            await fs.collection('stockferre').doc('control').set({
-              reset: { ts, por: currentModo }
-            }, { merge: true });
-            // 2) Vacía las colecciones por producto, ventas, ajustes y gastos.
-            const fsInstance = fs;
-            const borrados = [
-              'stockferre_productos_manual','stockferre_productos_electrico',
-              'stockferre_ventas_manual','stockferre_ventas_electrico','stockferre_ventas_invitado',
-              'stockferre_ajustes_manual','stockferre_ajustes_electrico','stockferre_ajustes_invitado',
-              'stockferre_gastos_manual','stockferre_gastos_electrico','stockferre_gastos_invitado'
-            ].map(c => vaciarColeccion(fs.collection(c), fsInstance));
-            try{ await withTimeout(Promise.all(borrados), 30000); }catch(e){} 
-            // 3) Borra los documentos consolidados de los 3 dominios.
-            ['inventario_manual','inventario_electrico','inventario_invitado'].forEach(docId=>{
-              try{ fs.collection('stockferre').doc(docId).delete().catch(()=>{}); }catch(e){}
-            });
-            // 4) Este dispositivo queda marcado para no reaccionar a su propia marca.
-            try{ localStorage.setItem('fs_reset_ts', String(ts)); }catch(e){}
-            borrarTodoLocal();
-            toast('✅ Nube vaciada. Este dispositivo se reinicia…', 'success');
-            setTimeout(()=>{ try{ location.reload(); }catch(e){} }, 1500);
-          }catch(err){
-            console.error('Error reiniciando la app', err);
-            toast('No se pudo vaciar la nube (revisa tu conexión)', 'error');
-          }
-        });
-    });
 }
 
 /* -------------------------------------------------------------------------
@@ -10716,9 +10045,7 @@ function closeAllModals(){
 let confirmCallback = null;
 function confirmDialog(title, message, onAccept){
   document.getElementById('confirmTitle').textContent = title;
-  const msgEl = document.getElementById('confirmMessage');
-  msgEl.textContent = message;
-  msgEl.style.whiteSpace = 'pre-line'; // respeta los saltos de línea del mensaje
+  document.getElementById('confirmMessage').textContent = message;
   confirmCallback = onAccept;
   openModal('modalConfirm');
 }
@@ -11589,13 +10916,9 @@ function setupEventListeners(){
 
   // Confirm modal
   document.getElementById('confirmAcceptBtn').addEventListener('click', ()=>{
-    const cb = confirmCallback;
+    if(confirmCallback) confirmCallback();
     confirmCallback = null;
     closeAllModals();
-    // Se invoca DESPUÉS de cerrar/limpiar: así un confirmDialoog encadenado
-    // (como "Reiniciar TODA la app", que confirma dos veces) puede reabrir el
-    // modal SIN que se lo vuelva a cerrar ni se pierda su callback.
-    if(cb) cb();
   });
 
   // Escáner
@@ -12231,10 +11554,6 @@ function setupEventListeners(){
     e.target.value = '';
   });
   document.getElementById('btnManualSync').addEventListener('click', manualSync);
-  const btnAct = document.getElementById('btnObtenerActualizacion');
-  if(btnAct){ btnAct.addEventListener('click', obtenerUltimaActualizacion); }
-  const btnResetAll = document.getElementById('btnResetAllDevices');
-  if(btnResetAll){ btnResetAll.addEventListener('click', resetAllDevices); }
   document.getElementById('btnVaciarCatalogo').addEventListener('click', vaciarCatalogo);
   document.getElementById('btnFactoryReset').addEventListener('click', factoryReset);
 }

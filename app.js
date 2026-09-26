@@ -454,7 +454,7 @@ function runQueuedWrite(docId, ref){
     }
     q.attempt = 0;
     fbLastErrorCode = (err && err.code) || 'write-failed';
-    fbLastErrorMessage = (err && err.message) || String(err);
+    fbLastErrorMessage = ((err && err.message) || String(err)) + ' (proyecto: ' + fbProjectLabel(ref) + ')';
     setSyncStatus('error');
     console.warn('Escritura a Firebase no pudo subir tras varios reintentos. Se reintentará al volver la conexión.');
     finishQueuedWrite(docId, ref, toSend);
@@ -477,10 +477,11 @@ function saveDB(){
   // EN EL CELULAR sube igual y llega a la compu aunque el arranque de la
   // sincronización haya sido lento (era el motivo por el que el celular
   // guardaba la venta solo ahí y la compu nunca se enteraba).
-  if(firebaseToggleOn() && typeof firebase !== 'undefined' && typeof firebaseConfig !== 'undefined' && firebaseConfig.apiKey){
+  if(firebaseToggleOn() && fbConfigOk(currentModo)){
     try{
-      if(!firebase.apps || !firebase.apps.length){ firebase.initializeApp(firebaseConfig); }
-      const ref = fbDocRef || firebase.firestore().collection('stockferre').doc(firebaseDocId());
+      const fsMain = fsFor(currentModo);
+      if(!fsMain) return;
+      const ref = fbDocRef || fsMain.collection('stockferre').doc(firebaseDocId());
       const { historialEscaneos, historialBusquedas, historialInventario, ventas, ajustes, gastosPrestamos, ...syncData } = db;
       scheduleFirestoreWrite(firebaseDocId(), ref, syncData);
     }catch(err){
@@ -570,10 +571,11 @@ function findProductoInDB(dbObj, codigo){
 // correcta (Manuales o Eléctricas).
 function persistModoDB(modo, dbObj){
   persistBlob('stockferre_catalogo_v1_' + modo, dbObj);
-  if(firebaseToggleOn() && typeof firebase !== 'undefined' && typeof firebaseConfig !== 'undefined' && firebaseConfig.apiKey){
+  if(firebaseToggleOn() && fbConfigOk(modo)){
     try{
-      if(!firebase.apps || !firebase.apps.length){ firebase.initializeApp(firebaseConfig); }
-      const ref = firebase.firestore().collection('stockferre').doc('inventario_' + modo);
+      const fsModo = fsFor(modo);
+      if(!fsModo) return;
+      const ref = fsModo.collection('stockferre').doc('inventario_' + modo);
       const { historialEscaneos, historialBusquedas, historialInventario, ventas, ajustes, gastosPrestamos, ...syncData } = dbObj;
       scheduleFirestoreWrite('inventario_' + modo, ref, syncData);
     }catch(err){
@@ -739,27 +741,40 @@ function disconnectGuestFirebase(){
 // En modo invitado conecta a Firestore: escucha los documentos de Manuales y
 // Eléctricas (solo para catálogo/productos) y también el documento propio del
 // invitado (ventas/gastos/finanzas). Cada uno se mantiene aislado.
-function connectGuestFirebase(){
+async function connectGuestFirebase(){
   if(!firebaseToggleOn()){
     setSyncStatus('local'); // el usuario apagó la sincronización en este dispositivo
     return;
   }
-  if(typeof firebaseConfig === 'undefined' || !firebaseConfig.apiKey || !firebaseConfig.projectId) return;
+  if(!fbConfigOk('manual') && !fbConfigOk('electrico')) return;
   if(typeof firebase === 'undefined') return;
+  // ¿La nube se reinició desde otro dispositivo? Este navegador se limpia SOLO
+  // antes de fusionar o subir nada (evita resucitar datos ya borrados).
+  if(await checkRemoteResetGen()) return;
+  const token = modeToken;
   // Limpia los listeners del invitado de una conexión previa (para poder
   // reconectar desde el watchdog sin duplicar), SIN tocar la cola de
   // escrituras pendientes para que ninguna venta se pierda.
   guestUnsubs.forEach(u => { try{ u(); }catch(e){ /* ignorar */ } });
   guestUnsubs = [];
   try{
-    if(!firebase.apps || !firebase.apps.length){ firebase.initializeApp(firebaseConfig); }
-    const fbFirestore = firebase.firestore();
-    enableOfflinePersistence(fbFirestore); // no bloquea la conexión
+    // Base propia del invitado (ventas/gastos/finanzas): vive en el proyecto
+    // 'manual' (app-perez-2). El catálogo se lee de AMBOS proyectos abajo.
+    const fsOwn = fsFor('invitado');
+    if(!fsOwn) return;
+    enableOfflinePersistence(fsOwn, fbProjectKeyFor('invitado'));
     setSyncStatus('connecting');
-    // 1) Escucha documentos de Manuales y Eléctricas (solo para catálogo/productos)
+    // 1) Escucha documentos de Manuales y Eléctricas (solo para catálogo/productos).
+    //    Cada catálogo viene de SU PROPIO proyecto: Manuales de app-perez-2 y
+    //    Eléctricas del proyecto nuevo; aquí se juntan en pantalla.
     ['manual','electrico'].forEach(modo => {
-      const ref = fbFirestore.collection('stockferre').doc('inventario_' + modo);
+      if(token !== modeToken) return;
+      const fsM = fsFor(modo);
+      if(!fsM) return;
+      enableOfflinePersistence(fsM, fbProjectKeyFor(modo));
+      const ref = fsM.collection('stockferre').doc('inventario_' + modo);
       withTimeout(ref.get(), 12000).then(snap=>{
+        if(token !== modeToken) return; // cambió de modo: esta lectura ya no aplica
         if(snap && snap.exists){
           const prev = loadModoDB(modo);
           const remote = normalizeDB(snap.data());
@@ -772,6 +787,7 @@ function connectGuestFirebase(){
         }
       }).catch(()=>{ /* local sigue funcionando */ });
       const unsub = ref.onSnapshot(snap=>{
+        if(token !== modeToken) return;
         if(snap.metadata.hasPendingWrites) return;
         if(!snap.exists) return;
         const prev = loadModoDB(modo);
@@ -791,13 +807,17 @@ function connectGuestFirebase(){
     });
     // 2) Escucha el documento PROPIO del invitado (ventas/gastos/finanzas)
     //    y habilita escritura para que saveDB() suba ventas/gastos a Firebase.
-    const ownRef = fbFirestore.collection('stockferre').doc('inventario_invitado');
+    const ownRef = fsOwn.collection('stockferre').doc('inventario_invitado');
     fbDocRef = ownRef;
     fbReady = true;
     // Con límite de tiempo: si la red está lenta, el estado no se queda para
     // siempre en "Conectando a Firebase..." (era lo que pasaba en el celular);
     // entre tanto, el listener de ventas y los de catálogo ya están activos.
     withTimeout(ownRef.get(), 12000).then(snap=>{
+      // OJO: storageKey() depende del modo ACTUAL. Si el usuario salió del
+      // invitado mientras esta lectura estaba en vuelo, se descarta: si no,
+      // la base combinada del invitado caería dentro de la clave del modo nuevo.
+      if(token !== modeToken) return;
       if(snap && snap.exists){
         const prev = loadOwnGuestBase() || defaultDB();
         const remote = normalizeDB(snap.data());
@@ -811,6 +831,7 @@ function connectGuestFirebase(){
       setSyncStatus('synced');
     }).catch(()=>{ setSyncStatus('synced'); });
     const ownUnsub = ownRef.onSnapshot(snap=>{
+      if(token !== modeToken) return;
       if(snap.metadata.hasPendingWrites) return;
       if(!snap.exists) return;
       const prev = loadOwnGuestBase() || defaultDB();
@@ -840,7 +861,8 @@ function connectGuestFirebase(){
   }catch(err){
     console.error('No se pudo conectar a Firebase en modo invitado', err);
     fbLastErrorCode = (err && err.code) || 'error';
-    fbLastErrorMessage = (err && err.message) || String(err);
+    fbLastErrorMessage = ((err && err.message) || String(err)) +
+      ' (proyecto: ' + fbProjectLabelForModo('invitado') + ' / catálogos: ambos)';
     setSyncStatus('error');
   }
 }
@@ -848,6 +870,68 @@ function connectGuestFirebase(){
 /* -------------------------------------------------------------------------
    1b. FIREBASE (sincronización entre dispositivos — opcional)
    ------------------------------------------------------------------------- */
+
+/* -------------------------------------------------------------------------
+   PROYECTOS DE FIREBASE SEPARADOS POR MODO (dos bases de datos distintas)
+   -------------------------------------------------------------------------
+   Cada modo vive en su PROPIO proyecto de Firebase, de modo que una mezcla
+   accidental de datos es estructuralmente imposible (no existe la ruta que
+   conecte un proyecto con otro):
+     • 'manual'    -> app-perez-2    (Manuales + TODA la base del invitado)
+     • 'electrico' -> app-ferreteria-bd73f (solo Eléctricas)
+   El invitado LEE el catálogo de los dos proyectos y los junta en pantalla,
+   pero sus ventas/gastos/finanzas se escriben en el proyecto 'manual'.
+   ------------------------------------------------------------------------- */
+const FB_PROJECTS = {
+  manual: {
+    name: 'stockferre_manual',
+    cfg: (typeof firebaseConfigManual !== 'undefined' && firebaseConfigManual) ? firebaseConfigManual : null
+  },
+  electrico: {
+    name: 'stockferre_electrico',
+    cfg: (typeof firebaseConfigElectrico !== 'undefined' && firebaseConfigElectrico) ? firebaseConfigElectrico : null
+  }
+};
+
+// Proyecto al que pertenece cada modo/entidad.
+function fbProjectKeyFor(modo){ return modo === 'electrico' ? 'electrico' : 'manual'; }
+
+// Configuración del proyecto de un modo (null si no está configurado).
+function fbCfgFor(modo){
+  const p = FB_PROJECTS[fbProjectKeyFor(modo)];
+  return p ? p.cfg : null;
+}
+
+// Instancia de Firestore (app con nombre) del proyecto de UN modo concreto.
+// 'invitado' apunta al proyecto donde vive su base propia (Manuales).
+// Cada proyecto es una "app" aparte dentro del mismo SDK de Firebase.
+function fsFor(modo){
+  if(typeof firebase === 'undefined' || !firebase.apps) return null;
+  const key = fbProjectKeyFor(modo);
+  const p = FB_PROJECTS[key];
+  if(!p || !p.cfg || !p.cfg.apiKey || !p.cfg.projectId) return null;
+  let app = null;
+  try{ app = firebase.apps.filter(a => a.name === p.name)[0]; }catch(e){ app = null; }
+  try{
+    if(!app) app = firebase.initializeApp(p.cfg, p.name);
+    return app.firestore();
+  }catch(e){
+    console.error('Error preparando Firestore del proyecto ' + p.cfg.projectId, e);
+    return null;
+  }
+}
+
+// Marca de generación del último "Poner todo desde cero". Se guarda también
+// en la nube: si un dueño reinicia TODO, cada dispositivo que abra la app ve
+// una generación más nueva que la suya y se auto-limpia (así ningún navegador
+// con datos viejos vuelve a subirlos y "resucita" lo borrado).
+const RESET_GEN_KEY = 'stockferre_reset_gen_v1';
+
+// Contador de generación de modo: se incrementa en CADA cambio de modo. Toda
+// lectura async de Firebase captura el token al nacer y se anula sola si el
+// usuario cambió de modo mientras esperaba (así un snapshot viejo de Manuales
+// nunca puede fundirse dentro de la base de Eléctricas, ni al revés).
+let modeToken = 0;
 
 let fbReady = false;
 let fbDocRef = null;
@@ -930,7 +1014,7 @@ function setSyncStatus(status){
   if(status === 'error'){
     showDiagnostic('Firebase falló al conectar.\nCódigo: ' + (fbLastErrorCode || 'desconocido') +
       (fbLastErrorMessage ? '\nMensaje: ' + fbLastErrorMessage : '') +
-      '\nProyecto: ' + ((typeof firebaseConfig !== 'undefined' && firebaseConfig && firebaseConfig.projectId) ? firebaseConfig.projectId : '(sin config)') +
+      '\nProyectos: ' + [fbCfgFor('manual') && fbCfgFor('manual').projectId, fbCfgFor('electrico') && fbCfgFor('electrico').projectId].filter(Boolean).join(' + ') + (fbCfgFor('manual') || fbCfgFor('electrico') ? '' : '(sin config)') +
       '\nSDK cargado: ' + (typeof firebase !== 'undefined' ? 'sí' : 'NO') +
       '\nURL: ' + location.href);
   }
@@ -945,7 +1029,7 @@ function manualSync(){
   const btn = document.getElementById('btnManualSync');
   if(btn){ btn.disabled = true; btn.textContent = '🔄 Sincronizando…'; }
   const finish = ()=>{ if(btn){ btn.disabled = false; btn.textContent = '🔄 Recibir y mandar actualizaciones'; } };
-  if(typeof firebaseConfig === 'undefined' || !firebaseConfig.apiKey || !firebaseConfig.projectId){
+  if(!fbConfigOk()){
     setFirebaseToggle(false);
     setFirebaseToggleUI(false);
     finish();
@@ -1023,7 +1107,7 @@ async function connectFirebase(){
     setSyncStatus('local'); // el usuario apagó la sincronización en este dispositivo
     return;
   }
-  if(typeof firebaseConfig === 'undefined' || !firebaseConfig.apiKey || !firebaseConfig.projectId){
+  if(!fbConfigOk(currentModo)){
     setSyncStatus('local');
     return; // no configurado: la app sigue funcionando 100% local
   }
@@ -1034,6 +1118,10 @@ async function connectFirebase(){
     setSyncStatus('error');
     return;
   }
+  // ¿La nube se reinició desde otro dispositivo? Este navegador se limpia SOLO
+  // antes de fusionar o subir nada (evita resucitar datos ya borrados).
+  if(await checkRemoteResetGen()) return;
+  const token = modeToken; // si el usuario cambia de modo, todo lo de abajo se anula
 
   try{
     // Limpia cualquier conexión previa (para poder llamar connectFirebase()
@@ -1043,9 +1131,12 @@ async function connectFirebase(){
     if(fbOtherUnsub){ try{ fbOtherUnsub(); }catch(e){ /* ignorar */ } fbOtherUnsub = null; }
     stopStockListeners();
     setSyncStatus('connecting');
-    if(!firebase.apps || !firebase.apps.length){ firebase.initializeApp(firebaseConfig); }
-    const fbFirestore = firebase.firestore();
-    await withTimeout(enableOfflinePersistence(fbFirestore), 5000);
+    // PROYECTO PROPIO DEL MODO ACTUAL (Manuales y Eléctricas viven en bases
+    // de datos distintas: cada uno habla solo con el suyo).
+    const fbFirestore = fsFor(currentModo);
+    if(!fbFirestore){ setSyncStatus('local'); return; }
+    await withTimeout(enableOfflinePersistence(fbFirestore, fbProjectKeyFor(currentModo)), 5000);
+    if(token !== modeToken) return; // cambió de modo durante la espera
     fbDocRef = fbFirestore.collection('stockferre').doc(firebaseDocId());
     fbReady = true;
 
@@ -1053,6 +1144,7 @@ async function connectFirebase(){
     // cualquier lectura. Así este dispositivo empieza a recibir los cambios
     // de los otros al instante, aunque la red esté lenta o una lectura tarde.
     const applySnapshot = (snap) => {
+      if(token !== modeToken) return; // snapshot de un modo que ya no está activo
       if(!snap.exists) return;
       const prevVentas = (db.ventas || []).map(v => v.id);
       const remote = normalizeDB(snap.data());
@@ -1074,7 +1166,8 @@ async function connectFirebase(){
     }, err=>{
       console.error('Error de sincronización Firebase', err);
       fbLastErrorCode = (err && err.code) || 'error';
-      fbLastErrorMessage = (err && err.message) || String(err);
+      fbLastErrorMessage = ((err && err.message) || String(err)) +
+        ' (proyecto: ' + fbProjectLabelForModo(currentModo) + ')';
       setSyncStatus('error');
     });
 
@@ -1085,6 +1178,7 @@ async function connectFirebase(){
     // semilla la primera vez). Con límite de tiempo: si la red tarda, el
     // listener de arriba sigue activo recibiendo los cambios igual.
     const snap = await withTimeout(fbDocRef.get(), 12000);
+    if(token !== modeToken) return; // cambió de modo durante la lectura
     if(snap && snap.exists){
       applySnapshot(snap);
     }else if(snap && !snap.exists){
@@ -1099,13 +1193,20 @@ async function connectFirebase(){
     // desde la pantalla de Inicio en un celular recién configurado).
     const otherModo = currentModo === 'manual' ? 'electrico' : 'manual';
     try{
-      const otherRef = fbFirestore.collection('stockferre').doc('inventario_' + otherModo);
-      const otherSnap = await withTimeout(otherRef.get(), 8000);
-      if(otherSnap.exists) cacheRemoteModo(otherSnap.data(), otherModo);
-      fbOtherUnsub = otherRef.onSnapshot(snap=>{
-        if(snap.metadata.hasPendingWrites) return;
-        if(snap.exists) cacheRemoteModo(snap.data(), otherModo);
-      }, ()=>{ /* ignorar */ });
+      // El OTRO modo vive en el OTRO proyecto de Firebase: se lee con su
+      // propia instancia (la contraseña/datos de ese modo quedan en caché).
+      const otherFs = fsFor(otherModo);
+      const otherRef = otherFs ? otherFs.collection('stockferre').doc('inventario_' + otherModo) : null;
+      if(otherRef){
+        const otherSnap = await withTimeout(otherRef.get(), 8000);
+        if(token !== modeToken) return; // cambió de modo: no se subscribe nada viejo
+        if(otherSnap && otherSnap.exists) cacheRemoteModo(otherSnap.data(), otherModo);
+        fbOtherUnsub = otherRef.onSnapshot(snap=>{
+          if(token !== modeToken) return;
+          if(snap.metadata.hasPendingWrites) return;
+          if(snap.exists) cacheRemoteModo(snap.data(), otherModo);
+        }, ()=>{ /* ignorar */ });
+      }
     }catch(err){ /* la caché del otro modo es opcional */ }
 
     // Stock atómico: crea los documentos de producto que falten (los que ya
@@ -1135,7 +1236,8 @@ async function connectFirebase(){
   }catch(err){
     console.error('No se pudo conectar a Firebase', err);
     fbLastErrorCode = (err && err.code) || 'error';
-    fbLastErrorMessage = (err && err.message) || String(err);
+    fbLastErrorMessage = ((err && err.message) || String(err)) +
+      ' (proyecto: ' + fbProjectLabelForModo(currentModo) + ')';
     setSyncStatus('error');
   }
 }
@@ -1152,7 +1254,7 @@ let fbReconnecting = false;
 function startSyncWatchdog(){
   stopSyncWatchdog();
   fbWatchdogTimer = setInterval(()=>{
-    if(typeof firebase === 'undefined' || typeof firebaseConfig === 'undefined') return;
+    if(typeof firebase === 'undefined') return;
     if(!fbConfigOk() || !firebaseToggleOn()) return;
     if(fbReconnecting) return;
     const stEl = document.getElementById('sidebarSyncStatus');
@@ -1226,29 +1328,48 @@ function cacheRemoteModo(data, modo){
      terminan mostrando lo mismo.
    ------------------------------------------------------------------------- */
 
-// ¿Firebase está configurado y listo para escribir?
-function fbConfigOk(){
-  return typeof firebaseConfig !== 'undefined' && firebaseConfig &&
-    firebaseConfig.apiKey && firebaseConfig.projectId &&
-    typeof firebase !== 'undefined' && firebase.firestore;
+// ¿Firebase está configurado y listo para escribir? (por proyecto: cada modo
+// consulta la configuración de SU proyecto; sin argumento = el modo actual).
+function fbConfigOk(modo){
+  const cfg = fbCfgFor(modo === undefined ? currentModo : modo);
+  return !!(cfg && cfg.apiKey && cfg.projectId &&
+    typeof firebase !== 'undefined' && firebase.firestore);
 }
 
-function fbFirestoreOrNull(){
-  if(!fbConfigOk() || !firebaseToggleOn()) return null;
+function fbFirestoreOrNull(modo){
+  const m = modo || currentModo;
+  if(!fbConfigOk(m) || !firebaseToggleOn()) return null;
   try{
-    if(!firebase.apps || !firebase.apps.length){ firebase.initializeApp(firebaseConfig); }
-    const fs = firebase.firestore();
+    const fs = fsFor(m);
+    if(!fs) return null;
     // Red de seguridad: activa la persistencia offline también por esta vía
     // (por si se escribe stock antes de que termine connectFirebase). La
     // función es idempotente, así que no duplica nada.
-    enableOfflinePersistence(fs);
+    enableOfflinePersistence(fs, fbProjectKeyFor(m));
     return fs;
   }catch(e){ console.error('Error preparando Firestore', e); return null; }
 }
 
+// Nombre del proyecto de Firebase para los mensajes de error: así el
+// diagnóstico dice CUÁL de los dos proyectos falló (las reglas de seguridad
+// se publican por proyecto y es fácil dejar una sin publicar).
+function fbProjectLabel(ref){
+  try{ return ref.firestore.app.options.projectId || ref.firestore.app.name; }
+  catch(e){ return '?'; }
+}
+function fbProjectLabelForModo(modo){
+  try{
+    const fs = fsFor(modo === undefined ? currentModo : modo);
+    if(fs) return fs.app.options.projectId || fs.app.name;
+  }catch(e){}
+  return modo === undefined ? currentModo : modo;
+}
+
 // Colección de documentos por producto del modo dado (o del modo actual).
+// Usa SIEMPRE el proyecto del modo indicado (Manuales y Eléctricas son bases
+// de datos distintas).
 function fbProductsCol(modo){
-  const fs = fbFirestoreOrNull();
+  const fs = fbFirestoreOrNull(modo);
   return fs ? fs.collection('stockferre_productos_' + (modo || currentModo)) : null;
 }
 
@@ -1373,7 +1494,7 @@ async function deleteProductoDoc(p, modo){
    ------------------------------------------------------------------------- */
 
 function fbVentasCol(modo){
-  const fs = fbFirestoreOrNull();
+  const fs = fbFirestoreOrNull(modo);
   return fs ? fs.collection('stockferre_ventas_' + (modo || currentModo)) : null;
 }
 
@@ -1409,7 +1530,7 @@ async function syncVentaDocs(list, modo){
   const col = fbVentasCol(modo);
   if(!col || !list || !list.length) return;
   try{
-    const fs = firebase.firestore();
+    const fs = col.firestore;
     for(let i = 0; i < list.length; i += 450){
       const batch = fs.batch();
       list.slice(i, i + 450).forEach(v => {
@@ -1424,7 +1545,7 @@ async function deleteVentaDocs(ids, modo){
   const col = fbVentasCol(modo);
   if(!col || !ids || !ids.length) return;
   try{
-    const fs = firebase.firestore();
+    const fs = col.firestore;
     for(let i = 0; i < ids.length; i += 450){
       const batch = fs.batch();
       ids.slice(i, i + 450).forEach(id => {
@@ -1543,7 +1664,7 @@ let fbAjustesUnsub = null;
 let fbGpUnsub = null;
 
 function fbAjustesCol(modo){
-  const fs = fbFirestoreOrNull();
+  const fs = fbFirestoreOrNull(modo);
   return fs ? fs.collection('stockferre_ajustes_' + (modo || currentModo)) : null;
 }
 
@@ -1577,7 +1698,7 @@ async function backfillAjustes(modo){
   try{
     const snap = await col.get();
     const existing = new Set(snap.docs.map(d => d.id));
-    const fs = firebase.firestore();
+    const fs = col.firestore;
     for(let i = 0; i < dias.length; i += 450){
       const batch = fs.batch();
       dias.slice(i, i + 450).forEach(d => {
@@ -1648,7 +1769,7 @@ function stopAjustesListeners(){
    ------------------------------------------------------------------------- */
 
 function fbGpCol(modo){
-  const fs = fbFirestoreOrNull();
+  const fs = fbFirestoreOrNull(modo);
   return fs ? fs.collection('stockferre_gastosprestamos_' + (modo || currentModo)) : null;
 }
 
@@ -1703,7 +1824,7 @@ async function deleteGastoPrestamoDocs(ids, modo){
   const col = fbGpCol(modo);
   if(!col || !ids || !ids.length) return;
   try{
-    const fs = firebase.firestore();
+    const fs = col.firestore;
     for(let i = 0; i < ids.length; i += 450){
       const batch = fs.batch();
       ids.slice(i, i + 450).forEach(id => { if(id) batch.delete(col.doc(String(id))); });
@@ -1733,7 +1854,7 @@ async function backfillGastosPrestamos(modo){
     const snap = await col.get();
     const existing = new Set(snap.docs.map(d => d.id));
     const missing = arr.filter(g => !existing.has(String(g.id)));
-    const fs = firebase.firestore();
+    const fs = col.firestore;
     for(let i = 0; i < missing.length; i += 450){
       const batch = fs.batch();
       missing.slice(i, i + 450).forEach(g => batch.set(col.doc(String(g.id)), gpDocData(g)));
@@ -1838,7 +1959,7 @@ async function backfillProductos(modo){
     // Los productos LOCALES que ya tienen su código en la nube (bajo OTRO id,
     // por reimportar el mismo Excel en otro dispositivo) NO crean un documento
     // duplicado: se fusionan en el documento canónico que ya existe.
-    const fs = firebase.firestore();
+    const fs = col.firestore;
     for(let i = 0; i < missing.length; i += 450){
       const batch = fs.batch();
       missing.slice(i, i + 450).forEach(p => {
@@ -1882,7 +2003,7 @@ async function syncCaracteristicasCloud(modo){
       if(localCar && localCar !== cloudCar) batched.push(p);
     });
     if(batched.length){
-      const fs = firebase.firestore();
+      const fs = col.firestore;
       for(let i = 0; i < batched.length; i += 450){
         const batch = fs.batch();
         batched.slice(i, i + 450).forEach(p => {
@@ -1903,7 +2024,7 @@ async function syncProductoDocs(list, modo){
   const col = fbProductsCol(modo);
   if(!col || !list || !list.length) return;
   try{
-    const fs = firebase.firestore();
+    const fs = col.firestore;
     for(let i = 0; i < list.length; i += 450){
       const batch = fs.batch();
       list.slice(i, i + 450).forEach(p => {
@@ -2149,13 +2270,16 @@ async function assimilateCatalogFromCloud(modo){
   }catch(e){ if(e && e.code !== 'permission-denied') console.error('Error asimilando catálogo de la nube (' + modo + ')', e); }
 }
 
-// Activa la persistencia offline UNA sola vez por sesión: las escrituras que
-// no puedan llegar a Firestore se guardan localmente y se reenvían solas
-// cuando vuelva la conexión (evita perder un registro por un cortón de red).
-let persistenceEnabled = false;
-async function enableOfflinePersistence(fs){
-  if(persistenceEnabled || !fs) return;
-  persistenceEnabled = true;
+// Activa la persistencia offline UNA sola vez por PROYECTO y sesión: las
+// escrituras que no puedan llegar a Firestore se guardan localmente y se
+// reenvían solas cuando vuelva la conexión (evita perder un registro por un
+// cortón de red). Como ahora hay DOS proyectos, la marca es por proyecto.
+const persistenceEnabledByProject = {};
+async function enableOfflinePersistence(fs, projectKey){
+  if(!fs) return;
+  const key = projectKey || 'default';
+  if(persistenceEnabledByProject[key]) return;
+  persistenceEnabledByProject[key] = true;
   try{
     await fs.enablePersistence({ synchronizeTabs: true });
   }catch(err){
@@ -9191,7 +9315,7 @@ function _fotosNormMapa(map){
   if(!map || typeof map !== 'object') return out;
   Object.keys(map).forEach(id=>{
     const v = map[id];
-    let dataArr = [], urlArr = [];
+    let dataArr = [], urlArr = [], cod = '', barras = '';
     if(Array.isArray(v)){
       dataArr = v.filter(x => typeof x === 'string' && x);
     }else if(v && typeof v === 'object'){
@@ -9199,34 +9323,125 @@ function _fotosNormMapa(map){
       const u = (v.url !== undefined) ? v.url : v.u;
       dataArr = Array.isArray(d) ? d.filter(Boolean) : (d ? [d] : []);
       urlArr = Array.isArray(u) ? u : (u ? [u] : []);
+      cod = v.codigo ? String(v.codigo) : '';
+      barras = v.codigoBarras ? String(v.codigoBarras) : '';
     }else if(typeof v === 'string'){
       dataArr = [v];
     }
     dataArr = dataArr.slice(0, MAX_IMGS);
     urlArr = urlArr.slice(0, dataArr.length);
-    if(dataArr.length) out[id] = { data: dataArr, url: urlArr };
+    if(dataArr.length) out[id] = { data: dataArr, url: urlArr, codigo: cod, codigoBarras: barras };
   });
   return out;
+}
+
+// Índice de los productos ACTUALES de un modo (por id, código y código de
+// barras). Las fotos se guardan ligadas al id del producto, pero al
+// reimportar el Excel después de un "Poner todo desde cero" los productos
+// reciben ids NUEVOS: el CÓDIGO sigue siendo el mismo, así que sirve para
+// reenganchar las fotos exportadas a su producto.
+function _productosIndexModo(modo){
+  const idx = { byId: {}, byCodigo: {}, byBarras: {} };
+  let lista = [];
+  try{
+    if(currentModo === modo && db && Array.isArray(db.productos)) lista = db.productos;
+    else lista = (loadModoDB(modo) || {}).productos || [];
+  }catch(e){}
+  if(!Array.isArray(lista)) lista = [];
+  lista.forEach(p=>{
+    if(!p) return;
+    if(p.id) idx.byId[p.id] = p;
+    const c = p.codigo ? normalize(String(p.codigo)) : '';
+    if(c && !idx.byCodigo[c]) idx.byCodigo[c] = p;
+    const b = p.codigoBarras ? normalize(String(p.codigoBarras)) : '';
+    if(b && !idx.byBarras[b]) idx.byBarras[b] = p;
+  });
+  return idx;
+}
+
+function _codigoYBarrasDeId(idx, id){
+  const p = idx.byId[id];
+  return {
+    codigo: p && p.codigo ? String(p.codigo) : '',
+    codigoBarras: p && p.codigoBarras ? String(p.codigoBarras) : ''
+  };
+}
+
+// Convierte una foto guardada como Blob (versiones viejas de la app) en
+// dataURL para que el JSON exportado traiga texto y no un objeto vacío.
+function _blobADataURL(blob){
+  return new Promise(resolve=>{
+    try{
+      const fr = new FileReader();
+      fr.onload = ()=> resolve(String(fr.result || ''));
+      fr.onerror = ()=> resolve('');
+      fr.readAsDataURL(blob);
+    }catch(e){ resolve(''); }
+  });
+}
+
+// Reengancha las fotos cuyo id ya no existe en este dispositivo (catálogo
+// importado de nuevo = ids nuevos) usando el código / código de barras.
+// Devuelve el mapa reescrito con los ids ACTUALES y cuántas no empataron.
+function _fotosReenganchar(mapa, modo){
+  const idx = _productosIndexModo(modo);
+  const out = {};
+  let sin = 0;
+  Object.keys(mapa).forEach(id=>{
+    const e = mapa[id];
+    let dest = id;
+    if(!idx.byId[id]){
+      const c = e.codigo ? normalize(String(e.codigo)) : '';
+      const b = e.codigoBarras ? normalize(String(e.codigoBarras)) : '';
+      const p = (c && idx.byCodigo[c]) || (b && idx.byBarras[b]) || null;
+      if(p && p.id) dest = String(p.id);
+      else sin++;
+    }
+    if(out[dest]){
+      out[dest].data = out[dest].data.concat(e.data).slice(0, MAX_IMGS);
+      out[dest].url = out[dest].url.concat(e.url).slice(0, MAX_IMGS);
+    }else{
+      out[dest] = { data: e.data.slice(0, MAX_IMGS), url: e.url.slice(0, MAX_IMGS) };
+    }
+  });
+  return { mapa: out, sin: sin };
 }
 
 // Lee TODAS las fotos de ambos modos y las descarga como un .json.
 function exportFotosProductos(){
   openImgDB().then(db => new Promise(resolve=>{
+    // Guarda también el CÓDIGO de cada producto: si el catálogo del otro
+    // dispositivo se creó de nuevo (ids nuevos), el import podrá reenganchar
+    // la foto por código aunque el id ya no exista.
+    const idxM = _productosIndexModo('manual');
+    const idxE = _productosIndexModo('electrico');
     const out = { _tipo: 'stockferre_fotos', version: 1, fecha: new Date().toISOString(), imgs_manual: {}, imgs_electrico: {} };
     const stores = ['imgs_manual', 'imgs_electrico'].filter(s => db.objectStoreNames.contains(s));
     if(!stores.length){ resolve(out); return; }
     let pend = stores.length;
     const tx = db.transaction(stores, 'readonly');
     stores.forEach(s=>{
+      const idx = s === 'imgs_manual' ? idxM : idxE;
       const req = tx.objectStore(s).getAll();
       req.onsuccess = ()=>{
-        (req.result || []).forEach(it=>{
-          if(!it || !it.id) return;
-          const dataArr = Array.isArray(it.data) ? it.data : (it.data ? [it.data] : []);
-          const urlArr = Array.isArray(it.url) ? it.url : (it.url ? [it.url] : []);
-          if(dataArr.length) out[s][it.id] = { data: dataArr, url: urlArr };
-        });
-        if(--pend === 0) resolve(out);
+        const items = (req.result || []).filter(it => it && it.id);
+        Promise.all(items.map(it=>{
+          const raw = Array.isArray(it.data) ? it.data : (it.data ? [it.data] : []);
+          return Promise.all(raw.map(d=>{
+            if(typeof d === 'string' && d) return Promise.resolve(d);
+            if(typeof Blob !== 'undefined' && d instanceof Blob) return _blobADataURL(d);
+            return Promise.resolve('');
+          })).then(arr => ({ it: it, data: arr.filter(Boolean) }));
+        })).then(res=>{
+          res.forEach(r=>{
+            if(!r.data.length) return;
+            const it = r.it;
+            const urlArr = Array.isArray(it.url) ? it.url : (it.url ? [it.url] : []);
+            const cod = _codigoYBarrasDeId(idx, it.id);
+            out[s][it.id] = { data: r.data, url: urlArr, codigo: cod.codigo, codigoBarras: cod.codigoBarras };
+          });
+          if(--pend === 0) resolve(out);
+        }).catch(()=>{ if(--pend === 0) resolve(out); });
       };
       req.onerror = ()=>{ if(--pend === 0) resolve(out); };
     });
@@ -9287,18 +9502,44 @@ function importFotosProductos(file){
             legacy[id].url = u.slice(0, legacy[id].data.length);
           }
         });
+        // El backup trae los productos viejos (con su código): se les copia a
+        // las fotos para poder reengancharlas por código en este dispositivo.
+        if(Array.isArray(parsed.productos)){
+          const codById = {}, barById = {};
+          parsed.productos.forEach(p=>{
+            if(!p || !p.id) return;
+            if(p.codigo) codById[p.id] = String(p.codigo);
+            if(p.codigoBarras) barById[p.id] = String(p.codigoBarras);
+          });
+          Object.keys(legacy).forEach(id=>{
+            if(!legacy[id].codigo && codById[id]) legacy[id].codigo = codById[id];
+            if(!legacy[id].codigoBarras && barById[id]) legacy[id].codigoBarras = barById[id];
+          });
+        }
         if(currentModo === 'manual') manual = legacy; else electrico = legacy;
       }
+      // REENGANCHE: si el id de una foto ya no existe en este dispositivo
+      // (p. ej. el catálogo se volvió a importar y los ids cambiaron), la foto
+      // se le asigna al producto con el MISMO CÓDIGO. Así el import "reconoce"
+      // las fotos exportadas antes de un "Poner todo desde cero".
+      const rM = _fotosReenganchar(manual, 'manual');
+      const rE = _fotosReenganchar(electrico, 'electrico');
+      manual = rM.mapa;
+      electrico = rE.mapa;
+      const sin = rM.sin + rE.sin;
       const total = Object.keys(manual).length + Object.keys(electrico).length;
-      if(!total){ toast('El archivo no tiene fotos para importar', 'error'); return; }
+      if(!total){ toast('El archivo no tiene fotos válidas para importar (¿es un JSON exportado con "📤 Exportar fotos" o un backup?)', 'error'); return; }
+      const avisoSin = sin
+        ? '\n\n⚠️ ' + sin + ' producto(s) del archivo no tienen coincidencia en este dispositivo. Primero importa el Excel de ese modo (para que existan los códigos) y vuelve a intentarlo.'
+        : '';
       confirmDialog('Importar fotos',
-        'Se importarán las fotos de ' + total + ' productos (se reemplazan las fotos de esos productos en este dispositivo). ¿Continuar?',
+        'Se importarán las fotos de ' + total + ' productos (se reemplazan las fotos de esos productos en este dispositivo).' + avisoSin + ' ¿Continuar?',
         ()=>{
           _fotosEscribirEnIndexedDB(manual, electrico).then(ok=>{
             if(!ok){ toast('No se pudieron importar las fotos', 'error'); return; }
             return loadImagesForModo(currentModo).then(()=>{
               rerenderCurrentView();
-              toast('Fotos importadas (' + total + ' productos)', 'success');
+              toast('Fotos importadas (' + total + ' productos' + (sin ? ', ' + sin + ' sin coincidencia' : '') + ')', sin ? 'info' : 'success');
             });
           });
         });
@@ -9342,13 +9583,237 @@ async function vaciarProductosNube(ids){
   const col = fbProductsCol(currentModo);
   if(!col || !fbConfigOk() || !ids || !ids.length) return;
   try{
-    const fs = firebase.firestore();
+    const fs = col.firestore;
     for(let i = 0; i < ids.length; i += 450){
       const batch = fs.batch();
       ids.slice(i, i + 450).forEach(id => { batch.delete(col.doc(id)); });
       await batch.commit();
     }
   }catch(e){ console.error('Error vaciando productos de la nube', e); }
+}
+
+/* -------------------------------------------------------------------------
+   PONER TODO DESDE CERO — borrado TOTAL (nube + todos los dispositivos)
+   -------------------------------------------------------------------------
+   Botón de "Zona de riesgo" en Configuración. Hace DOS cosas:
+
+   1) NUBE: vacía por completo AMBOS proyectos de Firebase (catálogos,
+      ventas, ingresos, gastos, deudas, ajustes...). Se hace una sola vez
+      desde un dispositivo y listo.
+
+   2) TODOS LOS DEMÁS DISPOSITIVOS: no basta con vaciar la nube, porque un
+      celular apagado que tenga datos viejos en su navegador los volvería a
+      subir al encenderse ("resucitaría" lo borrado). Por eso, ANTES de borrar
+      se escribe una marca de generación (_meta.resetGen) en los proyectos y
+      cada dispositivo, al abrir la app, compara: si la nube dice que hay una
+      generación más nueva que la suya, se limpia SOLO (localStorage,
+      IndexedDB y cachés) y arranca en blanco. Nadie tiene que tocar nada.
+   ------------------------------------------------------------------------- */
+
+// Colecciones que existen (o pueden existir) en cada proyecto de Firebase.
+const FB_SWEEP_COLLECTIONS = [
+  'stockferre',
+  'stockferre_productos_manual',
+  'stockferre_productos_electrico',
+  'stockferre_ventas_manual',
+  'stockferre_ventas_electrico',
+  'stockferre_ventas_invitado',
+  'stockferre_ajustes_manual',
+  'stockferre_ajustes_electrico',
+  'stockferre_ajustes_invitado',
+  'stockferre_gastosprestamos_manual',
+  'stockferre_gastosprestamos_electrico',
+  'stockferre_gastosprestamos_invitado'
+];
+
+// Última comprobación de la generación remota hecha en esta sesión
+// (para no quemar lecturas del cupo gratis con el vigía de 12 segundos).
+let resetGenSessionChecked = false;
+
+// Comprueba si la nube fue reiniciada desde OTRO dispositivo. Si es así,
+// limpia este navegador entero y recarga la página en blanco. Devuelve true
+// cuando mandó a recargar (el llamador debe dejar de conectar).
+async function checkRemoteResetGen(){
+  try{
+    if(!firebaseToggleOn() || typeof firebase === 'undefined') return false;
+    if(!fbConfigOk('manual') && !fbConfigOk('electrico')) return false;
+    const now = Date.now();
+    if(resetGenSessionChecked){
+      // Máximo una vez cada 5 minutos durante la sesión (siempre la primera).
+      let last = 0;
+      try{ last = Number(localStorage.getItem('stockferre_reset_gen_checked_v1')) || 0; }catch(e){}
+      if(now - last < 5 * 60 * 1000) return false;
+    }
+    resetGenSessionChecked = true;
+    try{ localStorage.setItem('stockferre_reset_gen_checked_v1', String(now)); }catch(e){}
+    let maxGen = 0;
+    const proyectos = ['manual','electrico'];
+    for(let i = 0; i < proyectos.length; i++){
+      const fs = fsFor(proyectos[i]);
+      if(!fs) continue;
+      try{
+        const snap = await withTimeout(fs.collection('stockferre').doc('_meta').get(), 8000);
+        if(snap && snap.exists){
+          const g = Number((snap.data() || {}).resetGen) || 0;
+          if(g > maxGen) maxGen = g;
+        }
+      }catch(e){ /* ese proyecto no está disponible */ }
+    }
+    if(!maxGen) return false;
+    let local = 0;
+    try{ local = Number(localStorage.getItem(RESET_GEN_KEY)) || 0; }catch(e){}
+    if(maxGen <= local) return false;
+    // La nube se reinició DESPUÉS de que este navegador guardó sus datos:
+    // se limpia solo y se recarga en blanco.
+    try{ localStorage.setItem(RESET_GEN_KEY, String(maxGen)); }catch(e){}
+    wipeLocalAll();
+    try{ toast('Este dispositivo se limpió para iniciar desde cero', 'success'); }catch(e){}
+    setTimeout(()=>{ location.reload(); }, 800);
+    return true;
+  }catch(e){ return false; }
+}
+
+// Vacía TODOS los documentos de UN proyecto de Firebase (en lotes de 500),
+// descubriendo además las colecciones que existan y no estén en la lista.
+// El documento _meta (marca de generación) NO se toca.
+async function wipeCloudProject(projectKey, onProgress){
+  const fs = fsFor(projectKey);
+  if(!fs) throw new Error('El proyecto de ' + projectKey + ' no está configurado');
+  let names = FB_SWEEP_COLLECTIONS.slice();
+  try{
+    const cols = await withTimeout(fs.listCollections(), 15000);
+    (cols || []).forEach(c => { if(c && names.indexOf(c.id) === -1) names.push(c.id); });
+  }catch(e){ /* sin permiso para listar: se usa la lista conocida */ }
+  let total = 0;
+  for(let n = 0; n < names.length; n++){
+    const name = names[n];
+    const col = fs.collection(name);
+    for(;;){
+      const snap = await withTimeout(col.limit(500).get(), 20000);
+      if(!snap || !snap.docs || !snap.docs.length) break;
+      const borrar = snap.docs.filter(d => !(name === 'stockferre' && d.id === '_meta'));
+      if(borrar.length){
+        const batch = fs.batch();
+        borrar.forEach(d => batch.delete(d.ref));
+        await withTimeout(batch.commit(), 20000);
+        total += borrar.length;
+      }
+      if(onProgress) onProgress(name, total);
+      if(snap.docs.length < 500) break;
+      if(!borrar.length) break; // solo quedaba _meta: evitar bucle infinito
+    }
+  }
+  return total;
+}
+
+// Borra TODO lo que la app guardó en ESTE navegador: localStorage y
+// sessionStorage (prefijo stockferre_), el almacén ampliado de catálogo
+// (IndexedDB), las fotos (IndexedDB), la caché del Service Worker y la
+// conexión con Firebase. Conserva SOLO la marca de generación del reinicio
+// para no entrar en un bucle de auto-limpieza.
+function wipeLocalAll(){
+  // Claves de la app: todo lo que empiece por stockferre_ (catálogos,
+  // ventas, contraseñas, marcas...) y las marcas fs_laststock_* que usa el
+  // listener incremental de stock.
+  const esClaveNuestra = k => !!k && (k.indexOf('stockferre_') === 0 || k.indexOf('fs_') === 0);
+  try{
+    const gen = localStorage.getItem(RESET_GEN_KEY);
+    for(let i = localStorage.length - 1; i >= 0; i--){
+      const k = localStorage.key(i);
+      if(esClaveNuestra(k)) localStorage.removeItem(k);
+    }
+    if(gen !== null) localStorage.setItem(RESET_GEN_KEY, gen);
+  }catch(e){}
+  try{
+    for(let i = sessionStorage.length - 1; i >= 0; i--){
+      const k = sessionStorage.key(i);
+      if(esClaveNuestra(k)) sessionStorage.removeItem(k);
+    }
+  }catch(e){}
+  try{ Object.keys(blobCache).forEach(k => { delete blobCache[k]; }); }catch(e){}
+  try{ kvDbPromise = null; indexedDB.deleteDatabase(KV_DB); }catch(e){}
+  try{ indexedDB.deleteDatabase(IMG_DB_NAME); }catch(e){}
+  try{
+    disconnectFirebase();
+    disconnectGuestFirebase();
+  }catch(e){}
+  try{ stopSyncWatchdog(); }catch(e){}
+  try{ Object.keys(fbWriteQueues).forEach(k => delete fbWriteQueues[k]); }catch(e){}
+  try{ db = defaultDB(); invUpdates = {}; }catch(e){}
+  try{
+    if(window.caches && caches.keys){
+      caches.keys().then(keys => { keys.forEach(k => { try{ caches.delete(k); }catch(e){} }); }).catch(()=>{});
+    }
+  }catch(e){}
+}
+
+// Botón "Poner todo desde cero": primero la nube (los dos proyectos), luego
+// este navegador, y por último recarga en blanco. Los demás dispositivos se
+// auto-limpian solos al abrir la app gracias a la marca de generación.
+function globalReset(){
+  if(currentRole === 'guest'){ toast('Los invitados no pueden hacer esto', 'error'); return; }
+  confirmDialog('Poner todo desde cero',
+    'Esto borra PERMANENTEMENTE TODO:\n\n' +
+    '• Productos y categorías de Manuales y Eléctricas.\n' +
+    '• Ventas, ingresos, gastos, deudas, pagos e historial.\n' +
+    '• Se vacían los DOS proyectos de Firebase (la nube).\n' +
+    '• Todos los demás dispositivos conectados se limpian SOLOS al abrir la app.\n\n' +
+    'Después deberás importar de nuevo el Excel de Manuales y el de Eléctricas (por separado, en su modo). ¿Continuar?',
+    ()=>{ runGlobalReset(); });
+}
+
+async function runGlobalReset(){
+  const btn = document.getElementById('btnGlobalReset');
+  const originalText = btn ? btn.textContent : '';
+  try{
+    if(btn){ btn.disabled = true; btn.textContent = '🔄 Preparando…'; }
+    // 1) Corta TODO lo que podría seguir subiendo datos viejos.
+    disconnectFirebase();
+    disconnectGuestFirebase();
+    stopSyncWatchdog();
+    Object.keys(fbWriteQueues).forEach(k => delete fbWriteQueues[k]);
+    Object.keys(fbWriteRetryTimers).forEach(k => {
+      if(fbWriteRetryTimers[k]) clearTimeout(fbWriteRetryTimers[k]);
+      delete fbWriteRetryTimers[k];
+    });
+    // 2) NUBE: primero la marca de generación (para que cualquier dispositivo
+    //    que abra la app mientras borramos ya se limpie solo) y después las
+    //    colecciones de AMBOS proyectos.
+    let total = 0;
+    let gen = Date.now();
+    const conNube = firebaseToggleOn() && typeof firebase !== 'undefined' &&
+      (fbConfigOk('manual') || fbConfigOk('electrico'));
+    if(conNube){
+      const proyectos = [];
+      if(fbConfigOk('manual')) proyectos.push('manual');
+      if(fbConfigOk('electrico')) proyectos.push('electrico');
+      for(let i = 0; i < proyectos.length; i++){
+        const fs = fsFor(proyectos[i]);
+        if(!fs) throw new Error('No se pudo conectar con el proyecto de ' + proyectos[i]);
+        if(btn) btn.textContent = '🔄 Marcando generación en ' + proyectos[i] + '…';
+        await withTimeout(fs.collection('stockferre').doc('_meta').set({ resetGen: gen, _ts: gen }), 15000);
+      }
+      for(let i = 0; i < proyectos.length; i++){
+        const k = proyectos[i];
+        const n = await wipeCloudProject(k, (colName, tot)=>{
+          if(btn) btn.textContent = '🗑️ Borrando ' + k + ' → ' + colName + ' (' + tot + ')';
+        });
+        total += n;
+      }
+    }
+    // 3) ESTE NAVEGADOR: localStorage, IndexedDB, fotos y cachés.
+    try{ localStorage.setItem(RESET_GEN_KEY, String(gen)); }catch(e){}
+    if(btn) btn.textContent = '🧹 Limpiando este dispositivo…';
+    wipeLocalAll();
+    toast(conNube
+      ? 'Todo borrado (' + total + ' documentos de la nube). El dispositivo arranca en blanco.'
+      : 'Datos locales borrados (la sincronización está apagada: la nube no se tocó).', 'success');
+    setTimeout(()=>{ location.reload(); }, 800);
+  }catch(err){
+    console.error('Error al poner todo desde cero', err);
+    if(btn){ btn.disabled = false; btn.textContent = originalText; }
+    toast('No se pudo completar el borrado: ' + (err && err.message ? err.message : err), 'error');
+  }
 }
 
 function factoryReset(){
@@ -9716,6 +10181,7 @@ function migrateLegacyPasswords(){
 function switchModoData(modo){
   disconnectFirebase();
   disconnectGuestFirebase();
+  modeToken++; // anula las lecturas async que quedaron en vuelo del modo anterior
   currentModo = modo;
   if(modo !== 'invitado'){ try{ localStorage.setItem(MODO_KEY, modo); }catch(e){} }
   document.body.classList.remove('modo-manual', 'modo-electrico', 'modo-invitado');
@@ -11556,6 +12022,7 @@ function setupEventListeners(){
   document.getElementById('btnManualSync').addEventListener('click', manualSync);
   document.getElementById('btnVaciarCatalogo').addEventListener('click', vaciarCatalogo);
   document.getElementById('btnFactoryReset').addEventListener('click', factoryReset);
+  document.getElementById('btnGlobalReset').addEventListener('click', globalReset);
 }
 
 function init(){

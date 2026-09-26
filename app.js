@@ -8359,10 +8359,9 @@ function renderProductos(){
 
   const tbody = document.querySelector('#productsTable tbody');
   if(list.length === 0){
-    tbody.innerHTML = `<tr class="empty-row"><td colspan="${currentRole === 'guest' ? 11 : 12}">No hay productos que coincidan.</td></tr>`;
+    tbody.innerHTML = `<tr class="empty-row"><td colspan="${currentRole === 'guest' ? 4 : 5}">No hay productos que coincidan.</td></tr>`;
   }else{
     tbody.innerHTML = list.map((p, idx) => {
-      const bajo = (p.stockMin || 0) > 0 && p.stock <= p.stockMin;
       const img = getImage(p.id);
       const countImg = getImageCount(p.id);
       const thumb = img
@@ -8379,19 +8378,12 @@ function renderProductos(){
           </div>
         </td>
         <td><strong>${escapeHtml(p.codigo)}</strong></td>
-        <td>${escapeHtml(p.codigoBarras || '-')}</td>
         <td>${escapeHtml(p.nombre)}</td>
         <td>${escapeHtml(p.marca || '-')}</td>
-        <td>${p.categoria ? `<span class="badge badge-muted">${escapeHtml(p.categoria)}</span>` : '-'}</td>
-        <td class="price-guest-hide">${fmtMoney(p.precioCompra)}</td>
-        <td class="price-guest-hide">${fmtMoney(p.precioMarca)}</td>
-        <td>${fmtMoney(p.precioVenta)}</td>
-        <td>${p.stock}${bajo ? ' <span class="badge badge-danger-soft">Bajo</span>' : ''}</td>
-        <td>${p.stockMin || 0}</td>
         ${currentRole === 'guest' ? '' : `
         <td>
           <button class="btn-icon" title="Editar" data-edit-product="${p.id}">✏️</button>
-          <button class="btn-icon master-only" title="Eliminar" data-delete-product="${p.id}">🗑️</button></button>
+          <button class="btn-icon master-only" title="Eliminar" data-delete-product="${p.id}">🗑️</button>
         </td>`}
       </tr>`;
     }).join('');
@@ -8552,6 +8544,14 @@ let detTargetId = null; // id del producto abierto en la ventana de característ
 
 // Muestra la ventana con las características del producto. Los campos que se
 // ven aquí coinciden con las columnas del CSV exportar/importar.
+// Un producto se considera "de Eléctricas" si su modo de origen lo dice (en el
+// invitado viene etiquetado por buildGuestDB) o si el modo activo es eléctrico.
+function esProductoElectrico(p){
+  if(!p) return false;
+  if(p.modoOrigin) return p.modoOrigin === 'electrico';
+  return currentModo === 'electrico';
+}
+
 function openProductDetails(productId){
   const p = getProductoById(productId);
   if(!p) return;
@@ -8584,6 +8584,18 @@ function openProductDetails(productId){
   document.getElementById('detPCompra').textContent = fmtMoney(p.precioCompra);
   document.getElementById('detPMarca').textContent = fmtMoney(p.precioMarca);
   document.getElementById('detPVenta').textContent = fmtMoney(p.precioVenta);
+  // En Eléctricas la vista de precios es solo: "Precio último" + "Precio de venta"
+  // (el precio de compra se oculta). En Manuales se mantiene tal cual.
+  const detEsElec = esProductoElectrico(p);
+  const detRowPCompra = document.getElementById('detPCompra').closest('.detail-row');
+  const detRowPMarca = document.getElementById('detPMarca').closest('.detail-row');
+  if(detRowPCompra) detRowPCompra.style.display = detEsElec ? 'none' : '';
+  if(detRowPMarca){
+    detRowPMarca.style.display = '';
+    detRowPMarca.classList.toggle('price-guest-hide', !detEsElec);
+    const detLblPMarca = detRowPMarca.querySelector('.detail-label');
+    if(detLblPMarca) detLblPMarca.textContent = detEsElec ? 'Precio último' : 'Precio de marca';
+  }
   document.getElementById('detStock').textContent = p.stock;
   document.getElementById('detStockMin').textContent = p.stockMin || 0;
   document.getElementById('detCaracteristicas').value = p.caracteristicas || '';

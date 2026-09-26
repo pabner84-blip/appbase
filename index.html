@@ -35,6 +35,7 @@
     <button class="nav-item" data-view="escaner"><span>📷</span> Escanear</button>
     <button class="nav-item" data-view="productos"><span>📦</span> Productos</button>
     <button class="nav-item" data-view="categorias"><span>🗂️</span> Categorías</button>
+    <button class="nav-item admin-only" data-view="productosnuevos"><span>📥</span> Productos nuevos</button>
     <button class="nav-item" data-view="ventas"><span>💰</span> Ventas</button>
     <button class="nav-item" data-view="topventas"><span>🏆</span> Más vendidos</button>
     <button class="nav-item" data-view="pedidos"><span>📋</span> Pedidos</button>
@@ -185,10 +186,10 @@
       <div class="toolbar">
         <input type="text" id="prodSearch" class="input" placeholder="🔍 Buscar por nombre, código o marca...">
         <select id="prodFilterCategoria" class="input select"><option value="">Todas las categorías</option></select>
-        <button class="btn btn-primary admin-only" id="btnNewProduct">+ Nuevo producto</button>
+        <button class="btn btn-primary admin-only master-only" id="btnNewProduct">+ Nuevo producto</button>
         <button class="btn btn-secondary admin-only" id="btnExportProducts">📤 Exportar Excel</button>
-        <button class="btn btn-secondary admin-only" id="btnImportProducts">📥 Importar Excel</button>
-        <button class="btn btn-danger admin-only" id="btnVaciarProductos">🗑️ Vaciar productos</button>
+        <button class="btn btn-secondary admin-only master-only" id="btnImportProducts">📥 Importar Excel</button>
+        <button class="btn btn-danger admin-only master-only" id="btnVaciarProductos">🗑️ Vaciar productos</button>
         <button class="btn btn-primary admin-only" id="btnAutoFillAll">🖼️ Autollenar todos</button>
       </div>
       <div class="table-wrap">
@@ -211,6 +212,28 @@
         <button class="btn btn-primary admin-only" id="btnAddCategory">+ Agregar categoría</button>
       </div>
       <div class="cards-grid" id="categoriesGrid"></div>
+    </section>
+
+    <!-- ---------- PRODUCTOS NUEVOS (borradores para la PC principal) ---------- -->
+    <section class="view" id="view-productosnuevos">
+      <div class="toolbar">
+        <button class="btn btn-primary" id="btnNewDraft">+ Nuevo borrador</button>
+        <button class="btn btn-secondary" id="btnExportDrafts">📤 Exportar Excel</button>
+        <button class="btn btn-danger" id="btnClearDrafts">🧹 Vaciar lista</button>
+        <span class="hint" id="draftsCount" style="margin-left:auto;"></span>
+      </div>
+      <p class="hint">Guarda aquí los productos que quieras agregar desde este dispositivo. Cuando exportes el Excel, pásalo a la <strong>PC principal</strong> e impórtalo con "📥 Importar Excel": allí los productos se suben a la nube y aparecen en todos los dispositivos. Las fotos se pasan después con "📤 Exportar fotos" (se reenganchan solas por código).</p>
+      <div class="table-wrap">
+        <table class="table" id="draftsTable">
+          <thead>
+            <tr>
+              <th>Código</th><th>Cód. Barras</th><th>Descripción</th><th>Marca</th><th>Categoría</th>
+              <th class="price-guest-hide">P. Compra</th><th class="price-guest-hide">P. Marca</th><th>P. Venta</th><th>Stock</th><th>Stock mín.</th><th>Acciones</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
     </section>
 
     <!-- ---------- VENTAS ---------- -->
@@ -571,7 +594,7 @@
           <div class="panel-header"><h3>📂 Importar productos (CSV/Excel)</h3></div>
           <div class="panel-body">
             <p class="hint">Acepta un CSV exportado antes (coma, punto y coma o tabulador), el .xls viejo o el archivo .xlsx que genera "Exportar Excel". Si lo editas en Excel y lo guardas, impórtalo de vuelta igual. Formato: <code>CODIGO,DESCRIPCION,MARCA,CATEGORIA,CODIGO DE BARRAS,PRECIO COMPRA,PRECIO VENTA</code> (código de barras es opcional).</p>
-            <button class="btn btn-secondary" id="btnImportProductsConfig">📥 Elegir archivo CSV o Excel</button>
+            <button class="btn btn-secondary master-only" id="btnImportProductsConfig">📥 Elegir archivo CSV o Excel</button>
           </div>
         </div>
 
@@ -579,7 +602,7 @@
           <div class="panel-header"><h3>🗑️ Vaciar catálogo</h3></div>
           <div class="panel-body">
             <p class="hint">Elimina TODOS los productos y categorías del modo actual (🛠️ Manuales o ⚡ Eléctricas), también de la nube. Úsalo antes de reimportar el Excel de ese modo para que no queden mezclados productos del otro modo. <strong>No borra ventas, compras, gastos ni historial.</strong></p>
-            <button class="btn btn-danger" id="btnVaciarCatalogo">🗑️ Vaciar catálogo del modo actual</button>
+            <button class="btn btn-danger master-only" id="btnVaciarCatalogo">🗑️ Vaciar catálogo del modo actual</button>
           </div>
         </div>
 
@@ -642,6 +665,21 @@
         </div>
 
         <div class="panel admin-only">
+          <div class="panel-header"><h3>🖥️ PC principal (maestra) de productos</h3></div>
+          <div class="panel-body">
+            <label class="remember-switch" id="masterSwitchConfigRow" title="Actívalo SOLO en la PC principal del dueño">
+              <input type="checkbox" id="masterSwitchConfig">
+              <span class="switch-track"><span class="switch-thumb"></span></span>
+              <span class="remember-text">
+                <strong>Esta PC crea y borra productos</strong>
+                <small>Actívalo SOLO en tu PC principal</small>
+              </span>
+            </label>
+            <p class="hint" style="margin:10px 0 0;"><strong>Encendido (solo en tu PC principal):</strong> aquí se crean y borran productos y se define el <strong>código</strong> y la <strong>marca</strong>. <strong>Apagado (los demás equipos):</strong> no crean ni borran productos; cargan los nuevos en la pestaña <strong>📥 Productos nuevos</strong> y los pasan a esta PC con un Excel. En todos los dispositivos se pueden editar descripción, categoría, código de barras, precios, características y stock.</p>
+          </div>
+        </div>
+
+        <div class="panel admin-only">
           <div class="panel-header"><h3>⚠️ Zona de riesgo</h3></div>
           <div class="panel-body">
             <p class="hint">Deja TODO en cero: borra productos, ventas, ingresos, gastos, deudas e historial de los <strong>DOS proyectos de Firebase</strong> y de <strong>todos los dispositivos conectados</strong> (los demás celulares/PC se limpian solos al abrir la app). Solo queda borrar este dispositivo y recargar. Después reimportas cada Excel en su modo.</p>
@@ -679,6 +717,34 @@
       <label>Precio de venta<input type="number" id="pPrecioVenta" class="input" step="0.01" min="0"></label>
       <div class="form-actions">
         <button type="submit" class="btn btn-primary">Guardar</button>
+        <button type="button" class="btn btn-secondary" data-close-modal>Cancelar</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Modal: Borrador de "Productos nuevos" (este dispositivo → Excel → PC principal) -->
+<div class="modal" id="modalBorrador">
+  <div class="modal-header">
+    <h3 id="modalBorradorTitle">Nuevo borrador</h3>
+    <button class="modal-close" data-close-modal>✕</button>
+  </div>
+  <div class="modal-body">
+    <form id="formBorrador" class="form-grid">
+      <input type="hidden" id="dIdx">
+      <label>Código *<input type="text" id="dCodigo" class="input" required></label>
+      <label>Código de barras<input type="text" id="dCodigoBarras" class="input" placeholder="Opcional"></label>
+      <label>Descripción *<input type="text" id="dNombre" class="input" required></label>
+      <label>Marca<input type="text" id="dMarca" class="input"></label>
+      <label>Categoría<input type="text" id="dCategoria" class="input" list="categoriasList" placeholder="Elige o escribe una nueva"></label>
+      <label class="price-guest-hide">Precio de compra<input type="number" id="dPrecioCompra" class="input" step="0.01" min="0"></label>
+      <label class="price-guest-hide">Precio de marca<input type="number" id="dPrecioMarca" class="input" step="0.01" min="0"></label>
+      <label>Precio de venta<input type="number" id="dPrecioVenta" class="input" step="0.01" min="0"></label>
+      <label>Stock inicial<input type="number" id="dStock" class="input" step="1" min="0"></label>
+      <label>Stock mínimo<input type="number" id="dStockMin" class="input" step="1" min="0"></label>
+      <label>Características<textarea id="dCaracteristicas" class="input" rows="3" placeholder="Opcional"></textarea></label>
+      <div class="form-actions">
+        <button type="submit" class="btn btn-primary">Guardar borrador</button>
         <button type="button" class="btn btn-secondary" data-close-modal>Cancelar</button>
       </div>
     </form>

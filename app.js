@@ -469,6 +469,65 @@ function finishQueuedWrite(docId, ref, toSend){
   if(q.latestData !== toSend){ runQueuedWrite(docId, ref); }
 }
 
+/* -------------------------------------------------------------------------
+   PC MAESTRA: una sola PC (la principal) crea y borra productos y define
+   CÓDIGO y MARCA. Los demás dispositivos pueden editar descripción, categoría,
+   código de barras, precios, características y stock, y registrar ventas/
+   ingresos. Los productos de otros dispositivos entran por la pestaña
+   "📥 Productos nuevos" (borradores locales → Excel → importar en la PC
+   principal).
+   ------------------------------------------------------------------------- */
+const MASTER_KEY = 'stockferre_master_v1';            // '1' = esta PC es la maestra
+const ALIGN_KEY = 'stockferre_catalog_align_v1';      // '1' = catálogo local ya alineado con la nube
+
+function esMaestro(){
+  if(currentRole === 'guest') return false;
+  try{ return localStorage.getItem(MASTER_KEY) === '1'; }catch(e){ return false; }
+}
+function setEsMaestro(on){
+  try{ localStorage.setItem(MASTER_KEY, on ? '1' : '0'); }catch(e){}
+  // Al apagar el modo maestro, la próxima conexión vuelve a alinear el catálogo.
+  if(!on){ try{ localStorage.removeItem(ALIGN_KEY); }catch(e){} }
+  applyMasterUI();
+}
+function catalogoAlineado(){
+  try{ return localStorage.getItem(ALIGN_KEY) === '1'; }catch(e){ return false; }
+}
+// Solo la PC maestra sube el catálogo completo a la nube ANTES de alinearse
+// (evita que productos locales viejos contaminen la nube de la maestra).
+// Después de la primera alineación, todos los dispositivos suben con normalidad.
+// El invitado conserva su comportamiento de siempre.
+function subidaCatalogoPermitida(){
+  if(currentRole === 'guest') return true;
+  if(esMaestro()) return true;
+  return catalogoAlineado();
+}
+// Alineación ÚNICA del catálogo en un dispositivo que no es la PC maestra:
+// al recibir la primera copia de la nube CON productos se adopta su lista
+// (los productos "fantasma" locales desaparecen y la nube manda). Si la nube
+// todavía está vacía (la PC maestra aún no guarda nada o fue reiniciada),
+// este dispositivo sigue esperando sin subir su catálogo: así nunca
+// "resucita" productos viejos en una nube recién puesta a cero.
+function alinearCatalogoUnaVez(dbObj, remote){
+  if(currentRole === 'guest' || esMaestro()) return false;
+  try{
+    if(localStorage.getItem(ALIGN_KEY) === '1') return false;
+    if(!remote || !Array.isArray(remote.productos) || !remote.productos.length) return false;
+    localStorage.setItem(ALIGN_KEY, '1');
+    dbObj.productos = remote.productos.slice();
+    return true;
+  }catch(e){}
+  return false;
+}
+function applyMasterUI(){
+  document.body.classList.toggle('role-noMaster', !esMaestro());
+  syncMasterSwitchUI();
+}
+function syncMasterSwitchUI(){
+  const sw = document.getElementById('masterSwitchConfig');
+  if(sw) sw.checked = esMaestro();
+}
+
 function saveDB(){
   persistLocalCache();
   // Sube SIEMPRE que Firebase esté configurado (no hace falta esperar a que
@@ -483,6 +542,9 @@ function saveDB(){
       if(!fsMain) return;
       const ref = fbDocRef || fsMain.collection('stockferre').doc(firebaseDocId());
       const { historialEscaneos, historialBusquedas, historialInventario, ventas, ajustes, gastosPrestamos, ...syncData } = db;
+      // PC que no es la maestra y aún sin alinearse: no sube el catálogo
+      // (evita que productos locales viejos contaminen la nube).
+      if(!subidaCatalogoPermitida()) delete syncData.productos;
       scheduleFirestoreWrite(firebaseDocId(), ref, syncData);
     }catch(err){
       console.error('Error guardando en Firebase', err);
@@ -1076,6 +1138,7 @@ function rerenderCurrentView(){
   if(!activeView) return;
   const name = activeView.id.replace('view-', '');
   if(name === 'productos') renderProductos();
+  if(name === 'productosnuevos') renderProductosNuevos();
   if(name === 'categorias') renderCategorias();
   if(name === 'ventas') renderVentas();
   if(name === 'topventas') renderTopVentas();
@@ -1153,6 +1216,9 @@ async function connectFirebase(){
       merged.historialBusquedas = db.historialBusquedas;
       merged.historialInventario = db.historialInventario;
       db = merged;
+      // Primera copia de la nube en un dispositivo que no es la PC maestra:
+      // adopta el catálogo de la nube y habilita sus propias subidas.
+      alinearCatalogoUnaVez(db, remote);
       persistLocalCache();
       rerenderCurrentView();
       notifyNewRemoteSales(prevVentas, merged.ventas); // avisa ventas hechas en otro dispositivo
@@ -1395,6 +1461,7 @@ function productoDocData(p){
 // Crea (si no existe) el documento del producto SIN tocar su stock: el stock
 // solo se modifica con incrementos atómicos para no pisar a otro dispositivo.
 async function ensureProductoDoc(p, modo){
+  if(!subidaCatalogoPermitida()) return false;
   const col = fbProductsCol(modo);
   if(!col || !p || !p.id) return false;
   try{
@@ -1452,14 +1519,20 @@ async function applyStockAbsolute(p, value, modo){
 
 // Guarda (crea o actualiza) el documento completo de un producto.
 async function syncProductoDoc(p, modo){
+  if(!subidaCatalogoPermitida()) return;
   const col = fbProductsCol(modo);
   if(!col || !p || !p.id) return;
+  const data = productoDocData(p);
+  // Un dispositivo que no es la maestra nunca pisa código/marca en la nube
+  // (merge: true deja esos campos intactos si no se mandan).
+  if(!esMaestro()){ delete data.codigo; delete data.marca; }
   try{
-    await col.doc(p.id).set(productoDocData(p), { merge: true });
+    await col.doc(p.id).set(data, { merge: true });
   }catch(e){ console.error('Error sincronizando producto en la nube', e); }
 }
 
 async function deleteProductoDoc(p, modo){
+  if(!esMaestro()) return;
   const col = fbProductsCol(modo);
   if(!col || !p || !p.id) return;
   try{
@@ -1919,6 +1992,8 @@ function stopGastosPrestamosListeners(){
 async function backfillProductos(modo){
   const col = fbProductsCol(modo);
   if(!col) return;
+  // Solo la PC maestra crea documentos de producto en la nube.
+  if(!subidaCatalogoPermitida()) return;
   // Una sola vez por modo: releer la colección entera en cada apertura quema
   // miles de lecturas del cupo gratis de Firestore (eso dejaba el celular sin
   // poder ver los productos nuevos). Una vez migrado, los productos nuevos y
@@ -2021,6 +2096,7 @@ async function syncCaracteristicasCloud(modo){
 
 // Escribe los documentos de una lista de productos (para importaciones CSV).
 async function syncProductoDocs(list, modo){
+  if(!subidaCatalogoPermitida()) return;
   const col = fbProductsCol(modo);
   if(!col || !list || !list.length) return;
   try{
@@ -2029,7 +2105,9 @@ async function syncProductoDocs(list, modo){
       const batch = fs.batch();
       list.slice(i, i + 450).forEach(p => {
         if(!p || !p.id) return;
-        batch.set(col.doc(p.id), productoDocData(p), { merge: true });
+        const data = productoDocData(p);
+        if(!esMaestro()){ delete data.codigo; delete data.marca; }
+        batch.set(col.doc(p.id), data, { merge: true });
       });
       await batch.commit();
     }
@@ -2779,14 +2857,19 @@ function upsertCategoria(nombre){
 }
 
 function saveProducto(data){
+  const maestro = esMaestro();
   upsertCategoria(data.categoria);
 
   if(data.id){
     const p = getProductoById(data.id);
     if(!p) return null;
-    p.codigo = data.codigo.trim();
+    // Código y marca solo los cambia la PC maestra; lo demás (descripción,
+    // categoría, código de barras, precios) es editable desde cualquier dispositivo.
+    if(maestro){
+      p.codigo = data.codigo.trim();
+      p.marca = data.marca.trim();
+    }
     p.nombre = data.nombre.trim();
-    p.marca = data.marca.trim();
     p.categoria = data.categoria.trim();
     p.codigoBarras = (data.codigoBarras||'').trim();
     p.precioCompra = parseFloat(data.precioCompra) || 0;
@@ -2801,7 +2884,7 @@ function saveProducto(data){
     const existing = getProductoByCodigo(data.codigo);
     if(existing){
       existing.nombre = data.nombre.trim();
-      existing.marca = data.marca.trim();
+      if(maestro) existing.marca = data.marca.trim();
       existing.categoria = data.categoria.trim();
       existing.codigoBarras = (data.codigoBarras||'').trim() || existing.codigoBarras;
       existing.precioCompra = parseFloat(data.precioCompra) || 0;
@@ -2811,6 +2894,10 @@ function saveProducto(data){
       saveDB();
       syncProductoDoc(existing);
       return existing;
+    }
+    if(!maestro){
+      toast('Solo la PC principal crea productos nuevos. Usa "📥 Productos nuevos" y exporta el Excel.', 'error');
+      return null;
     }
     const p = {
       id: uid(),
@@ -2835,6 +2922,7 @@ function saveProducto(data){
 }
 
 function deleteProducto(id){
+  if(!esMaestro()){ toast('Solo la PC principal puede borrar productos', 'error'); return; }
   confirmDialog('Eliminar producto', '¿Seguro que quieres eliminar este producto? Esta acción no se puede deshacer.', ()=>{
     const p = getProductoById(id);
     db.productos = db.productos.filter(x => x.id !== id);
@@ -3359,7 +3447,7 @@ function renderScanResultInto(elementId, codigo, context){
     resultDiv.innerHTML = `
       <div class="scan-not-found">
         ⚠️ No se encontró ningún producto con el código <strong>${escapeHtml(codigo)}</strong>.
-        ${currentRole === 'guest' ? '' : `
+        ${(currentRole === 'guest' || !esMaestro()) ? '' : `
         <div style="margin-top:10px;">
           <button class="btn btn-primary btn-sm" id="btnCreateFromScan_${elementId}">+ Crear producto con este código</button>
         </div>`}
@@ -6422,6 +6510,10 @@ function handleCompraSubmit(e){
   let p = getProductoByCodigo(codigo);
   const esNuevo = !p;
   if(esNuevo){
+    if(!esMaestro()){
+      toast('"' + codigo + '" no está en el catálogo: solo la PC principal crea productos. Regístralo en "📥 Productos nuevos".', 'error');
+      return;
+    }
     p = {
       id: uid('producto'),
       codigo,
@@ -6445,7 +6537,7 @@ function handleCompraSubmit(e){
   // Opcional: actualiza los datos del producto (marca y precios). Las ventas
   // ya registradas guardan su propio precio, así que NO cambian.
   if(esNuevo || actualizar){
-    if(marca) p.marca = marca;
+    if(marca && esMaestro()) p.marca = marca;
     p.precioCompra = precioCompra;
     if(!isNaN(precioVenta) && precioVenta >= 0) p.precioVenta = precioVenta;
     if(!esNuevo) syncProductoDoc(p); // datos actualizados también en la nube
@@ -6961,6 +7053,8 @@ function ocrConfirmarIngresos(){
 
   const fecha = new Date().toISOString();
   let added = 0;
+  let omitidos = 0;
+  const codigosOmitidos = [];
 
   activos.forEach(it => {
     const prod = db.productos.find(p => normalize(p.codigo) === normalize(it.codigo));
@@ -6982,7 +7076,14 @@ function ocrConfirmarIngresos(){
       syncProductoDoc(prod);
       added++;
     }else{
-      // Producto nuevo: crearlo primero
+      // Producto nuevo: solo la PC principal puede crearlo. Los demás
+      // dispositivos lo reportan como omitido para cargarlo en
+      // "📥 Productos nuevos" y pasarlo a la PC principal con un Excel.
+      if(!esMaestro()){
+        omitidos++;
+        codigosOmitidos.push(it.codigo);
+        return;
+      }
       const newProd = {
         id: 'ocr_' + Date.now() + '_' + Math.random().toString(36).slice(2,6),
         codigo: it.codigo,
@@ -7018,7 +7119,12 @@ function ocrConfirmarIngresos(){
   renderCompras();
   renderProductos();
   closeModalById('modalFacturaOCR');
-  toast(added + ' ingreso(s) registrado(s) correctamente', 'success');
+  let msgOcr = added + ' ingreso(s) registrado(s) correctamente';
+  if(omitidos){
+    msgOcr += ' — ' + omitidos + ' producto(s) nuevo(s) NO registrado(s) (solo la PC principal crea productos): ' +
+      codigosOmitidos.join(', ') + '. Guárdalos en "📥 Productos nuevos".';
+  }
+  toast(msgOcr, omitidos && !added ? 'error' : (omitidos ? 'warning' : 'success'));
 }
 
 // Fuerza a Excel a tratar un campo como TEXTO anteponiendo un apóstrofo.
@@ -7506,6 +7612,154 @@ function exportProductosExcel(){
   ]);
   downloadXLSX(`stockferre_productos_${todayISO().slice(0,10)}.xlsx`, [{ name: 'Productos', header, rows, types }]);
   toast('Productos exportados a Excel (las fotos se respaldan con "Exportar backup")', 'success');
+}
+
+/* -------------------------------------------------------------------------
+   4z. PRODUCTOS NUEVOS (borradores locales de ESTE dispositivo)
+   Dispositivos que no son la PC principal no pueden crear productos en el
+   catálogo. Aquí cargan los productos nuevos como borradores locales, los
+   exportan a Excel (mismas columnas que "Exportar Excel") y ese Excel se
+   importa en la PC principal con "📥 Importar Excel", que es lo que sube los
+   productos a la nube y los reparte a todos los dispositivos.
+   ------------------------------------------------------------------------- */
+const DRAFTS_KEY = 'stockferre_productos_nuevos_v1';
+
+function loadDrafts(){
+  try{
+    const l = JSON.parse(localStorage.getItem(DRAFTS_KEY));
+    return Array.isArray(l) ? l : [];
+  }catch(e){ return []; }
+}
+function saveDrafts(list){
+  try{ localStorage.setItem(DRAFTS_KEY, JSON.stringify(list || [])); }catch(e){}
+}
+
+function renderProductosNuevos(){
+  const tbody = document.querySelector('#draftsTable tbody');
+  if(!tbody) return;
+  const list = loadDrafts();
+  tbody.innerHTML = list.length ? list.map((d, i)=>`
+    <tr>
+      <td>${escapeHtml(d.codigo || '')}</td>
+      <td>${escapeHtml(d.codigoBarras || '')}</td>
+      <td>${escapeHtml(d.nombre || '')}</td>
+      <td>${escapeHtml(d.marca || '-')}</td>
+      <td>${d.categoria ? `<span class="badge badge-muted">${escapeHtml(d.categoria)}</span>` : '-'}</td>
+      <td class="price-guest-hide">${fmtMoney(d.precioCompra || 0)}</td>
+      <td class="price-guest-hide">${fmtMoney(d.precioMarca || 0)}</td>
+      <td>${fmtMoney(d.precioVenta || 0)}</td>
+      <td>${d.stock || 0}</td>
+      <td>${d.stockMin || 0}</td>
+      <td>
+        <button class="btn-icon" title="Editar" data-draft-edit="${i}">✏️</button>
+        <button class="btn-icon" title="Eliminar" data-draft-del="${i}">🗑️</button>
+      </td>
+    </tr>`).join('') : `<tr><td colspan="11" style="text-align:center; padding:18px;" class="hint">Sin borradores todavía. Pulsa "+ Nuevo borrador" para cargar productos que quieras agregar desde este dispositivo.</td></tr>`;
+  const count = document.getElementById('draftsCount');
+  if(count) count.textContent = list.length + ' borrador(es)';
+}
+
+function openDraftModal(idx){
+  const form = document.getElementById('formBorrador');
+  form.reset();
+  populateCategoryDatalist();
+  const list = loadDrafts();
+  const d = (idx === null || idx === undefined) ? null : list[idx];
+  document.getElementById('modalBorradorTitle').textContent = d ? 'Editar borrador' : 'Nuevo borrador';
+  document.getElementById('dIdx').value = (idx === null || idx === undefined) ? '' : String(idx);
+  document.getElementById('dCodigo').value = d ? (d.codigo || '') : '';
+  document.getElementById('dCodigoBarras').value = d ? (d.codigoBarras || '') : '';
+  document.getElementById('dNombre').value = d ? (d.nombre || '') : '';
+  document.getElementById('dMarca').value = d ? (d.marca || '') : '';
+  document.getElementById('dCategoria').value = d ? (d.categoria || '') : '';
+  document.getElementById('dPrecioCompra').value = d ? (d.precioCompra || '') : '';
+  document.getElementById('dPrecioMarca').value = d ? (d.precioMarca || '') : '';
+  document.getElementById('dPrecioVenta').value = d ? (d.precioVenta || '') : '';
+  document.getElementById('dStock').value = d ? (d.stock || 0) : '';
+  document.getElementById('dStockMin').value = d ? (d.stockMin || 0) : '';
+  document.getElementById('dCaracteristicas').value = d ? (d.caracteristicas || '') : '';
+  openModal('modalBorrador');
+}
+
+function handleDraftSubmit(e){
+  e.preventDefault();
+  const idxVal = document.getElementById('dIdx').value;
+  const editIdx = idxVal === '' ? -1 : parseInt(idxVal, 10);
+  const data = {
+    codigo: document.getElementById('dCodigo').value.trim(),
+    codigoBarras: document.getElementById('dCodigoBarras').value.trim(),
+    nombre: document.getElementById('dNombre').value.trim(),
+    marca: document.getElementById('dMarca').value.trim(),
+    categoria: document.getElementById('dCategoria').value.trim(),
+    precioCompra: parseFloat(document.getElementById('dPrecioCompra').value) || 0,
+    precioMarca: parseFloat(document.getElementById('dPrecioMarca').value) || 0,
+    precioVenta: parseFloat(document.getElementById('dPrecioVenta').value) || 0,
+    stock: parseInt(document.getElementById('dStock').value, 10) || 0,
+    stockMin: parseInt(document.getElementById('dStockMin').value, 10) || 0,
+    caracteristicas: document.getElementById('dCaracteristicas').value.trim()
+  };
+  if(!data.codigo || !data.nombre){
+    toast('Código y descripción son obligatorios', 'error');
+    return;
+  }
+  const list = loadDrafts();
+  const dup = list.findIndex((x, i)=> i !== editIdx && normalize(x.codigo) === normalize(data.codigo));
+  if(dup > -1){
+    toast('Ya hay un borrador con ese código', 'error');
+    return;
+  }
+  if(editIdx < 0 || isNaN(editIdx)){
+    list.push(data);
+    toast('Borrador guardado en este dispositivo', 'success');
+  }else{
+    list[editIdx] = data;
+    toast('Borrador actualizado', 'success');
+  }
+  saveDrafts(list);
+  closeAllModals();
+  renderProductosNuevos();
+}
+
+function deleteDraft(i){
+  confirmDialog('Eliminar borrador', '¿Quitar este borrador de la lista?', ()=>{
+    const list = loadDrafts();
+    list.splice(i, 1);
+    saveDrafts(list);
+    renderProductosNuevos();
+    toast('Borrador eliminado', 'success');
+  });
+}
+
+// Exporta los borradores con EXACTAMENTE las mismas 12 columnas de
+// "Exportar Excel" para que la PC principal los importe sin cambios.
+function exportDraftsExcel(){
+  const list = loadDrafts();
+  if(!list.length){
+    toast('No hay borradores para exportar', 'error');
+    return;
+  }
+  const header = ['CODIGO','CODIGO DE BARRAS','DESCRIPCION','MARCA','CATEGORIA','PRECIO COMPRA','PRECIO MARCA','PRECIO VENTA','STOCK','STOCK MIN','CARACTERISTICAS','IMAGEN'];
+  const types = ['text','text','text','text','text','number','number','number','number','number','text','text'];
+  const rows = list.map(d => [
+    d.codigo || '', d.codigoBarras || '', d.nombre || '', d.marca || '', d.categoria || '',
+    d.precioCompra || 0, d.precioMarca || 0, d.precioVenta || 0,
+    d.stock || 0, d.stockMin || 0, d.caracteristicas || '', ''
+  ]);
+  downloadXLSX(`stockferre_productos_nuevos_${todayISO().slice(0,10)}.xlsx`, [{ name: 'Productos nuevos', header, rows, types }]);
+  toast('Excel exportado con ' + list.length + ' borrador(es). Pásalo a la PC principal e impórtalo con "📥 Importar Excel"', 'success');
+}
+
+function clearDrafts(){
+  const list = loadDrafts();
+  if(!list.length){
+    toast('No hay borradores para vaciar', 'error');
+    return;
+  }
+  confirmDialog('Vaciar lista', '¿Quitar los ' + list.length + ' borrador(es) de este dispositivo? (Si antes exportaste el Excel, esos productos siguen en el archivo)', ()=>{
+    saveDrafts([]);
+    renderProductosNuevos();
+    toast('Lista de borradores vaciada', 'success');
+  });
 }
 
 // Importa un archivo Excel/CSV de inventario (CODIGO, DESCRIPCION, ..., STOCK) para
@@ -8137,7 +8391,7 @@ function renderProductos(){
         ${currentRole === 'guest' ? '' : `
         <td>
           <button class="btn-icon" title="Editar" data-edit-product="${p.id}">✏️</button>
-          <button class="btn-icon" title="Eliminar" data-delete-product="${p.id}">🗑️</button>
+          <button class="btn-icon master-only" title="Eliminar" data-delete-product="${p.id}">🗑️</button></button>
         </td>`}
       </tr>`;
     }).join('');
@@ -8227,6 +8481,12 @@ function openProductModal(producto, prefillCodigo){
   const form = document.getElementById('formProducto');
   form.reset();
   populateCategoryDatalist();
+  // Código y marca solo los edita la PC maestra; en los demás dispositivos
+  // quedan de solo lectura (lo demás es editable para todos).
+  ['pCodigo', 'pMarca'].forEach(idEl=>{
+    const el = document.getElementById(idEl);
+    if(el) el.readOnly = !esMaestro();
+  });
 
   if(producto){
     document.getElementById('modalProductoTitle').textContent = 'Editar producto';
@@ -8269,6 +8529,10 @@ function handleProductSubmit(e){
   if(dup && dup.id !== data.id){
     toast('Ya existe otro producto con ese código', 'error');
     return;
+  }
+  if(!data.id && !esMaestro()){
+    toast('Solo la PC principal crea productos nuevos. Usa "📥 Productos nuevos" y exporta el Excel.', 'error');
+    return; // el modal queda abierto para no perder lo escrito
   }
   const saved = saveProducto(data);
   closeAllModals();
@@ -9095,6 +9359,10 @@ function readTableFile(file, cb){
 }
 
 function importProductsCSV(file){
+  if(!esMaestro()){
+    toast('Importar productos solo está disponible en la PC principal. En este dispositivo usa "📥 Productos nuevos".', 'error');
+    return;
+  }
   const reader = new FileReader();
   reader.onload = async (e)=>{
     try{
@@ -9265,6 +9533,22 @@ function importBackup(file){
         return;
       }
       confirmDialog('Restaurar backup', 'Esto reemplazará todos los productos y categorías actuales. ¿Continuar?', ()=>{
+        if(!esMaestro()){
+          // PC que no es la maestra: solo restaura ventas e historial; el
+          // catálogo lo administra la PC principal.
+          const solo = normalizeDB({
+            productos: db.productos || [],
+            categorias: db.categorias || [],
+            contador: db.contador,
+            ventas: parsed.ventas || []
+          });
+          db.ventas = solo.ventas;
+          saveDB();
+          backfillVentas(currentModo);
+          renderVentas();
+          toast('Backup restaurado: solo ventas e historial (los productos los maneja la PC principal)', 'success');
+          return;
+        }
         db = normalizeDB({
           productos: parsed.productos || [],
           categorias: parsed.categorias || [],
@@ -9559,6 +9843,7 @@ function importFotosProductos(file){
 // se tocan.
 function vaciarCatalogo(){
   if(currentRole === 'guest'){ toast('Los invitados no pueden vaciar el catálogo', 'error'); return; }
+  if(!esMaestro()){ toast('Solo la PC principal puede vaciar el catálogo', 'error'); return; }
   const nombre = currentModo === 'electrico' ? 'Eléctricas' : 'Manuales';
   confirmDialog('Vaciar catálogo del modo ' + nombre,
     '¿Estás seguro de vaciar todos los productos de ' + nombre + '?\n\nSe eliminarán TODOS los productos y categorías de ' + nombre + ' (en este dispositivo y en la nube). Ventas, compras, gastos e historial NO se tocan. Esta acción no se puede deshacer.',
@@ -9841,6 +10126,7 @@ const VIEW_TITLES = {
   inicio: 'Inicio',
   escaner: 'Escanear',
   productos: 'Productos',
+  productosnuevos: '📥 Productos nuevos',
   categorias: 'Categorías',
   ventas: 'Ventas',
   topventas: 'Productos más vendidos',
@@ -9868,7 +10154,7 @@ function updateInicioClock(){
 function showView(name){
   if(welcomeTimer){ clearTimeout(welcomeTimer); welcomeTimer = null; }
   currentView = name;
-  if(currentRole === 'guest' && (name === 'inventario' || name === 'compras' || name === 'finanzas' || name === 'retiros' || name === 'deudas' || name === 'gastos' || name === 'codigobarras' || name === 'topventas' || name === 'pedidos')){
+  if(currentRole === 'guest' && (name === 'inventario' || name === 'compras' || name === 'finanzas' || name === 'retiros' || name === 'deudas' || name === 'gastos' || name === 'codigobarras' || name === 'topventas' || name === 'pedidos' || name === 'productosnuevos')){
     toast('Los invitados no tienen acceso a esa sección', 'error');
     name = 'productos';
   }
@@ -9891,6 +10177,7 @@ function showView(name){
 
   if(name === 'inicio') updateInicioClock();
   if(name === 'productos') renderProductos();
+  if(name === 'productosnuevos') renderProductosNuevos();
   if(name === 'categorias') renderCategorias();
   if(name === 'ventas') renderVentas();
   if(name === 'topventas') renderTopVentas();
@@ -10395,6 +10682,8 @@ function openPasswordGate(modo){
 
 function applyRoleUI(){
   document.body.classList.toggle('role-guest', currentRole === 'guest');
+  // Oculta los botones maestros (crear/borrar/importar) si esta PC no es la principal.
+  applyMasterUI();
 }
 
 // Restaura el modo guardado al abrir la app (sin pedir contraseña de nuevo:
@@ -11310,6 +11599,17 @@ function setupEventListeners(){
   const swFBConfig = document.getElementById('firebaseSwitchConfig');
   if(swFBConfig) swFBConfig.addEventListener('change', (e)=> aplicarSwitchFirebase(e.target.checked));
 
+  // "PC principal (maestra)": solo se enciende EN la PC principal del dueño.
+  // Con el interruptor apagado este dispositivo no crea ni borra productos
+  // (usa la pestaña "📥 Productos nuevos" para cargar nuevos con Excel).
+  const swMaster = document.getElementById('masterSwitchConfig');
+  if(swMaster) swMaster.addEventListener('change', (e)=>{
+    setEsMaestro(e.target.checked);
+    toast(e.target.checked
+      ? 'Esta PC ahora es la PC principal: puede crear y borrar productos'
+      : 'Modo normal: los productos nuevos se cargan en "📥 Productos nuevos" y se exportan con Excel', 'success');
+  });
+
   // Instalar la app (PWA): el botón de Configuración y la guía según cómo se
   // abrió el archivo (file://, localhost o ya instalada).
   const btnInstall = document.getElementById('btnInstallPWA');
@@ -11409,6 +11709,18 @@ function setupEventListeners(){
   document.getElementById('btnNewProduct').addEventListener('click', ()=> openProductModal());
   document.getElementById('btnExportProducts').addEventListener('click', exportProductosExcel);
   document.getElementById('formProducto').addEventListener('submit', handleProductSubmit);
+
+  // Productos nuevos (borradores locales de este dispositivo → Excel → PC principal)
+  document.getElementById('btnNewDraft').addEventListener('click', ()=> openDraftModal(null));
+  document.getElementById('btnExportDrafts').addEventListener('click', exportDraftsExcel);
+  document.getElementById('btnClearDrafts').addEventListener('click', clearDrafts);
+  document.getElementById('formBorrador').addEventListener('submit', handleDraftSubmit);
+  document.querySelector('#draftsTable tbody').addEventListener('click', (e)=>{
+    const editIdx = e.target.closest('[data-draft-edit]')?.dataset.draftEdit;
+    const delIdx = e.target.closest('[data-draft-del]')?.dataset.draftDel;
+    if(editIdx !== undefined && editIdx !== null && editIdx !== '') openDraftModal(parseInt(editIdx, 10));
+    if(delIdx !== undefined && delIdx !== null && delIdx !== '') deleteDraft(parseInt(delIdx, 10));
+  });
   let _prodSearchTimer = null;
   document.getElementById('prodSearch').addEventListener('input', ()=>{
     clearTimeout(_prodSearchTimer);

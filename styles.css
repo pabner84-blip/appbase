@@ -449,6 +449,11 @@ body.role-guest .nav-pro-group{display:none;}
 body.role-guest .price-guest-hide{display:none;}
 body.role-guest .admin-only{display:none !important;}
 
+/* PC que NO es la principal (maestra): se ocultan los botones que crean,
+   borran o importan productos. Todo lo demás (precios, descripción,
+   categoría, código de barras, características, stock) sigue disponible. */
+body.role-noMaster .master-only{display:none !important;}
+
 /* Filtro por mes en Retiros y Deudas */
 .mes-filtro{display:flex; align-items:center; gap:8px; margin-bottom:12px; flex-wrap:wrap;}
 .mes-filtro label{font-size:13px; font-weight:600;}

@@ -8337,7 +8337,23 @@ function populateCategoryDatalist(){
 function getAllCategoryNames(){
   const set = new Set(db.categorias.map(c => c.trim()).filter(Boolean));
   db.productos.forEach(p => { if(p.categoria) set.add(p.categoria.trim()); });
-  return Array.from(set).sort((a,b)=> a.localeCompare(b, 'es'));
+  if(currentModo === 'invitado'){
+    // Invitado: los dos catálogos juntos (como los productos).
+    return Array.from(set).sort((a,b)=> a.localeCompare(b, 'es'));
+  }
+  // Dueño: solo las categorías de SU base. Un nombre que existe en la lista de
+  // este modo pero solo lo usan productos del OTRO modo (categorías mezcladas
+  // por datos viejos) no se muestra aquí: cada modo queda con lo suyo, igual
+  // que la pestaña de Productos.
+  const otro = currentModo === 'manual' ? 'electrico' : 'manual';
+  const otroDB = loadModoDB(otro);
+  const usadoEnOtro = new Set(((otroDB && otroDB.productos) || [])
+    .map(p => normalize(String(p.categoria || ''))).filter(Boolean));
+  const usadoAqui = new Set(db.productos
+    .map(p => normalize(String(p.categoria || ''))).filter(Boolean));
+  return Array.from(set)
+    .filter(c => usadoAqui.has(normalize(c)) || !usadoEnOtro.has(normalize(c)))
+    .sort((a,b)=> a.localeCompare(b, 'es'));
 }
 
 function renderProductos(){

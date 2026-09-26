@@ -20,6 +20,12 @@ let currentModo = 'manual';
 // (invitado: no ve precios de compra/marca ni puede entrar a Inventario o
 // Configuración).
 let currentRole = 'admin';
+// Historial del botón "atrás" del celular/navegador: los DUEÑOS cierran los
+// modales ventana por ventana (una entrada de historia por modal abierto);
+// los invitados no usan esto y conservan el comportamiento de siempre.
+let sfModalHistDepth = 0;
+let sfHistSkip = 0;
+let sfClosingFromPop = false;
 // Vista activa actual (para saber si el usuario está en una pestaña exclusiva
 // del modo pro cuando este se desactiva).
 let currentView = 'inicio';
@@ -3262,6 +3268,10 @@ function openVentaModal(producto){
   document.getElementById('vEsOtro').value = '0';
   document.getElementById('vNombreDisplayBox').style.display = '';
   document.getElementById('vNombreOtroLabel').style.display = 'none';
+  // Historial de ingresos del producto que se va a vender: solo para dueños
+  // (los invitados no tienen acceso a Ingresos).
+  const btnVentaIngresos = document.getElementById('btnVentaVerIngresos');
+  if(btnVentaIngresos) btnVentaIngresos.style.display = currentRole === 'guest' ? 'none' : '';
   document.getElementById('vCodigo').value = producto.codigo;
   document.getElementById('vNombreDisplay').textContent = producto.nombre;
   document.getElementById('vNombre').value = producto.nombre;
@@ -3287,6 +3297,8 @@ function openVentaModalOtro(){
   document.getElementById('vEsOtro').value = '1';
   document.getElementById('vNombreDisplayBox').style.display = 'none';
   document.getElementById('vNombreOtroLabel').style.display = '';
+  const btnVentaIngresos = document.getElementById('btnVentaVerIngresos');
+  if(btnVentaIngresos) btnVentaIngresos.style.display = 'none';
   document.getElementById('vCodigo').value = '';
   document.getElementById('vNombre').value = '';
   document.getElementById('vNombreOtroInput').value = '';
@@ -10793,19 +10805,78 @@ function handleSetPasswordSubmit(e){
    11. MODALES / TOASTS / CONFIRMACIÓN
    ------------------------------------------------------------------------- */
 
+/* --- "ATRÁS" DEL CELULAR/NAVEGADOR: CIERRA VENTANA POR VENTANA (DUEÑOS) ---
+   Cada modal abierto deja UNA entrada en el historial. Al apretar atrás se
+   cierra SOLO la ventana de arriba; si quedan más, se re-armo la entrada para
+   que el próximo atrás cierre la siguiente. Cuando ya no queda ninguna, el
+   atrás funciona normal (sale de la app). Los invitados no usan esto. */
+function pushModalHistory(){
+  if(currentRole === 'guest') return;
+  try{ history.pushState({ sfModal: 1 }, ''); sfModalHistDepth++; }
+  catch(e){ /* sin soporte: el atrás queda como siempre */ }
+}
+// Consume las entradas de historia de modales ya cerrados con la X/fondo.
+function consumeModalHistory(n){
+  if(currentRole === 'guest') return;
+  n = Math.min(n || 0, sfModalHistDepth);
+  if(n <= 0) return;
+  sfModalHistDepth -= n;
+  sfHistSkip += n;
+  for(let i = 0; i < n; i++) history.back();
+}
+// Detiene la cámara si la ventana que se cierra es la de un escáner.
+function stopScannerForModal(id){
+  if(id === 'modalInventarioScan' || id === 'modalVentaScan' || id === 'modalCompraScan'){
+    try{ stopActiveScanner(); restoreScannerBlockHome(); scanContext = 'lookup'; }catch(e){ /* ignorar */ }
+  }
+  if(id === 'modalBarcodeScan'){
+    try{ stopBarcodeScanner(); }catch(e){ /* ignorar */ }
+  }
+}
+// Cierra SOLO la ventana que está arriba de todas. Devuelve true si había.
+function closeTopModal(){
+  const abiertos = Array.from(document.querySelectorAll('.modal.open'));
+  if(!abiertos.length) return false;
+  const top = abiertos[abiertos.length - 1];
+  stopScannerForModal(top.id);
+  closeModalById(top.id);
+  return true;
+}
+window.addEventListener('popstate', ()=>{
+  if(sfHistSkip > 0){ sfHistSkip--; return; } // pop que solo consume un cierre por UI
+  if(currentRole === 'guest') return;
+  if(sfModalHistDepth > 0) sfModalHistDepth--;        // el navegador acaba de comer UNA entrada nuestra
+  if(!document.querySelector('.modal.open')) return;  // nada abierto: que siga el navegador
+  // Quedan ventanas: re-usa la entrada actual (replace) para que el próximo
+  // "atrás" cierre la siguiente sin dejar entradas muertas en la historia.
+  sfClosingFromPop = true;
+  closeTopModal();
+  sfClosingFromPop = false;
+  if(document.querySelector('.modal.open')){
+    try{ history.replaceState({ sfModal: 1 }, ''); }catch(e){ /* ignorar */ }
+  }
+});
+
 function openModal(id){
+  const el = document.getElementById(id);
+  const yaAbierto = !!el && el.classList.contains('open');
   document.getElementById('modalBackdrop').classList.add('open');
-  document.getElementById(id).classList.add('open');
+  el.classList.add('open');
+  if(!yaAbierto) pushModalHistory();
 }
 // Cierra únicamente el modal indicado, sin tocar otros modales que puedan
 // estar abiertos debajo (por ejemplo el escáner de código de barras, que se
 // abre "encima" del recuadro de registrar inventario).
 function closeModalById(id){
   const modal = document.getElementById(id);
-  if(modal) modal.classList.remove('open');
+  if(!modal) return;
+  const estabaAbierto = modal.classList.contains('open');
+  modal.classList.remove('open');
   if(!document.querySelector('.modal.open')){
     document.getElementById('modalBackdrop').classList.remove('open');
   }
+  if(id === 'modalModoDetalle') currentModoDetalleOpen = null;
+  if(estabaAbierto && !sfClosingFromPop) consumeModalHistory(1);
 }
 function closeAllModals(){
   currentModoDetalleOpen = null;
@@ -10823,6 +10894,7 @@ function closeAllModals(){
   if(barcodeScanWasOpen){
     stopBarcodeScanner();
   }
+  consumeModalHistory(sfModalHistDepth);
 }
 
 let confirmCallback = null;
@@ -11666,11 +11738,24 @@ function setupEventListeners(){
     });
   });
 
-  // Cerrar modales
+  // Cerrar modales: el DUEÑO cierra ventana por ventana (la X y el fondo
+  // cierran solo la ventana de arriba); el INVITADO cierra todo como antes.
   document.querySelectorAll('[data-close-modal]').forEach(btn=>{
-    btn.addEventListener('click', closeAllModals);
+    btn.addEventListener('click', ()=>{
+      if(currentRole === 'guest'){ closeAllModals(); return; }
+      const m = btn.closest('.modal');
+      if(m){
+        stopScannerForModal(m.id);
+        closeModalById(m.id);
+      }else{
+        closeAllModals();
+      }
+    });
   });
-  document.getElementById('modalBackdrop').addEventListener('click', closeAllModals);
+  document.getElementById('modalBackdrop').addEventListener('click', ()=>{
+    if(currentRole === 'guest'){ closeAllModals(); return; }
+    closeTopModal();
+  });
 
   // Lightbox: cerrar con clic en fondo, botón o tecla Escape
   document.getElementById('imgLightbox').addEventListener('click', (e)=>{
@@ -11819,6 +11904,13 @@ function setupEventListeners(){
   });
   document.getElementById('btnDetSaveCaract').addEventListener('click', saveDetCaracteristicas);
   document.getElementById('btnDetVerIngresos').addEventListener('click', ()=> openProductIngresos(detTargetId));
+  // Desde la ventana "Registrar venta": ver el historial de ingresos del
+  // producto seleccionado (solo dueños; el botón está oculto para invitados).
+  document.getElementById('btnVentaVerIngresos').addEventListener('click', ()=>{
+    const codigo = document.getElementById('vCodigo').value;
+    if(!codigo) return;
+    openCompraHistorial(codigo);
+  });
   document.getElementById('fileImgCamera').addEventListener('change', (e)=>{
     if(e.target.files[0]) handleImgFile(e.target.files[0]);
     e.target.value = '';

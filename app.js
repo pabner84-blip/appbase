@@ -547,7 +547,7 @@ function saveDB(){
       const fsMain = fsFor(currentModo);
       if(!fsMain) return;
       const ref = fbDocRef || fsMain.collection('stockferre').doc(firebaseDocId());
-      const { historialEscaneos, historialBusquedas, historialInventario, ventas, ajustes, gastosPrestamos, ...syncData } = db;
+      const { historialEscaneos, historialBusquedas, historialInventario, ventas, ajustes, gastosPrestamos, compras, ...syncData } = db;
       // PC que no es la maestra y aún sin alinearse: no sube el catálogo
       // (evita que productos locales viejos contaminen la nube).
       if(!subidaCatalogoPermitida()) delete syncData.productos;
@@ -644,7 +644,7 @@ function persistModoDB(modo, dbObj){
       const fsModo = fsFor(modo);
       if(!fsModo) return;
       const ref = fsModo.collection('stockferre').doc('inventario_' + modo);
-      const { historialEscaneos, historialBusquedas, historialInventario, ventas, ajustes, gastosPrestamos, ...syncData } = dbObj;
+      const { historialEscaneos, historialBusquedas, historialInventario, ventas, ajustes, gastosPrestamos, compras, ...syncData } = dbObj;
       scheduleFirestoreWrite('inventario_' + modo, ref, syncData);
     }catch(err){
       console.error('Error guardando en Firebase', err);
@@ -799,6 +799,7 @@ function disconnectGuestFirebase(){
   guestUnsubs.forEach(u => { try{ u(); }catch(e){ /* ignorar */ } });
   guestUnsubs = [];
   stopVentasListeners();
+  stopComprasListeners();
   stopAjustesListeners();
   stopGastosPrestamosListeners();
   Object.keys(fbWriteQueues).forEach(k => delete fbWriteQueues[k]);
@@ -1057,6 +1058,7 @@ function disconnectFirebase(){
   if(fbOtherUnsub){ try{ fbOtherUnsub(); }catch(e){ /* ignorar */ } fbOtherUnsub = null; }
   stopStockListeners();
   stopVentasListeners();
+  stopComprasListeners();
   stopAjustesListeners();
   stopGastosPrestamosListeners();
   Object.keys(fbWriteQueues).forEach(k => delete fbWriteQueues[k]);
@@ -1094,6 +1096,10 @@ function setSyncStatus(status){
 function manualSync(){
   setFirebaseToggle(true);
   setFirebaseToggleUI(true);
+  // Este botón también fuerza el respaldo de INGRESOS que falten en la nube:
+  // ignora la marca semanal del backfill para subir YA los que este
+  // dispositivo tenga locales y todavía no estén en la colección.
+  if(currentModo !== 'invitado') sfForceComprasBackfill = true;
   const btn = document.getElementById('btnManualSync');
   if(btn){ btn.disabled = true; btn.textContent = '🔄 Sincronizando…'; }
   const finish = ()=>{ if(btn){ btn.disabled = false; btn.textContent = '🔄 Recibir y mandar actualizaciones'; } };
@@ -1255,7 +1261,7 @@ async function connectFirebase(){
       applySnapshot(snap);
     }else if(snap && !snap.exists){
       // Primera vez: sube los datos locales como semilla inicial de la nube
-      const { historialEscaneos, historialBusquedas, historialInventario, ventas, ajustes, gastosPrestamos, ...syncData } = db;
+      const { historialEscaneos, historialBusquedas, historialInventario, ventas, ajustes, gastosPrestamos, compras, ...syncData } = db;
       try{ await withTimeout(fbDocRef.set(syncData), 12000); }catch(e){ /* el SDK reintenta */ }
     }
 
@@ -1300,6 +1306,14 @@ async function connectFirebase(){
     // del modo actual; al cambiar de modo se re-conecta con su colección.
     try{ await withTimeout(backfillVentas(currentModo), 15000); }catch(e){ /* no bloquea */ }
     startVentasListener(currentModo);
+    // INGRESOS del dueño: CADA INGRESO es su propio documento en la colección
+    // "stockferre_compras_<modo>" (igual que productos/ventas). Antes viajaban
+    // DENTRO del documento grande con escritura completa: un dispositivo que
+    // escribía con la lista vacía (antes de recibir la copia ajena) los borraba
+    // de la nube para todos. El backfill sube los que falten y el listener los
+    // recibe al instante desde cualquier otro dispositivo.
+    try{ await withTimeout(backfillCompras(currentModo), 15000); }catch(e){ /* no bloquea */ }
+    startComprasListener(currentModo);
     // AJUSTE DE CUENTAS y GASTOS/PRÉSTAMOS del dueño (mismo modelo por dominio).
     try{ await withTimeout(backfillAjustes(currentModo), 15000); }catch(e){ /* no bloquea */ }
     try{ await withTimeout(backfillGastosPrestamos(currentModo), 15000); }catch(e){ /* no bloquea */ }
@@ -1643,7 +1657,7 @@ async function backfillVentas(modo){
   if(!col) return;
   // Una sola vez por dominio: releer TODA la colección de ventas en cada
   // apertura también quema el cupo de lecturas (una lectura por venta).
-  const markKey = 'fs_backfill_ventas_' + (modo || DOMAIN);
+  const markKey = 'fs_backfill_ventas_' + (modo || currentModo);
   let done = false;
   try{ done = await kvGet(markKey) === '1'; }catch(e){}
   if(done) return;
@@ -1729,6 +1743,186 @@ function startVentasListener(modo){
 function stopVentasListeners(){
   if(fbVentasUnsub){ try{ fbVentasUnsub(); }catch(e){ /* ignorar */ } fbVentasUnsub = null; }
   ventasStoreCache.list = null;
+}
+
+/* -------------------------------------------------------------------------
+   INGRESOS (COMPRAS) DEL DUEÑO: UN INGRESO = UN DOCUMENTO POR MODO
+   Mismo modelo que productos y ventas. Los ingresos ANTES viajaban DENTRO del
+   documento grande inventario_<modo>, que se reescribe COMPLETO en cada
+   guardado: cualquier dispositivo que escribía con la lista de ingresos vacía
+   (antes de recibir la copia de los demás) los borraba de la nube para todos
+   — por eso los ingresos de Eléctricas se veían solo en la PC donde se
+   registraron. Ahora:
+   • Cada ingreso es SU PROPIO documento chico en "stockferre_compras_<modo>":
+     nada lo pisa, no hay carreras de escritura completa.
+   • Al registrar un ingreso se sube al instante (syncCompraDoc).
+   • Todos los dispositivos escuchan SU colección por modo (onSnapshot) y los
+     ingresos de otros aparecen al momento; los borrados desaparecen.
+   • backfillCompras sube a la nube los ingresos locales que falten (el
+     historial viejo y los registrados con la sincronización apagada).
+   ------------------------------------------------------------------------- */
+
+function fbComprasCol(modo){
+  const fs = fbFirestoreOrNull(modo);
+  return fs ? fs.collection('stockferre_compras_' + (modo || currentModo)) : null;
+}
+
+function compraDocData(c){
+  return {
+    id: c.id,
+    codigo: c.codigo || '',
+    nombre: c.nombre || '',
+    cantidad: Number(c.cantidad) || 0,
+    precioUnitario: Number(c.precioUnitario) || 0,
+    total: Number(c.total) || 0,
+    metodoPago: c.metodoPago || '',
+    fecha: c.fecha || todayISO(),
+    proveedor: c.proveedor || '',
+    observaciones: c.observaciones || '',
+    productoId: c.productoId || null,
+    _ts: Date.now()
+  };
+}
+
+// Sube (crea o actualiza) el documento de UN ingreso.
+async function syncCompraDoc(c, modo){
+  const col = fbComprasCol(modo);
+  if(!col || !c || !c.id) return;
+  try{
+    await col.doc(String(c.id)).set(compraDocData(c));
+  }catch(e){ console.error('Error subiendo ingreso a la nube', e); }
+}
+
+async function syncCompraDocs(list, modo){
+  const col = fbComprasCol(modo);
+  if(!col || !list || !list.length) return;
+  try{
+    const fs = col.firestore;
+    for(let i = 0; i < list.length; i += 450){
+      const batch = fs.batch();
+      list.slice(i, i + 450).forEach(c => {
+        if(c && c.id) batch.set(col.doc(String(c.id)), compraDocData(c));
+      });
+      await batch.commit();
+    }
+  }catch(e){ console.error('Error subiendo ingresos a la nube', e); }
+}
+
+async function deleteCompraDocs(ids, modo){
+  const col = fbComprasCol(modo);
+  if(!col || !ids || !ids.length) return;
+  try{
+    const fs = col.firestore;
+    for(let i = 0; i < ids.length; i += 450){
+      const batch = fs.batch();
+      ids.slice(i, i + 450).forEach(id => {
+        if(id) batch.delete(col.doc(String(id)));
+      });
+      await batch.commit();
+    }
+  }catch(e){ console.error('Error borrando ingresos de la nube', e); }
+}
+
+// Sube a la colección los ingresos locales que todavía no tienen documento en
+// la nube (historial de antes de este arreglo, y los registrados con la
+// sincronización apagada). Se revisa como máximo una vez por semana para no
+// quemar lecturas; lo nuevo viaja DIRECTO con syncCompraDoc().
+async function backfillCompras(modo){
+  const col = fbComprasCol(modo);
+  if(!col) return;
+  const markKey = 'fs_backfill_compras_' + (modo || currentModo);
+  if(sfForceComprasBackfill){
+    sfForceComprasBackfill = false; // "Recibir y mandar actualizaciones" pidió forzar
+  }else{
+    try{
+      const done = await kvGet(markKey);
+      if(done){
+        const parts = String(done).split('@');
+        if(parts[0] === '1' && Number(parts[1] || 0) && (Date.now() - Number(parts[1])) < 7 * 24 * 3600 * 1000) return;
+      }
+    }catch(e){}
+  }
+  const arr = (db.compras || []);
+  if(!arr.length){
+    try{ await kvSet(markKey, '1@' + Date.now()); }catch(e){}
+    return;
+  }
+  try{
+    const snap = await col.get();
+    const existing = new Set(snap.docs.map(d => d.id));
+    const tbs = (db.tombstones || {}).compras || {};
+    const missing = arr.filter(c => c && c.id && !existing.has(String(c.id)) && !tbs[String(c.id)]);
+    if(missing.length) await syncCompraDocs(missing, modo);
+    try{ await kvSet(markKey, '1@' + Date.now()); }catch(e){}
+  }catch(e){ if(e && e.code !== 'permission-denied') console.error('Error respaldando ingresos en la nube', e); }
+}
+
+// Escucha la colección de ingresos del modo activo: los ingresos hechos en
+// OTROS dispositivos aparecen al instante y los borrados desaparecen aquí.
+const comprasStoreCache = {}; // copia de la lista mientras se actualiza
+let fbComprasUnsub = null;
+let sfForceComprasBackfill = false; // true = "Recibir y mandar" pidió respaldar YA
+
+function startComprasListener(modo){
+  const col = fbComprasCol(modo);
+  if(!col) return;
+  if(fbComprasUnsub){ try{ fbComprasUnsub(); }catch(e){ /* ignorar */ } }
+  comprasStoreCache.list = null;
+  let timer = null, changed = false;
+
+  const flush = () => {
+    if(!changed) return;
+    changed = false;
+    const store = comprasStoreCache.list;
+    comprasStoreCache.list = null;
+    if(!store) return;
+    try{
+      // Misma orden que la pestaña Ingresos: la fecha más nueva arriba.
+      db.compras = store.sort((a,b)=> new Date(b.fecha) - new Date(a.fecha));
+      persistLocalCache();
+    }catch(e){ console.error('Error guardando ingresos local', e); }
+    rerenderCurrentView();
+  };
+
+  fbComprasUnsub = col.onSnapshot(snap => {
+    const tbs = (db.tombstones || {}).compras || {};
+    snap.docChanges().forEach(ch => {
+      if(ch.doc.metadata.hasPendingWrites) return; // espera la confirmación de la nube
+      if(ch.type === 'removed'){
+        // Alguien borró el ingreso: desaparece también aquí (y no resucita).
+        if(comprasStoreCache.list === null){
+          try{ comprasStoreCache.list = (db.compras || []).slice(); }catch(e){ return; }
+        }
+        const i = comprasStoreCache.list.findIndex(c => c && String(c.id) === String(ch.doc.id));
+        if(i !== -1){ comprasStoreCache.list.splice(i, 1); changed = true; }
+        return;
+      }
+      const data = ch.doc.data();
+      if(!data || !data.id) return;
+      if(tbs[String(data.id)]) return; // borrado en este dispositivo: no vuelve
+      if(comprasStoreCache.list === null){
+        try{ comprasStoreCache.list = (db.compras || []).slice(); }catch(e){ return; }
+      }
+      const i = comprasStoreCache.list.findIndex(c => c && String(c.id) === String(data.id));
+      if(i !== -1){
+        comprasStoreCache.list[i] = Object.assign({}, comprasStoreCache.list[i], data);
+      }else{
+        comprasStoreCache.list.push(data);
+      }
+      changed = true;
+    });
+    if(changed){
+      if(timer) clearTimeout(timer);
+      timer = setTimeout(()=>{ timer = null; flush(); }, 60);
+    }
+  }, err => {
+    console.error('Error escuchando los ingresos compartidos', err);
+  });
+}
+
+function stopComprasListeners(){
+  if(fbComprasUnsub){ try{ fbComprasUnsub(); }catch(e){ /* ignorar */ } fbComprasUnsub = null; }
+  comprasStoreCache.list = null;
 }
 
 /* -------------------------------------------------------------------------
@@ -1918,7 +2112,7 @@ async function backfillGastosPrestamos(modo){
   if(!col) return;
   // Una sola vez por dominio (igual que ventas/productos) para no releer la
   // colección entera en cada apertura y agotar el cupo gratuito de lecturas.
-  const markKey = 'fs_backfill_gastos_' + (modo || DOMAIN);
+  const markKey = 'fs_backfill_gastos_' + (modo || currentModo);
   let done = false;
   try{ done = await kvGet(markKey) === '1'; }catch(e){}
   if(done) return;
@@ -5388,6 +5582,7 @@ function deleteCompra(id, mantenerInventario){
   }
   db.compras = db.compras.filter(c => c.id !== id);
   marcarBorrado('compras', id); // el borrado viaja a los otros dispositivos
+  deleteCompraDocs([id]); // y borra SU documento de la colección en la nube
   saveDB();
   renderCompras();
   renderInventario();
@@ -5418,7 +5613,10 @@ function vaciarComprasConStock(quitarStock){
       }
     });
   }
+  const idsBorrados = db.compras.map(c => c.id);
+  idsBorrados.forEach(id => marcarBorrado('compras', id));
   db.compras = [];
+  deleteCompraDocs(idsBorrados); // vacía también la colección en la nube
   saveDB();
   renderCompras();
   renderInventario();
@@ -5432,8 +5630,13 @@ function purgeComprasAntiguas(){
   corte.setDate(corte.getDate() - 90);
   const corteKey = localDateKey(corte);
   const antes = db.compras.length;
+  const idsBorrados = db.compras.filter(c => ventaFechaKey(c.fecha) < corteKey).map(c => c.id);
   db.compras = db.compras.filter(c => ventaFechaKey(c.fecha) >= corteKey);
   const borradas = antes - db.compras.length;
+  if(idsBorrados.length){
+    idsBorrados.forEach(id => marcarBorrado('compras', id));
+    deleteCompraDocs(idsBorrados);
+  }
   saveDB();
   renderCompras();
   if(borradas > 0) toast(`${borradas} ingreso(s) antiguo(s) eliminados`, 'success');
@@ -5570,6 +5773,7 @@ function importComprasCSV(file){
         return;
       }
       let importadas = 0;
+      const nuevasCompras = [];
       for(let i = 1; i < rows.length; i++){
         const r = rows[i];
         const nombre = String(r[idx.nombre] || '').trim();
@@ -5581,7 +5785,7 @@ function importComprasCSV(file){
         const proveedor = idx.proveedor > -1 ? String(r[idx.proveedor] || '').trim() : '';
         const observaciones = idx.observaciones > -1 ? String(r[idx.observaciones] || '').trim() : '';
         const p = getProductoByCodigo(codigo);
-        db.compras.push({
+        const compraNueva = {
           id: uid('compra'),
           codigo,
           nombre,
@@ -5593,10 +5797,13 @@ function importComprasCSV(file){
           proveedor,
           observaciones,
           productoId: p ? p.id : null
-        });
+        };
+        db.compras.push(compraNueva);
+        nuevasCompras.push(compraNueva);
         importadas++;
       }
       db.compras.sort((a,b)=> new Date(b.fecha) - new Date(a.fecha));
+      syncCompraDocs(nuevasCompras, currentModo); // cada ingreso, a su documento en la nube
       saveDB();
       renderCompras();
       toast(`Ingresos importados: ${importadas} (no se modificó el stock)`, 'success');
@@ -6561,7 +6768,7 @@ function handleCompraSubmit(e){
   const proveedor = document.getElementById('cProveedor').value.trim();
   const observaciones = document.getElementById('cObservaciones').value.trim();
   setLastCompraProveedor(proveedor);
-  db.compras.unshift({
+  const nuevaCompra = {
     id: uid('compra'),
     codigo,
     nombre,
@@ -6573,8 +6780,10 @@ function handleCompraSubmit(e){
     proveedor,
     observaciones,
     productoId: p.id
-  });
+  };
+  db.compras.unshift(nuevaCompra);
   db.compras.sort((a,b)=> new Date(b.fecha) - new Date(a.fecha));
+  syncCompraDoc(nuevaCompra, currentModo); // al instante, en SU documento de la nube
 
   logInventarioHistorial(p, cantidad, 'compra');
   saveDB();
@@ -7067,12 +7276,13 @@ function ocrConfirmarIngresos(){
   let added = 0;
   let omitidos = 0;
   const codigosOmitidos = [];
+  const nuevasCompras = [];
 
   activos.forEach(it => {
     const prod = db.productos.find(p => normalize(p.codigo) === normalize(it.codigo));
     if(prod){
       // Producto existe: registrar ingreso
-      db.compras.push({
+      const compraNueva = {
         id: 'ocr_' + Date.now() + '_' + Math.random().toString(36).slice(2,6),
         codigo: prod.codigo,
         nombre: prod.nombre,
@@ -7081,7 +7291,9 @@ function ocrConfirmarIngresos(){
         total: it.total,
         fecha: fecha,
         metodoPago: 'efectivo'
-      });
+      };
+      db.compras.push(compraNueva);
+      nuevasCompras.push(compraNueva);
       prod.stock = (parseFloat(prod.stock) || 0) + it.cantidad;
       prod.precioCompra = it.precio;
       touchProducto(prod);
@@ -7111,7 +7323,7 @@ function ocrConfirmarIngresos(){
         caracteristicas: ''
       };
       db.productos.push(newProd);
-      db.compras.push({
+      const compraNuevaOcr = {
         id: 'ocr_' + Date.now() + '_' + Math.random().toString(36).slice(2,8),
         codigo: newProd.codigo,
         nombre: newProd.nombre,
@@ -7120,13 +7332,16 @@ function ocrConfirmarIngresos(){
         total: it.total,
         fecha: fecha,
         metodoPago: 'efectivo'
-      });
+      };
+      db.compras.push(compraNuevaOcr);
+      nuevasCompras.push(compraNuevaOcr);
       touchProducto(newProd);
       syncProductoDoc(newProd);
       added++;
     }
   });
 
+  syncCompraDocs(nuevasCompras, currentModo); // ingresos del OCR a su colección en la nube
   saveDB();
   renderCompras();
   renderProductos();

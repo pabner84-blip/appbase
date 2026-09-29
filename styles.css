@@ -189,9 +189,7 @@ body.modo-invitado .sidebar-logos{display:flex;}
 #histQrTable th, #histQrTable td{white-space:nowrap;}
 #histQrTable td:nth-child(4){white-space:normal;}
 
-/* ---- Miniatura de imagen de producto (columna Imagen) ---- */
-.prod-img-cell{min-width:150px;}
-.prod-img-wrap{display:flex; flex-direction:column; align-items:flex-start; gap:6px; position:relative;}
+/* ---- Miniatura de imagen de producto ---- */
 .prod-thumb{width:110px; height:110px; object-fit:cover; border-radius:8px; cursor:pointer; border:1px solid var(--border); box-shadow:var(--shadow); display:block; transition:transform .15s;}
 .prod-thumb:hover{transform:scale(1.06);}
 .prod-thumb-empty{display:flex; align-items:center; justify-content:center; background:var(--bg); font-size:30px; color:var(--text-muted); cursor:pointer; width:110px; height:110px; border-radius:8px; border:1px solid var(--border); transition:background .15s;}
@@ -210,7 +208,88 @@ body.modo-invitado .sidebar-logos{display:flex;}
   border-radius:9px; cursor:pointer; border:2px solid var(--bg);
 }
 
-#productsTable tbody tr,
+/* =========================================================================
+   PRODUCTOS EN TARJETAS (dueños e invitados)
+   Mismo formato que el catálogo: foto grande, código, descripción, marca,
+   precio y estado del stock. Tocar la tarjeta abre las características.
+   El dueño además ve los botones de editar, buscar foto y eliminar.
+   ========================================================================= */
+.prod-grid{
+  display:grid; gap:14px;
+  grid-template-columns:repeat(auto-fill,minmax(210px,1fr));
+}
+.prod-grid-empty{grid-column:1/-1; text-align:center; padding:26px;}
+.guest-card{
+  background:var(--surface); border:1px solid var(--border);
+  border-radius:var(--radius); overflow:hidden; padding:0; margin:0;
+  text-align:left; font-family:inherit; color:var(--text);
+  display:flex; flex-direction:column; box-shadow:var(--shadow);
+  cursor:pointer; transition:transform .16s ease, box-shadow .16s ease, border-color .16s ease;
+  animation:guestCardPop .22s ease both;
+}
+@keyframes guestCardPop{from{opacity:0; transform:translateY(8px);} to{opacity:1; transform:none;}}
+.guest-card:hover{transform:translateY(-3px); border-color:var(--primary); box-shadow:0 8px 22px rgba(0,0,0,.5);}
+.guest-card:focus-visible{outline:2px solid var(--primary-light); outline-offset:2px;}
+
+.guest-card-img{
+  position:relative; aspect-ratio:1/1; background:#0e1013;
+  display:grid; place-items:center; overflow:hidden;
+  border-bottom:1px solid var(--border);
+}
+.guest-card-img img{width:100%; height:100%; object-fit:contain; padding:8px;}
+.guest-card-img .ph{font-size:38px; opacity:.28;}
+/* El cargador diferido de la app pone aquí la miniatura; dentro de la tarjeta
+   tiene que ocupar todo el cuadro, no 110px como en la tabla. */
+.guest-card-img .prod-thumb-lazy{width:100%; height:100%; display:block; border-radius:0; overflow:hidden;}
+.guest-card-img /* hydrateLazyThumb mete un <img class="prod-thumb"> dentro de la tarjeta: ahí
+   tiene que llenar todo el cuadro, no medir 110px como antes. */
+.guest-card-img .prod-thumb{width:100%; height:100%; object-fit:contain; padding:8px; border-radius:0; border:none; box-shadow:none; cursor:pointer;}
+.guest-card-img .nphotos{
+  position:absolute; right:8px; bottom:8px;
+  background:rgba(0,0,0,.66); color:#fff;
+  font-size:11px; font-weight:700; padding:3px 7px; border-radius:999px;
+}
+
+.guest-card-body{padding:11px 12px 13px; display:flex; flex-direction:column; gap:7px; flex:1;}
+.guest-card-code{
+  align-self:flex-start; font-size:11px; font-weight:800; letter-spacing:.05em;
+  background:#0e1013; border:1px solid var(--border); color:var(--primary-light);
+  padding:3px 8px; border-radius:6px;
+}
+.guest-card-name{
+  font-size:13.5px; font-weight:600; line-height:1.35; color:var(--text);
+  display:-webkit-box; -webkit-line-clamp:3; line-clamp:3; -webkit-box-orient:vertical; overflow:hidden;
+}
+.guest-card-brand{font-size:12px; color:var(--text-muted);}
+.guest-card-actions{
+  display:flex; align-items:center; gap:2px;
+  margin-top:2px; padding-top:6px; border-top:1px solid var(--border);
+}
+.guest-card-actions .btn-icon{font-size:16px; padding:4px 7px;}
+.guest-card-actions .btn-icon:hover{background:var(--bg);}
+.guest-card-foot{margin-top:auto; display:flex; align-items:flex-end; justify-content:space-between; gap:8px;}
+.guest-card-foot .price{font-size:17px; font-weight:800; color:var(--primary-light); line-height:1;}
+.guest-card-foot .price small{font-size:11px; font-weight:600; color:var(--text-muted); display:block; margin-bottom:2px;}
+.stock-pill{
+  font-size:11px; font-weight:800; letter-spacing:.03em;
+  padding:4px 9px; border-radius:999px; white-space:nowrap;
+  background:#0e1013; border:1px solid var(--border); color:var(--text-muted);
+}
+.stock-pill.ok{background:var(--success-light); border-color:rgba(22,163,74,.45); color:#4ade80;}
+.stock-pill.pocas{background:var(--warning-light); border-color:rgba(217,119,6,.45); color:#fbbf24;}
+.stock-pill.sin{background:var(--danger-light); border-color:rgba(220,38,38,.45); color:#f87171;}
+
+body.theme-blanco .guest-card-img{background:#e9ebef;}
+body.theme-blanco .guest-card-code{background:#e9ebef;}
+body.theme-blanco .stock-pill{background:#e9ebef;}
+
+@media (max-width:640px){
+  .prod-grid{grid-template-columns:repeat(2,1fr); gap:10px;}
+  .guest-card-name{font-size:12.5px;}
+  .guest-card-foot .price{font-size:15px;}
+  .guest-card-actions .btn-icon{font-size:15px; padding:4px 5px;}
+}
+
 #ventasTable tbody tr,
 #topVentasTable tbody tr,
 #pedidosTable tbody tr,
@@ -401,7 +480,12 @@ body.modo-invitado .sidebar-logos{display:flex;}
 .vsi-thumb-empty{display:flex; align-items:center; justify-content:center; background:var(--bg); font-size:16px; color:var(--text-muted);}
 .vsi-info{display:flex; flex-direction:column; gap:1px; min-width:0;}
 .venta-search-item .vsi-nombre{font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
-.venta-search-item .vsi-meta{color:var(--text-muted); font-size:12px; white-space:nowrap;}
+/* Código · precio · marca. La marca va al lado del precio, así que si no cabe
+   se recorta al final en vez de desbordar la lista. */
+.venta-search-item .vsi-meta{
+  color:var(--text-muted); font-size:12px;
+  white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+}
 
 .venta-img-cell{width:40px; padding:4px 6px !important;}
 .venta-thumb{width:36px; height:36px; object-fit:cover; border-radius:6px; border:1px solid var(--border); display:block;}

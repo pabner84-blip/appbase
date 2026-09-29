@@ -6947,7 +6947,7 @@ function renderVentaSearchResults(){
       ${thumb}
       <span class="vsi-info">
         <span class="vsi-nombre">${escapeHtml(p.nombre)}</span>
-        <span class="vsi-meta">${escapeHtml(p.codigo)} · ${fmtMoney(p.precioVenta)}</span>
+        <span class="vsi-meta">${escapeHtml(p.codigo)} · ${fmtMoney(p.precioVenta)} · ${escapeHtml(p.marca || 'Sin marca')}</span>
       </span>
     </button>`;
   }).join('');
@@ -6989,7 +6989,7 @@ function renderCompraSearchResults(){
       ${thumb}
       <span class="vsi-info">
         <span class="vsi-nombre">${escapeHtml(p.nombre)}</span>
-        <span class="vsi-meta">${escapeHtml(p.codigo)} · Compra ${fmtMoney(p.precioCompra)}</span>
+        <span class="vsi-meta">${escapeHtml(p.codigo)} · Compra ${fmtMoney(p.precioCompra)} · ${escapeHtml(p.marca || 'Sin marca')}</span>
       </span>
     </button>`;
   }).join('');
@@ -8600,40 +8600,63 @@ function renderProductos(){
   }
   list.sort((a,b)=> a.nombre.localeCompare(b.nombre, 'es'));
 
-  const tbody = document.querySelector('#productsTable tbody');
-  if(list.length === 0){
-    tbody.innerHTML = `<tr class="empty-row"><td colspan="${currentRole === 'guest' ? 4 : 5}">No hay productos que coincidan.</td></tr>`;
-  }else{
-    tbody.innerHTML = list.map((p, idx) => {
-      const img = getImage(p.id);
-      const countImg = getImageCount(p.id);
-      const thumb = img
-        ? (idx < IMG_LAZY_FIRST
-            ? `<img src="${img}" class="prod-thumb" alt="" data-img-product="${p.id}" decoding="async" loading="lazy">`
-            : `<div class="prod-thumb-lazy" data-lazy-img="${p.id}"><div class="prod-thumb prod-thumb-empty">🖼️</div></div>`)
-        : `<div class="prod-thumb prod-thumb-empty" data-img-product="${p.id}">🖼️</div>`;
-      return `
-      <tr data-product-id="${p.id}">
-        <td class="prod-img-cell">
-          <div class="prod-img-wrap">
-            ${thumb}
-            ${countImg > 1 ? `<span class="prod-img-count" data-img-product="${p.id}">${countImg}</span>` : ''}
-          </div>
-        </td>
-        <td><strong>${escapeHtml(p.codigo)}</strong></td>
-        <td>${escapeHtml(p.nombre)}</td>
-        <td>${escapeHtml(p.marca || '-')}</td>
-        ${currentRole === 'guest' ? '' : `
-        <td>
-          <button class="btn-icon" title="Editar" data-edit-product="${p.id}">✏️</button>
-          <button class="btn-icon master-only" title="Eliminar" data-delete-product="${p.id}">🗑️</button>
-        </td>`}
-      </tr>`;
-    }).join('');
-    armImgLazyLoader(tbody);
-  }
-
+  const grid = document.getElementById('productsGrid');
+  renderProductosTarjetas(grid, list);
   updateSidebarProductCount();
+}
+
+/* Los productos se muestran en tarjetas, con el mismo formato del catálogo:
+   foto, código, descripción, marca, precio de venta y estado del stock.
+
+   El invitado solo consulta. El dueño además ve los botones para editar y
+   eliminar, y el botón de autollenar fotos. Tocar el resto de la tarjeta
+   abre la ventana de características, igual que antes al tocar la fila. */
+function renderProductosTarjetas(grid, list){
+  if(!grid) return;
+  grid.hidden = false;
+  if(list.length === 0){
+    grid.innerHTML = `<p class="hint prod-grid-empty">No hay productos que coincidan.</p>`;
+    return;
+  }
+  const esInvitado = currentRole === 'guest';
+  grid.innerHTML = list.map((p, idx) => {
+    const img = getImage(p.id);
+    const countImg = getImageCount(p.id);
+    const thumb = img
+      ? (idx < IMG_LAZY_FIRST
+          ? `<img src="${img}" alt="" data-img-product="${p.id}" decoding="async" loading="lazy">`
+          : `<div class="prod-thumb-lazy" data-lazy-img="${p.id}"><span class="ph">🖼️</span></div>`)
+      : `<span class="ph">🖼️</span>`;
+    const stock = Number(p.stock) || 0;
+    const stockMin = Number(p.stockMin) || 0;
+    let pillCls = 'ok', pillTxt = 'En stock';
+    if(stock <= 0){ pillCls = 'sin'; pillTxt = 'Agotado'; }
+    else if(stockMin > 0 && stock <= stockMin){ pillCls = 'pocas'; pillTxt = `Pocas (${stock})`; }
+    const acciones = esInvitado ? '' : `
+        <span class="guest-card-actions">
+          <button class="btn-icon" title="Editar" data-edit-product="${p.id}">✏️</button>
+          <button class="btn-icon" title="Buscarle una foto" data-auto-img="${p.id}">🖼️</button>
+          <button class="btn-icon master-only" title="Eliminar" data-delete-product="${p.id}">🗑️</button>
+        </span>`;
+    return `
+    <div class="guest-card" data-guest-product="${p.id}">
+      <span class="guest-card-img">
+        ${thumb}
+        ${countImg > 1 ? `<span class="nphotos">📷 ${countImg}</span>` : ''}
+      </span>
+      <span class="guest-card-body">
+        <span class="guest-card-code">${escapeHtml(p.codigo || 'S/C')}</span>
+        <span class="guest-card-name">${escapeHtml(p.nombre || 'Sin descripción')}</span>
+        <span class="guest-card-brand">${escapeHtml(p.marca || 'Sin marca')}</span>
+        ${acciones}
+        <span class="guest-card-foot">
+          <span class="price"><small>Precio</small>${fmtMoney(p.precioVenta)}</span>
+          <span class="stock-pill ${pillCls}">${pillTxt}</span>
+        </span>
+      </span>
+    </div>`;
+  }).join('');
+  armImgLazyLoader(grid);
 }
 
 function updateSidebarProductCount(){
@@ -10939,6 +10962,10 @@ function applyRoleUI(){
   document.body.classList.toggle('role-guest', currentRole === 'guest');
   // Oculta los botones maestros (crear/borrar/importar) si esta PC no es la principal.
   applyMasterUI();
+  // Los productos se ven en tarjetas siempre, pero los botones de editar y
+  // eliminar dependen de quién seas, así que hay que repintar al cambiar de rol.
+  const vistaProductos = document.getElementById('view-productos');
+  if(vistaProductos && vistaProductos.classList.contains('active')) renderProductos();
 }
 
 // Restaura el modo guardado al abrir la app (sin pedir contraseña de nuevo:
@@ -12058,21 +12085,20 @@ function setupEventListeners(){
     logSearchHistory(e.target.value);
   });
   document.getElementById('prodFilterCategoria').addEventListener('change', renderProductos);
-  document.querySelector('#productsTable tbody').addEventListener('click', (e)=>{
+  // Tarjetas de productos: los botones de editar, eliminar y autollenar
+  // para el dueño; tocar la foto abre las fotos del producto y tocar el resto
+  // de la tarjeta abre la ventana de características.
+  document.getElementById('productsGrid').addEventListener('click', (e)=>{
     const editId = e.target.closest('[data-edit-product]')?.dataset.editProduct;
     const delId = e.target.closest('[data-delete-product]')?.dataset.deleteProduct;
     const imgId = e.target.closest('[data-img-product]')?.dataset.imgProduct;
     const autoImgId = e.target.closest('[data-auto-img]')?.dataset.autoImg;
-    if(editId) openProductModal(getProductoById(editId));
-    if(delId) deleteProducto(delId);
-    if(imgId) openImageModal(imgId);
-    if(autoImgId) autoFillProductImage(autoImgId);
-    // Clic en cualquier parte de la fila (que no sea un botón/imagen) abre la
-    // ventana de características del producto.
-    if(!editId && !delId && !imgId && !autoImgId){
-      const row = e.target.closest('tr[data-product-id]');
-      if(row) openProductDetails(row.dataset.productId);
-    }
+    if(editId){ openProductModal(getProductoById(editId)); return; }
+    if(delId){ deleteProducto(delId); return; }
+    if(autoImgId){ autoFillProductImage(autoImgId); return; }
+    if(imgId){ openImageModal(imgId); return; }
+    const card = e.target.closest('[data-guest-product]');
+    if(card) openProductDetails(card.dataset.guestProduct);
   });
 
   // Imagen del producto (local, no Firebase): tomar foto / subir / web

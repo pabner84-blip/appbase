@@ -8640,7 +8640,7 @@ function renderProductosTarjetas(grid, list){
         </span>`;
     return `
     <div class="guest-card" data-guest-product="${p.id}">
-      <span class="guest-card-img">
+      <span class="guest-card-img" data-img-product="${p.id}">
         ${thumb}
         ${countImg > 1 ? `<span class="nphotos">📷 ${countImg}</span>` : ''}
       </span>

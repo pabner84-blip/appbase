@@ -1056,7 +1056,9 @@
       <label style="grid-column:1/-1;">Descripción *<input type="text" id="cNombreInput" class="input" required></label>
       <label style="grid-column:1/-1;">Proveedor<input type="text" id="cProveedor" class="input" placeholder="Nombre del proveedor o distribuidor"></label>
       <label>Cantidad *<input type="number" id="cCantidad" class="input" step="1" min="1" value="1" required></label>
-      <label>Precio de compra (c/u) *<input type="number" id="cPrecioCompra" class="input" step="0.01" min="0" required></label>
+      <label>Precio distribuidor (c/u) *<input type="number" id="cPrecioDistribuidor" class="input" step="0.01" min="0" required></label>
+      <label>Descuento (%)<input type="number" id="cDescuento" class="input" step="0.01" min="0" max="100" placeholder="0"></label>
+      <label>Precio de compra (c/u)<input type="number" id="cPrecioCompra" class="input" step="0.01" min="0" readonly tabindex="-1" title="Se calcula solo: precio distribuidor menos el descuento" style="background:var(--bg); color:var(--text-muted);"></label>
       <label style="grid-column:1/-1;">Fecha de la compra<input type="date" id="cFecha" class="input" title="Fecha del recibo (si la compra fue de otro día, elige esa fecha)"></label>
       <label style="grid-column:1/-1;">Observaciones<textarea id="cObservaciones" class="input" rows="2" placeholder="Opcional: notas sobre este ingreso..." style="resize:vertical; min-height:44px;"></textarea></label>
       <label style="grid-column:1/-1;">Total (calculado)<input type="text" id="cTotalDisplay" class="input" readonly tabindex="-1" style="background:var(--bg); color:var(--text-muted);"></label>

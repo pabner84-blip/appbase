@@ -6644,7 +6644,10 @@ function openCompraDetalleForm(producto, codigo){
   document.getElementById('cNombreInput').value = producto ? producto.nombre : '';
   document.getElementById('cNombreDisplay').textContent = producto ? producto.nombre : 'Producto nuevo (se creará al guardar)';
   document.getElementById('cCantidad').value = 1;
-  document.getElementById('cPrecioCompra').value = producto ? (producto.precioCompra || '') : '';
+  // El precio del distribuidor arranca con el último precio de compra conocido
+  // y sin descuento; el precio de compra se calcula solo.
+  document.getElementById('cPrecioDistribuidor').value = producto ? (producto.precioCompra || '') : '';
+  document.getElementById('cDescuento').value = '';
   document.getElementById('cProveedor').value = getLastCompraProveedor();
   document.getElementById('cObservaciones').value = '';
   document.getElementById('cFecha').value = getLastCompraFecha();
@@ -6658,9 +6661,22 @@ function openCompraDetalleForm(producto, codigo){
   openModal('modalCompraDetalle');
 }
 
+// Precio de compra = precio distribuidor − (precio distribuidor × descuento / 100)
+// Ej.: 100 Bs con 40% de descuento → 60 Bs.
+function calcPrecioCompra(){
+  const dist = parseFloat(document.getElementById('cPrecioDistribuidor').value);
+  let desc = parseFloat(document.getElementById('cDescuento').value);
+  if(isNaN(dist)) return NaN;
+  if(isNaN(desc) || desc < 0) desc = 0;
+  if(desc > 100) desc = 100;
+  return Math.round(dist * (1 - desc / 100) * 100) / 100;
+}
+
 function recalcCompraTotal(){
+  const calc = calcPrecioCompra();
+  document.getElementById('cPrecioCompra').value = isNaN(calc) ? '' : calc.toFixed(2);
   const cant = parseFloat(document.getElementById('cCantidad').value) || 0;
-  const pre = parseFloat(document.getElementById('cPrecioCompra').value) || 0;
+  const pre = isNaN(calc) ? 0 : calc;
   document.getElementById('cTotalDisplay').value = (cant * pre).toFixed(2);
 }
 
@@ -6707,7 +6723,10 @@ function handleCompraSubmit(e){
   const codigo = document.getElementById('cCodigo').value.trim();
   const nombre = document.getElementById('cNombreInput').value.trim();
   const cantidad = parseFloat(document.getElementById('cCantidad').value);
-  const precioCompra = parseFloat(document.getElementById('cPrecioCompra').value);
+  const precioDistribuidor = parseFloat(document.getElementById('cPrecioDistribuidor').value);
+  const descuentoRaw = parseFloat(document.getElementById('cDescuento').value);
+  const descuento = isNaN(descuentoRaw) ? 0 : descuentoRaw;
+  const precioCompra = calcPrecioCompra();
 
   if(!codigo || !nombre){
     toast('Ingresa el código y la descripción', 'error');
@@ -6715,6 +6734,14 @@ function handleCompraSubmit(e){
   }
   if(!cantidad || cantidad <= 0){
     toast('Ingresa una cantidad válida', 'error');
+    return;
+  }
+  if(isNaN(precioDistribuidor) || precioDistribuidor < 0){
+    toast('Ingresa un precio de distribuidor válido', 'error');
+    return;
+  }
+  if(descuento < 0 || descuento > 100){
+    toast('El descuento debe estar entre 0 y 100%', 'error');
     return;
   }
   if(isNaN(precioCompra) || precioCompra < 0){
@@ -6774,6 +6801,8 @@ function handleCompraSubmit(e){
     nombre,
     cantidad,
     precioUnitario: precioCompra,
+    precioDistribuidor,
+    descuento,
     total: precioCompra * cantidad,
     metodoPago: document.getElementById('cMetodoPago').value,
     fecha: compraFechaFromInput(fechaElegida),
@@ -12457,7 +12486,8 @@ function setupEventListeners(){
   });
   document.getElementById('formCompra').addEventListener('submit', handleCompraSubmit);
   document.getElementById('cCantidad').addEventListener('input', recalcCompraTotal);
-  document.getElementById('cPrecioCompra').addEventListener('input', recalcCompraTotal);
+  document.getElementById('cPrecioDistribuidor').addEventListener('input', recalcCompraTotal);
+  document.getElementById('cDescuento').addEventListener('input', recalcCompraTotal);
   document.getElementById('cActualizarDatos').addEventListener('change', (e)=>{
     document.getElementById('compraUpdateFields').style.display = e.target.checked ? 'grid' : 'none';
   });

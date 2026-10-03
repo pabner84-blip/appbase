@@ -117,6 +117,14 @@ body.modo-invitado .sidebar-logos{display:flex;}
 .topbar h1{font-size:19px; margin:0; flex:1;}
 .hamburger{display:none; background:none; border:none; font-size:22px; cursor:pointer; color:var(--text);}
 
+/* MENÚ LATERAL OCULTO EN TODOS LOS TAMAÑOS (también en la PC): igual que en el
+   celular, se abre y se cierra con el botón de 3 rayas (☰) de la barra superior. */
+.sidebar{transform:translateX(-100%);}
+.sidebar.open{transform:translateX(0); box-shadow:6px 0 24px rgba(0,0,0,.45);}
+.sidebar-overlay.open{display:block;}
+.main-wrap{margin-left:0;}
+.hamburger{display:block;}
+
 .content{padding:22px; flex:1;}
 
 /* Solo la vista de escáner se limita en ancho (se ve mejor angosta); el resto usa todo el espacio disponible */

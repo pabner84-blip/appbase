@@ -11896,8 +11896,11 @@ function setupEventListeners(){
   }
 
   // Sidebar móvil
+  // El botón ☰ abre el menú y, si ya está abierto, lo cierra (PC y celular).
   document.getElementById('hamburgerBtn').addEventListener('click', ()=>{
-    document.getElementById('sidebar').classList.add('open');
+    const sb = document.getElementById('sidebar');
+    if(sb.classList.contains('open')){ closeSidebarMobile(); return; }
+    sb.classList.add('open');
     document.getElementById('sidebarOverlay').classList.add('open');
   });
   document.getElementById('sidebarOverlay').addEventListener('click', closeSidebarMobile);

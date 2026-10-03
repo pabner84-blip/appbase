@@ -779,6 +779,8 @@ body.modo-invitado .sidebar-footer small{color:#86efac;}
 .venta-date-chip.active,
 .compra-date-chip.active{background:var(--primary); border-color:var(--primary); color:#fff;}
 .venta-date-picker{position:absolute; width:1px; height:1px; opacity:0; pointer-events:none;}
+.venta-month-select{max-width:190px; padding-right:8px;}
+.venta-month-select option{background:var(--surface); color:var(--text);}
 .export-reminder{
   display:flex; flex-wrap:wrap; align-items:center; gap:10px;
   background:var(--warning-light); border:1px solid var(--warning);

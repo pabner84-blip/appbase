@@ -4155,8 +4155,17 @@ function ventasFiltradas(){
     if(ventaDateFilter === 'ayer') return k === dateKeyOffset(1);
     if(ventaDateFilter === 'anteayer') return k === dateKeyOffset(2);
     if(/^\d{4}-\d{2}-\d{2}$/.test(ventaDateFilter)) return k === ventaDateFilter;
+    if(/^\d{4}-\d{2}$/.test(ventaDateFilter)) return k.slice(0, 7) === ventaDateFilter;
     return true;
   });
+}
+
+// Meses (YYYY-MM) para el selector "Mes" de Ventas.
+const MESES_ES = ['enero','febrero','marzo','abril','mayo','junio','julio','agosto','septiembre','octubre','noviembre','diciembre'];
+function mesLabel(ym){
+  const p = String(ym).split('-');
+  const m = parseInt(p[1], 10);
+  return (MESES_ES[m - 1] || ym) + ' ' + p[0];
 }
 
 // La fecha (YYYY-MM-DD) que se está viendo en la ventana de Ventas, o null si
@@ -4171,6 +4180,7 @@ function ventaFilterDateKey(){
 }
 function ventasFilterLabel(){
   const map = { hoy: 'de hoy', ayer: 'de ayer', anteayer: 'de anteayer', todas: 'de todas las fechas' };
+  if(/^\d{4}-\d{2}$/.test(ventaDateFilter)) return 'de ' + mesLabel(ventaDateFilter);
   return map[ventaDateFilter] || 'del ' + ventaDateFilter;
 }
 
@@ -4588,6 +4598,23 @@ function syncVentasChips(){
   });
   const input = document.getElementById('ventaDateInput');
   if(input) input.value = /^\d{4}-\d{2}-\d{2}$/.test(ventaDateFilter) ? ventaDateFilter : '';
+  syncVentaMonthSelect();
+}
+
+// Llena el selector de meses con los meses que tienen ventas (más el mes
+// actual) y marca el elegido.
+function syncVentaMonthSelect(){
+  const sel = document.getElementById('ventaMonthSelect');
+  if(!sel) return;
+  const esMes = /^\d{4}-\d{2}$/.test(ventaDateFilter);
+  const meses = new Set([dateKeyOffset(0).slice(0, 7)]);
+  (db.ventas || []).forEach(v => { const k = ventaFechaKey(v.fecha); if(k) meses.add(k.slice(0, 7)); });
+  if(esMes) meses.add(ventaDateFilter);
+  const lista = Array.from(meses).filter(m => /^\d{4}-\d{2}$/.test(m)).sort().reverse();
+  sel.innerHTML = '<option value="">🗓️ Mes</option>' +
+    lista.map(m => `<option value="${m}">${mesLabel(m).charAt(0).toUpperCase() + mesLabel(m).slice(1)}</option>`).join('');
+  sel.value = esMes ? ventaDateFilter : '';
+  sel.classList.toggle('active', esMes);
 }
 
 // Recordatorio semanal de respaldo: no es un export automático (el navegador
@@ -12251,6 +12278,12 @@ function setupEventListeners(){
     }else{
       btn.textContent = '📅 Calendario';
     }
+    renderVentas();
+  });
+  document.getElementById('ventaMonthSelect').addEventListener('change', (e)=>{
+    ventaDateFilter = e.target.value || 'todas';
+    document.getElementById('ventaDateInput').value = '';
+    document.getElementById('ventaDateBtn').textContent = '📅 Calendario';
     renderVentas();
   });
   document.getElementById('ventaSearch').addEventListener('input', ()=> renderVentas());

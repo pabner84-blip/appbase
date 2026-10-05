@@ -10568,10 +10568,37 @@ const MODO_LABELS = { manual: 'Herramientas Manuales', electrico: 'Herramientas 
 // pestaña, sessionStorage se vacía solo y la app abre de nuevo desde Inicio.
 const SESSION_VIEW_KEY = 'stockferre_session_view_v1';
 function saveSessionViewState(viewName){
-  try{ sessionStorage.setItem(SESSION_VIEW_KEY, JSON.stringify({ view: viewName || currentView, t: Date.now() })); }catch(e){}
+  try{
+    sessionStorage.setItem(SESSION_VIEW_KEY, JSON.stringify({
+      view: viewName || currentView,
+      modo: currentModo,
+      role: currentRole,
+      scroll: 0,
+      t: Date.now()
+    }));
+  }catch(e){}
+}
+// Guarda hasta dónde estaba desplazada la página (al salir de la pestaña o al
+// recargar), para volver al mismo punto.
+function saveSessionScroll(){
+  try{
+    let st = JSON.parse(sessionStorage.getItem(SESSION_VIEW_KEY));
+    if(!st || !st.view) return;
+    st.scroll = Math.round(window.scrollY || document.documentElement.scrollTop || 0);
+    sessionStorage.setItem(SESSION_VIEW_KEY, JSON.stringify(st));
+  }catch(e){}
 }
 function readSessionViewState(){
   try{ return JSON.parse(sessionStorage.getItem(SESSION_VIEW_KEY)) || null; }catch(e){ return null; }
+}
+// Devuelve el estado guardado de la pestaña si hay una sección (distinta de
+// Inicio) a la que volver; si no, null y la app abre en Inicio.
+function sesionRestaurable(){
+  const ses = readSessionViewState();
+  if(!ses || !ses.view || ses.view === 'inicio') return null;
+  if(!['manual', 'electrico', 'invitado'].includes(ses.modo)) return null;
+  if(!document.getElementById('view-' + ses.view)) return null;
+  return ses;
 }
 function saveSessionScanResult(codigo){
   try{
@@ -11031,8 +11058,16 @@ function restoreModo(){
   let modo = 'manual';
   try{ modo = localStorage.getItem(MODO_KEY) || 'manual'; }catch(e){}
   if(modo === 'invitado') modo = 'manual';
-  currentModo = modo;
   currentRole = 'admin';
+  // Si esta pestaña ya estaba dentro de una sección (sessionStorage), se
+  // conserva el modo y el rol con los que estaba, sin volver a pedir contraseña.
+  const ses = sesionRestaurable();
+  if(ses){
+    modo = ses.modo;
+    currentRole = (ses.modo === 'invitado' || ses.role === 'guest') ? 'guest' : 'admin';
+    if(ses.modo === 'invitado') currentRole = 'guest';
+  }
+  currentModo = modo;
   document.body.classList.remove('modo-manual', 'modo-electrico', 'modo-invitado');
   document.body.classList.add('modo-' + modo);
   applyRoleUI();
@@ -12772,6 +12807,8 @@ function init(){
   loadImagesForModo(currentModo).then(()=> rerenderCurrentView()); // imágenes locales de este dispositivo
   migrateLegacyPasswords(); // sube contraseñas viejas para sincronizarlas
   setupEventListeners();
+  window.addEventListener('pagehide', saveSessionScroll);
+  document.addEventListener('visibilitychange', ()=>{ if(document.hidden) saveSessionScroll(); });
   syncRememberSwitchUI();
   syncNotifSwitchUI();
   syncFirebaseSwitchUI();
@@ -12779,13 +12816,24 @@ function init(){
   updateSidebarProductCount();
   updateSidebarBrand();
   updatePasswordButtonLabel();
-  // La app SIEMPRE abre en el menú de Inicio (para elegir el modo), tanto al
-  // entrar como al recargar la página o al volver desde otra app. Antes, si la
-  // pestaña seguía viva, volvía a la última vista/modo (p. ej. Eléctricas) y
-  // parecía que "entraba solo" ahí. Ahora siempre muestra el menú de Inicio.
+  // Si la pestaña ya estaba en una sección, vuelve a ella; si se cerró la
+  // pestaña o Chrome (sessionStorage vacío), abre en el menú de Inicio.
   applyRoleUI();
-  showView('inicio');
-  connectFirebase(); // no bloquea el arranque; si no está configurado, sigue todo local
+  const sesion = sesionRestaurable();
+  if(sesion){
+    // Misma pestaña de Chrome todavía viva (recarga, o Chrome descartó la
+    // pestaña por memoria): vuelve a la misma sección y posición.
+    updateSidebarBrand();
+    updatePasswordButtonLabel();
+    showView(sesion.view);
+    if(sesion.scroll > 0){
+      [150, 500, 1200].forEach(ms => setTimeout(()=> window.scrollTo(0, sesion.scroll), ms));
+    }
+    if(currentModo === 'invitado') connectGuestFirebase(); else connectFirebase();
+  }else{
+    showView('inicio');
+    connectFirebase(); // no bloquea el arranque; si no está configurado, sigue todo local
+  }
   updateInicioClock();
   setInterval(updateInicioClock, 1000);
   // La vigía de sincronización: reconecta sola si Firebase se cae o queda una

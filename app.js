@@ -5534,7 +5534,7 @@ function updatePedidoSummary(){
   const summary = document.getElementById('pedidoSummary');
   if(!summary) return;
   let unidades = 0, costo = 0;
-  pedidoRows.forEach(({ p }) => {
+  pedidoRows.forEach((p) => {
     const cant = pedidoCant(p);
     unidades += cant;
     costo += cant * (parseFloat(p.precioCompra) || 0);
@@ -5594,7 +5594,7 @@ function exportPedidosCSV(){
   if(pedidoRows.length === 0){ toast('No hay productos para exportar', 'error'); return; }
   const header = ['POSICION','MARCA','CODIGO','PRODUCTO','STOCK','STOCK_MINIMO','CANTIDAD_PEDIR'];
   const types = ['number','text','text','text','number','number','number'];
-  const data = pedidoRows.map(({ p }, i) => [
+  const data = pedidoRows.map((p, i) => [
     i + 1, p.marca || '', p.codigo, p.nombre,
     Number(p.stock)||0, Number(p.stockMin)||0, Number(pedidoCant(p))||0
   ]);

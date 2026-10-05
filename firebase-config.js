@@ -5,14 +5,14 @@
    se mezclen (un fallo de sincronización de uno NO puede tocar al otro):
 
      • firebaseConfigManual    -> app-perez-2
-       Herramientas MANUALES + todos los datos del MODO INVITADO
-       (ventas, gastos, finanzas y contraseña del invitado).
+       Herramientas MANUALES (catálogo, ventas, gastos, finanzas).
 
      • firebaseConfigElectrico -> app-ferreteria-bd73f
-       Herramientas ELÉCTRICAS (catálogo, ventas, gastos, finanzas).
+       Herramientas ELÉCTRICAS (catálogo, ventas, gastos, finanzas) + todos
+       los datos del MODO INVITADO (ventas, gastos, finanzas y contraseña).
 
    El modo INVITADO lee el catálogo de AMBOS proyectos (uno de cada) y los
-   junta en pantalla, pero sus ventas/gastos se guardan en app-perez-2.
+   junta en pantalla, pero sus ventas/gastos se guardan en app-ferreteria-bd73f.
 
    Cómo conseguir los datos de un proyecto nuevo:
    1. Entra a https://console.firebase.google.com y crea un proyecto (gratis).

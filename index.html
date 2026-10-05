@@ -35,7 +35,6 @@
     <button class="nav-item" data-view="escaner"><span>📷</span> Escanear</button>
     <button class="nav-item" data-view="productos"><span>📦</span> Productos</button>
     <button class="nav-item" data-view="categorias"><span>🗂️</span> Categorías</button>
-    <button class="nav-item admin-only" data-view="productosnuevos"><span>📥</span> Productos nuevos</button>
     <button class="nav-item" data-view="ventas"><span>💰</span> Ventas</button>
     <button class="nav-item" data-view="topventas"><span>🏆</span> Más vendidos</button>
     <button class="nav-item" data-view="pedidos"><span>📋</span> Pedidos</button>
@@ -202,28 +201,6 @@
         <button class="btn btn-primary admin-only" id="btnAddCategory">+ Agregar categoría</button>
       </div>
       <div class="cards-grid" id="categoriesGrid"></div>
-    </section>
-
-    <!-- ---------- PRODUCTOS NUEVOS (borradores para la PC principal) ---------- -->
-    <section class="view" id="view-productosnuevos">
-      <div class="toolbar">
-        <button class="btn btn-primary" id="btnNewDraft">+ Nuevo borrador</button>
-        <button class="btn btn-secondary" id="btnExportDrafts">📤 Exportar Excel</button>
-        <button class="btn btn-danger" id="btnClearDrafts">🧹 Vaciar lista</button>
-        <span class="hint" id="draftsCount" style="margin-left:auto;"></span>
-      </div>
-      <p class="hint">Guarda aquí los productos que quieras agregar desde este dispositivo. Cuando exportes el Excel, pásalo a la <strong>PC principal</strong> e impórtalo con "📥 Importar Excel": allí los productos se suben a la nube y aparecen en todos los dispositivos. Las fotos se pasan después con "📤 Exportar fotos" (se reenganchan solas por código).</p>
-      <div class="table-wrap">
-        <table class="table" id="draftsTable">
-          <thead>
-            <tr>
-              <th>Código</th><th>Cód. Barras</th><th>Descripción</th><th>Marca</th><th>Categoría</th>
-              <th class="price-guest-hide">P. Compra</th><th class="price-guest-hide">P. Marca</th><th>P. Venta</th><th>Stock</th><th>Stock mín.</th><th>Acciones</th>
-            </tr>
-          </thead>
-          <tbody></tbody>
-        </table>
-      </div>
     </section>
 
     <!-- ---------- VENTAS ---------- -->
@@ -629,6 +606,14 @@
         </div>
 
         <div class="panel">
+          <div class="panel-header"><h3>🔍 Diagnóstico de almacenamiento</h3></div>
+          <div class="panel-body">
+            <p class="hint">Mide cuánto espacio usa esta app en ESTE navegador (localStorage, IndexedDB, caché, fotos y la copia de Firebase). Solo lee: <strong>no borra ni cambia nada</strong>.</p>
+            <button class="btn btn-secondary" id="btnDiagAlmacen">🔍 Medir almacenamiento</button>
+          </div>
+        </div>
+
+        <div class="panel">
           <div class="panel-header"><h3>📲 Instalar la app en este dispositivo</h3></div>
           <div class="panel-body">
             <p class="hint">Instala TIENDA 1 como una app: abre en su propia ventana (sin las barras del navegador), arranca más rápido y funciona sin internet. Queda un icono en tu escritorio.</p>
@@ -666,7 +651,7 @@
                 <small>Actívalo SOLO en tu PC principal</small>
               </span>
             </label>
-            <p class="hint" style="margin:10px 0 0;"><strong>Encendido (solo en tu PC principal):</strong> aquí se crean y borran productos y se define el <strong>código</strong> y la <strong>marca</strong>. <strong>Apagado (los demás equipos):</strong> no crean ni borran productos; cargan los nuevos en la pestaña <strong>📥 Productos nuevos</strong> y los pasan a esta PC con un Excel. En todos los dispositivos se pueden editar descripción, categoría, código de barras, precios, características y stock.</p>
+            <p class="hint" style="margin:10px 0 0;"><strong>Encendido (solo en tu PC principal):</strong> aquí se crean y borran productos y se define el <strong>código</strong> y la <strong>marca</strong>. <strong>Apagado (los demás equipos):</strong> no crean ni borran productos; no crean productos nuevos (los crea la PC principal). En todos los dispositivos se pueden editar descripción, categoría, código de barras, precios, características y stock.</p>
           </div>
         </div>
 
@@ -710,36 +695,6 @@
       <label>Precio de venta<input type="number" id="pPrecioVenta" class="input" step="0.01" min="0"></label>
       <div class="form-actions">
         <button type="submit" class="btn btn-primary">Guardar</button>
-        <button type="button" class="btn btn-secondary" data-close-modal>Cancelar</button>
-      </div>
-    </form>
-  </div>
-</div>
-
-<!-- Modal: Borrador de "Productos nuevos" (este dispositivo → Excel → PC principal) -->
-<div class="modal" id="modalBorrador">
-  <div class="modal-header">
-    <h3 id="modalBorradorTitle">Nuevo borrador</h3>
-    <button class="modal-close" data-close-modal>✕</button>
-  </div>
-  <div class="modal-body">
-    <form id="formBorrador" class="form-grid">
-      <input type="hidden" id="dIdx">
-      <label>Código *<input type="text" id="dCodigo" class="input" required></label>
-      <label>Código de barras<input type="text" id="dCodigoBarras" class="input" placeholder="Opcional"></label>
-      <label>Descripción *<input type="text" id="dNombre" class="input" required></label>
-      <label>Marca<input type="text" id="dMarca" class="input"></label>
-      <label>Categoría<input type="text" id="dCategoria" class="input" list="categoriasList" placeholder="Elige o escribe una nueva"></label>
-      <label class="price-guest-hide" id="dDistWrap">Precio distribuidor<input type="number" id="dPrecioDistribuidor" class="input" step="0.01" min="0"></label>
-      <label class="price-guest-hide" id="dDescWrap">Descuento (%)<input type="number" id="dDescuento" class="input" step="0.01" min="0" max="100" placeholder="0"></label>
-      <label class="price-guest-hide">Precio de compra<input type="number" id="dPrecioCompra" class="input" step="0.01" min="0"></label>
-      <label class="price-guest-hide" id="dMarcaWrap">Precio de marca<input type="number" id="dPrecioMarca" class="input" step="0.01" min="0"></label>
-      <label>Precio de venta<input type="number" id="dPrecioVenta" class="input" step="0.01" min="0"></label>
-      <label>Stock inicial<input type="number" id="dStock" class="input" step="1" min="0"></label>
-      <label>Stock mínimo<input type="number" id="dStockMin" class="input" step="1" min="0"></label>
-      <label>Características<textarea id="dCaracteristicas" class="input" rows="3" placeholder="Opcional"></textarea></label>
-      <div class="form-actions">
-        <button type="submit" class="btn btn-primary">Guardar borrador</button>
         <button type="button" class="btn btn-secondary" data-close-modal>Cancelar</button>
       </div>
     </form>
@@ -1088,6 +1043,21 @@
   </div>
 </div>
 
+<!-- Modal: Diagnóstico de almacenamiento (solo lectura) -->
+<div class="modal" id="modalDiagAlmacen">
+  <div class="modal-header">
+    <h3>🔍 Diagnóstico de almacenamiento</h3>
+    <button class="modal-close" data-close-modal>✕</button>
+  </div>
+  <div class="modal-body">
+    <pre id="diagAlmacenOut" style="white-space:pre-wrap; word-break:break-word; font:12px/1.5 monospace; margin:0; max-height:60vh; overflow:auto;">Midiendo…</pre>
+    <div class="form-actions" style="margin-top:14px;">
+      <button type="button" class="btn btn-secondary" id="btnDiagAlmacenCopiar">📋 Copiar informe</button>
+      <button type="button" class="btn btn-secondary" data-close-modal>Cerrar</button>
+    </div>
+  </div>
+</div>
+
 <!-- Modal: Historial de ingresos de un producto (fechas, proveedor, precio, cantidad, obs) -->
 <div class="modal" id="modalCompraHistorial">
   <div class="modal-header">
@@ -1420,17 +1390,17 @@
    se descargan recién cuando hacen falta. Así la app abre al instante y no
    congela las computadoras viejas. */
 window.__LAZY_LIBS__ = {
-  tesseract: function(){ return new Promise(function(ok, no){ if(window.Tesseract) return ok(); var s=document.createElement('script'); s.src='https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js'; s.onload=ok; s.onerror=function(){no()}; document.head.appendChild(s); }); },
-  pdf: function(){ return new Promise(function(ok, no){ if(window.pdfjsLib) return ok(); var s=document.createElement('script'); s.src='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js'; s.onload=function(){ window.pdfjsLib && (window.pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js'); ok(); }; s.onerror=function(){no()}; document.head.appendChild(s); }); },
-  zxing: function(){ return new Promise(function(ok, no){ if(window.ZXing) return ok(); var s=document.createElement('script'); s.src='https://unpkg.com/@zxing/library@0.20.0'; s.onload=ok; s.onerror=function(){no()}; document.head.appendChild(s); }); }
+  tesseract: function(){ return new Promise(function(ok, no){ if(window.Tesseract) return ok(); var s=document.createElement('script'); s.crossOrigin='anonymous'; s.src='https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js'; s.onload=ok; s.onerror=function(){no()}; document.head.appendChild(s); }); },
+  pdf: function(){ return new Promise(function(ok, no){ if(window.pdfjsLib) return ok(); var s=document.createElement('script'); s.crossOrigin='anonymous'; s.src='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js'; s.onload=function(){ window.pdfjsLib && (window.pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js'); ok(); }; s.onerror=function(){no()}; document.head.appendChild(s); }); },
+  zxing: function(){ return new Promise(function(ok, no){ if(window.ZXing) return ok(); var s=document.createElement('script'); s.crossOrigin='anonymous'; s.src='https://unpkg.com/@zxing/library@0.20.0'; s.onload=ok; s.onerror=function(){no()}; document.head.appendChild(s); }); }
 };
 </script>
 <!-- Firebase (opcional): si firebase-config.js está vacío, la app funciona 100% local.
      Se cargan con defer: descargan en paralelo SIN bloquear la app. Así, sin
      internet o con internet lento, la app abre al instante (igual que la versión
      puramente local) y Firebase conecta solo cuando llega la conexión. -->
-<script defer src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
-<script defer src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js"></script>
+<script defer crossorigin="anonymous" src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
+<script defer crossorigin="anonymous" src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js"></script>
 <script src="firebase-config.js"></script>
 <script>if('serviceWorker' in navigator){ window.addEventListener('load', function(){ navigator.serviceWorker.register('./sw.js', { updateViaCache: 'none' }).catch(function(){}); }); }</script>
 <script src="app.js"></script>

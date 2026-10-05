@@ -433,14 +433,38 @@ function scheduleFirestoreWrite(docId, ref, data){
   runQueuedWrite(docId, ref);
 }
 
+// Limpia un objeto antes de mandarlo a Firestore: quita los undefined y
+// convierte NaN/Infinity en null (si no, Firestore responde "invalid-argument").
+function fbSanitize(v, depth){
+  depth = depth || 0;
+  if(depth > 40) return null;
+  if(v === undefined) return undefined;
+  if(typeof v === 'number') return isFinite(v) ? v : null;
+  if(typeof v === 'function' || typeof v === 'symbol') return undefined;
+  if(Array.isArray(v)){
+    return v.map(x => { const c = fbSanitize(x, depth + 1); return c === undefined ? null : c; });
+  }
+  if(v && typeof v === 'object' && Object.getPrototypeOf(v) === Object.prototype){
+    const out = {};
+    Object.keys(v).forEach(k => {
+      const c = fbSanitize(v[k], depth + 1);
+      if(c !== undefined) out[k] = c;
+    });
+    return out;
+  }
+  return v;
+}
+
 function runQueuedWrite(docId, ref){
   const q = fbWriteQueues[docId];
   if(!q || q.inFlight) return;
   q.inFlight = true;
   q.attempt = (q.attempt || 0) + 1;
   const toSend = q.latestData;
+  let aEnviar = toSend;
+  try{ aEnviar = fbSanitize(toSend); }catch(e){ aEnviar = toSend; }
   setSyncStatus('connecting');
-  ref.set(toSend).then(()=>{
+  ref.set(aEnviar).then(()=>{
     q.attempt = 0;
     setSyncStatus('synced');
     finishQueuedWrite(docId, ref, toSend);
@@ -460,7 +484,9 @@ function runQueuedWrite(docId, ref){
     }
     q.attempt = 0;
     fbLastErrorCode = (err && err.code) || 'write-failed';
-    fbLastErrorMessage = ((err && err.message) || String(err)) + ' (proyecto: ' + fbProjectLabel(ref) + ')';
+    let tamano = '';
+    try{ tamano = ' · tamaño ≈ ' + Math.round(JSON.stringify(aEnviar).length / 1024) + ' KB (límite 1024 KB)'; }catch(e){}
+    fbLastErrorMessage = ((err && err.message) || String(err)) + ' (proyecto: ' + fbProjectLabel(ref) + ' · documento: ' + docId + tamano + ')';
     setSyncStatus('error');
     console.warn('Escritura a Firebase no pudo subir tras varios reintentos. Se reintentará al volver la conexión.');
     finishQueuedWrite(docId, ref, toSend);
@@ -859,14 +885,14 @@ async function connectGuestFirebase(){
   guestUnsubs = [];
   try{
     // Base propia del invitado (ventas/gastos/finanzas): vive en el proyecto
-    // 'manual' (app-perez-2). El catálogo se lee de AMBOS proyectos abajo.
+    // 'electrico' (app-ferreteria-bd73f). El catálogo se lee de AMBOS abajo.
     const fsOwn = fsFor('invitado');
     if(!fsOwn) return;
     enableOfflinePersistence(fsOwn, fbProjectKeyFor('invitado'));
     setSyncStatus('connecting');
     // 1) Escucha documentos de Manuales y Eléctricas (solo para catálogo/productos).
     //    Cada catálogo viene de SU PROPIO proyecto: Manuales de app-perez-2 y
-    //    Eléctricas del proyecto nuevo; aquí se juntan en pantalla.
+    //    Eléctricas de app-ferreteria-bd73f; aquí se juntan en pantalla.
     ['manual','electrico'].forEach(modo => {
       if(token !== modeToken) return;
       const fsM = fsFor(modo);
@@ -977,10 +1003,10 @@ async function connectGuestFirebase(){
    Cada modo vive en su PROPIO proyecto de Firebase, de modo que una mezcla
    accidental de datos es estructuralmente imposible (no existe la ruta que
    conecte un proyecto con otro):
-     • 'manual'    -> app-perez-2    (Manuales + TODA la base del invitado)
-     • 'electrico' -> app-ferreteria-bd73f (solo Eléctricas)
+     • 'manual'    -> app-perez-2    (solo Manuales)
+     • 'electrico' -> app-ferreteria-bd73f (Eléctricas + TODA la base del invitado)
    El invitado LEE el catálogo de los dos proyectos y los junta en pantalla,
-   pero sus ventas/gastos/finanzas se escriben en el proyecto 'manual'.
+   pero sus ventas/gastos/finanzas se escriben en el proyecto 'electrico'.
    ------------------------------------------------------------------------- */
 const FB_PROJECTS = {
   manual: {
@@ -994,7 +1020,7 @@ const FB_PROJECTS = {
 };
 
 // Proyecto al que pertenece cada modo/entidad.
-function fbProjectKeyFor(modo){ return modo === 'electrico' ? 'electrico' : 'manual'; }
+function fbProjectKeyFor(modo){ return (modo === 'electrico' || modo === 'invitado') ? 'electrico' : 'manual'; }
 
 // Configuración del proyecto de un modo (null si no está configurado).
 function fbCfgFor(modo){
@@ -1003,7 +1029,7 @@ function fbCfgFor(modo){
 }
 
 // Instancia de Firestore (app con nombre) del proyecto de UN modo concreto.
-// 'invitado' apunta al proyecto donde vive su base propia (Manuales).
+// 'invitado' apunta al proyecto donde vive su base propia (Eléctricas).
 // Cada proyecto es una "app" aparte dentro del mismo SDK de Firebase.
 function fsFor(modo){
   if(typeof firebase === 'undefined' || !firebase.apps) return null;
@@ -1013,8 +1039,13 @@ function fsFor(modo){
   let app = null;
   try{ app = firebase.apps.filter(a => a.name === p.name)[0]; }catch(e){ app = null; }
   try{
-    if(!app) app = firebase.initializeApp(p.cfg, p.name);
-    return app.firestore();
+    let esNueva = false;
+    if(!app){ app = firebase.initializeApp(p.cfg, p.name); esNueva = true; }
+    const fsInst = app.firestore();
+    // Debe llamarse ANTES de cualquier otra operación de esa instancia: ignora
+    // los campos con valor undefined en vez de lanzar "invalid-argument".
+    if(esNueva){ try{ fsInst.settings({ ignoreUndefinedProperties: true, merge: true }); }catch(e){ /* ya configurada */ } }
+    return fsInst;
   }catch(e){
     console.error('Error preparando Firestore del proyecto ' + p.cfg.projectId, e);
     return null;
@@ -1068,8 +1099,19 @@ function showDiagnostic(msg){
 }
 window.addEventListener('error', function(ev){
   try{
+    // Errores al CARGAR una imagen/script/CSS llegan aquí (fase de captura del
+    // recurso) sin mensaje: no son errores de JavaScript de la app.
+    if(ev && !ev.message && ev.target && ev.target !== window) return;
     const m = ev && (ev.message || (ev.error && ev.error.message));
-    if(m) showDiagnostic('ERROR JS: ' + m + (ev.filename ? '\n' + ev.filename + ':' + ev.lineno : ''));
+    if(!m) return;
+    // "Script error." sin archivo ni línea = el navegador OCULTA el detalle de un
+    // script de OTRO dominio cargado sin CORS. Los scripts de Firebase/OCR ahora
+    // se cargan con crossorigin="anonymous", así que el mensaje real ya llega.
+    if(/^Script error\.?$/i.test(String(m).trim()) && !ev.filename && !ev.lineno){
+      console.warn('Script error (detalle oculto por el navegador: script de otro dominio)');
+      return; // no se muestra: no dice nada útil y asusta
+    }
+    showDiagnostic('ERROR JS: ' + m + (ev.filename ? '\n' + ev.filename + ':' + ev.lineno : ''));
   }catch(e){}
 });
 window.addEventListener('unhandledrejection', function(ev){
@@ -1097,6 +1139,29 @@ function disconnectFirebase(){
   fbDocRef = null;
 }
 
+// Traduce el código de error de Firebase a la causa real y qué hacer. Así el
+// aviso rojo dice POR QUÉ falló en vez de un "falló al conectar" genérico.
+function fbExplicarError(code){
+  switch(code){
+    case 'permission-denied':
+      return 'las REGLAS de Firestore rechazan leer/escribir (el "modo de prueba" vence a los 30 días). Console de Firebase → Firestore → Reglas, en CADA proyecto.';
+    case 'resource-exhausted':
+      return 'se agotó la cuota diaria GRATIS de Firebase (se reinicia solo en unas horas).';
+    case 'invalid-argument':
+      return 'Firestore rechazó un dato: (a) documento de más de 1 MiB, (b) un campo undefined/NaN o un arreglo dentro de otro arreglo. El mensaje de abajo dice el documento y su tamaño.';
+    case 'unavailable': case 'deadline-exceeded':
+      return 'sin internet o red inestable; se reintenta solo.';
+    case 'sdk-no-cargado':
+      return 'el programa de Firebase no se descargó (sin internet al abrir o CDN bloqueado). Se reintenta solo.';
+    case 'unauthenticated':
+      return 'las reglas piden usuario autenticado y la app no inicia sesión.';
+    case 'failed-precondition':
+      return 'falta un índice o la persistencia offline choca con otra pestaña.';
+    default:
+      return 'ver el mensaje de abajo.';
+  }
+}
+
 function setSyncStatus(status){
   if(status === 'synced'){ fbLastErrorCode = null; fbLastErrorMessage = null; } // conexión sana: se limpia el último error
   const el = document.getElementById('sidebarSyncStatus');
@@ -1114,7 +1179,9 @@ function setSyncStatus(status){
   // desde el celular (código, mensaje, proyecto y si el SDK llegó a cargar).
   if(status === 'error'){
     showDiagnostic('Firebase falló al conectar.\nCódigo: ' + (fbLastErrorCode || 'desconocido') +
+      '\nCausa probable: ' + fbExplicarError(fbLastErrorCode) +
       (fbLastErrorMessage ? '\nMensaje: ' + fbLastErrorMessage : '') +
+      '\nNavegador: ' + (navigator.onLine ? 'con internet' : 'SIN internet') +
       '\nProyectos: ' + [fbCfgFor('manual') && fbCfgFor('manual').projectId, fbCfgFor('electrico') && fbCfgFor('electrico').projectId].filter(Boolean).join(' + ') + (fbCfgFor('manual') || fbCfgFor('electrico') ? '' : '(sin config)') +
       '\nSDK cargado: ' + (typeof firebase !== 'undefined' ? 'sí' : 'NO') +
       '\nURL: ' + location.href);
@@ -1131,6 +1198,7 @@ function manualSync(){
   // ignora la marca semanal del backfill para subir YA los que este
   // dispositivo tenga locales y todavía no estén en la colección.
   if(currentModo !== 'invitado') sfForceComprasBackfill = true;
+  rearmarRespaldosPendientes(); // también ventas/gastos/productos que falten en la nube
   const btn = document.getElementById('btnManualSync');
   if(btn){ btn.disabled = true; btn.textContent = '🔄 Sincronizando…'; }
   const finish = ()=>{ if(btn){ btn.disabled = false; btn.textContent = '🔄 Recibir y mandar actualizaciones'; } };
@@ -1181,7 +1249,6 @@ function rerenderCurrentView(){
   if(!activeView) return;
   const name = activeView.id.replace('view-', '');
   if(name === 'productos') renderProductos();
-  if(name === 'productosnuevos') renderProductosNuevos();
   if(name === 'categorias') renderCategorias();
   if(name === 'ventas') renderVentas();
   if(name === 'topventas') renderTopVentas();
@@ -1371,7 +1438,12 @@ let fbReconnecting = false;
 function startSyncWatchdog(){
   stopSyncWatchdog();
   fbWatchdogTimer = setInterval(()=>{
-    if(typeof firebase === 'undefined') return;
+    if(typeof firebase === 'undefined'){
+      // El SDK no llegó a cargar (sin internet al abrir). Antes la app quedaba así
+      // hasta recargar la página: ahora lo vuelve a pedir cuando hay conexión.
+      if(navigator.onLine !== false) reintentarCargarFirebaseSDK();
+      return;
+    }
     if(!fbConfigOk() || !firebaseToggleOn()) return;
     if(fbReconnecting) return;
     const stEl = document.getElementById('sidebarSyncStatus');
@@ -1394,6 +1466,46 @@ function startSyncWatchdog(){
       }
     }
   }, 12000);
+}
+
+// Los respaldos de ventas / gastos / productos hacia la nube corren UNA vez por
+// dominio (para no gastar lecturas). Si una venta se hizo mientras Firebase no
+// estaba disponible (SDK sin cargar por abrir sin internet), esa venta quedaba
+// solo en el dispositivo para siempre. Esto vuelve a habilitar el respaldo: solo
+// SUBE lo que falta (no borra nada) y respeta los borrados.
+async function rearmarRespaldosPendientes(){
+  try{
+    const m = currentModo;
+    await kvSet('fs_backfill_ventas_' + m, '');
+    await kvSet('fs_backfill_gastos_' + m, '');
+    if(m !== 'invitado') await kvSet('fs_backfill_prod_' + m, '');
+  }catch(e){ /* no bloquea */ }
+}
+
+let fbSdkRetryAt = 0;
+function reintentarCargarFirebaseSDK(){
+  if(typeof firebase !== 'undefined') return;
+  if(Date.now() - fbSdkRetryAt < 30000) return;
+  fbSdkRetryAt = Date.now();
+  const cargar = src => new Promise((ok, no) => {
+    const el = document.createElement('script');
+    el.crossOrigin = 'anonymous';
+    el.src = src;
+    el.onload = ok;
+    el.onerror = () => no(new Error('no se pudo cargar ' + src));
+    document.head.appendChild(el);
+  });
+  cargar('https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js')
+    .then(() => cargar('https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js'))
+    .then(() => {
+      const el = document.getElementById('fbDiagBox'); if(el) el.remove();
+      // El SDK acaba de llegar tras un arranque sin conexión: lo hecho mientras tanto
+      // se respalda en la nube (antes quedaba solo en este dispositivo).
+      rearmarRespaldosPendientes().then(() => {
+        if(currentModo === 'invitado') connectGuestFirebase(); else connectFirebase();
+      });
+    })
+    .catch(() => { /* sigue sin internet: se reintenta en 30 s */ });
 }
 
 function stopSyncWatchdog(){
@@ -1711,7 +1823,9 @@ async function backfillVentas(modo){
   try{
     const snap = await col.get();
     const existing = new Set(snap.docs.map(d => d.id));
-    const missing = arr.filter(v => v && v.id && !existing.has(String(v.id)));
+    // Una venta borrada (tumba) NO se vuelve a subir: así un respaldo forzado no resucita borrados.
+    const tbsV = (db.tombstones || {}).ventas || {};
+    const missing = arr.filter(v => v && v.id && !existing.has(String(v.id)) && !tbsV[String(v.id)]);
     if(missing.length){
       await syncVentaDocs(missing, modo);
     }
@@ -1831,6 +1945,11 @@ function compraDocData(c){
   }
   if(c.descuento !== undefined && c.descuento !== null && !isNaN(Number(c.descuento))){
     d.descuento = Number(c.descuento);
+  }
+  // Precio de venta vigente al registrar el ingreso (solo Manuales; los ingresos
+  // anteriores no lo tienen y NO se inventa: el historial muestra "—").
+  if(c.precioVenta !== undefined && c.precioVenta !== null && c.precioVenta !== '' && !isNaN(Number(c.precioVenta))){
+    d.precioVenta = Number(c.precioVenta);
   }
   return d;
 }
@@ -2181,7 +2300,8 @@ async function backfillGastosPrestamos(modo){
   try{
     const snap = await col.get();
     const existing = new Set(snap.docs.map(d => d.id));
-    const missing = arr.filter(g => !existing.has(String(g.id)));
+    const tbsG = (db.tombstones || {}).gastosPrestamos || {};
+    const missing = arr.filter(g => !existing.has(String(g.id)) && !tbsG[String(g.id)]);
     const fs = col.firestore;
     for(let i = 0; i < missing.length; i += 450){
       const batch = fs.batch();
@@ -3249,7 +3369,7 @@ function saveProducto(data){
       return existing;
     }
     if(!maestro){
-      toast('Solo la PC principal crea productos nuevos. Usa "📥 Productos nuevos" y exporta el Excel.', 'error');
+      toast('Solo la PC principal crea productos nuevos.', 'error');
       return null;
     }
     const p = {
@@ -5693,22 +5813,45 @@ function openCompraHistorial(codigo){
   const nombre = compras[0]?.nombre || (p ? p.nombre : codigo);
   document.getElementById('histProdInfo').innerHTML = `📦 <strong>${escapeHtml(nombre)}</strong> · <span style="font-size:12px;">Código: ${escapeHtml(compraCodigoVisible(codigo))}</span>`;
   const tbody = document.querySelector('#histComprasTable tbody');
+  const thr = document.querySelector('#histComprasTable thead tr');
+  // SOLO Manuales: el historial muestra Precio distribuidor, Descuento, Precio de
+  // compra y Precio de venta. Eléctricas conserva su tabla de siempre (P. Compra).
+  const esManual = currentModo === 'manual';
+  if(thr){
+    thr.innerHTML = esManual
+      ? '<th>Fecha</th><th>Proveedor</th><th>P. Distribuidor</th><th>Desc.</th><th>P. Compra</th><th>P. Venta</th><th>Cant.</th><th>Obs.</th><th></th>'
+      : '<th>Fecha</th><th>Proveedor</th><th>P. Compra</th><th>Cant.</th><th>Obs.</th><th></th>';
+  }
+  const colspan = esManual ? 9 : 6;
+  // Los ingresos anteriores a estos campos no los tienen: se muestra "—" (no se
+  // inventa un valor, para no mostrar un dato que nunca se registró).
+  const tiene = v => v !== undefined && v !== null && v !== '' && !isNaN(Number(v));
+  const fmtDesc = v => tiene(v) ? (Math.round(Number(v) * 100) / 100) + '%' : '—';
+  const fmtOpc = v => tiene(v) ? fmtMoney(Number(v)) : '—';
   if(compras.length === 0){
-    tbody.innerHTML = `<tr class="empty-row"><td colspan="6">Todavía no hay ingresos registrados para este producto.</td></tr>`;
+    tbody.innerHTML = `<tr class="empty-row"><td colspan="${colspan}">Todavía no hay ingresos registrados para este producto.</td></tr>`;
   }else{
     // Todos los ingresos: fecha anterior arriba y la más reciente abajo.
     tbody.innerHTML = compras.slice()
       .sort((a,b)=> new Date(a.fecha) - new Date(b.fecha))
-      .map(c => `
+      .map(c => {
+        const precios = esManual
+          ? `<td>${fmtOpc(c.precioDistribuidor)}</td>
+        <td>${fmtDesc(c.descuento)}</td>
+        <td>${fmtMoney(c.precioUnitario)}</td>
+        <td>${fmtOpc(c.precioVenta)}</td>`
+          : `<td>${fmtMoney(c.precioUnitario)}</td>`;
+        return `
       <tr>
         <td>${fmtCompraFecha(c.fecha)}</td>
         <td>${escapeHtml(c.proveedor || '-')}</td>
-        <td>${fmtMoney(c.precioUnitario)}</td>
+        ${precios}
         <td>${c.cantidad}</td>
         <td style="white-space:pre-wrap; word-break:break-word; min-width:180px;">${c.observaciones ? escapeHtml(c.observaciones) : '-'}</td>
         <td><button class="btn-icon" title="Eliminar ingreso" data-delete-compra="${c.id}">🗑️</button></td>
       </tr>
-    `).join('');
+    `;
+      }).join('');
   }
   pintarBordeModal('modalCompraHistorial', '#805ad5');
   openModal('modalCompraHistorial');
@@ -5866,17 +6009,28 @@ function exportComprasCSV(){
     toast('No hay ingresos para exportar', 'error');
     return;
   }
-  const header = ['FECHA','CODIGO','PRODUCTO','PROVEEDOR','CANTIDAD','PRECIO DISTRIBUIDOR','DESCUENTO (%)','PRECIO DE COMPRA','TOTAL','METODO DE PAGO','OBSERVACIONES','MODO'];
-  const types = ['text','text','text','text','number','number','number','number','number','text','text','text'];
-  const modoTxt = MODO_LABELS[currentModo] || currentModo;
+  const esManual = currentModo === 'manual';
   const tieneNum = v => v !== undefined && v !== null && v !== '' && !isNaN(Number(v));
-  const rows = db.compras.map(c => [
-    ventaFechaKey(c.fecha), c.codigo, c.nombre, c.proveedor || '', Number(c.cantidad)||0,
-    // Los ingresos viejos (antes del descuento) no tienen estos dos datos: se dejan en blanco.
-    tieneNum(c.precioDistribuidor) ? Number(c.precioDistribuidor) : '',
-    tieneNum(c.descuento) ? Number(c.descuento) : '',
-    Number(c.precioUnitario)||0, Number(c.total)||0, c.metodoPago, c.observaciones || '', modoTxt
-  ]);
+  // Manuales: el Excel lleva también PRECIO DE VENTA (justo después del precio de compra).
+  const header = ['FECHA','CODIGO','PRODUCTO','PROVEEDOR','CANTIDAD','PRECIO DISTRIBUIDOR','DESCUENTO (%)','PRECIO DE COMPRA']
+    .concat(esManual ? ['PRECIO DE VENTA'] : [])
+    .concat(['TOTAL','METODO DE PAGO','OBSERVACIONES','MODO']);
+  const types = ['text','text','text','text','number','number','number','number']
+    .concat(esManual ? ['number'] : [])
+    .concat(['number','text','text','text']);
+  const modoTxt = MODO_LABELS[currentModo] || currentModo;
+  const rows = db.compras.map(c => {
+    const fila = [
+      ventaFechaKey(c.fecha), c.codigo, c.nombre, c.proveedor || '', Number(c.cantidad)||0,
+      // Los ingresos viejos (antes del descuento) no tienen estos dos datos: se dejan en blanco.
+      tieneNum(c.precioDistribuidor) ? Number(c.precioDistribuidor) : '',
+      tieneNum(c.descuento) ? Number(c.descuento) : '',
+      Number(c.precioUnitario)||0
+    ];
+    // Ingresos anteriores a este cambio no guardaron el precio de venta: en blanco, sin inventarlo.
+    if(esManual) fila.push(tieneNum(c.precioVenta) ? Number(c.precioVenta) : '');
+    return fila.concat([Number(c.total)||0, c.metodoPago, c.observaciones || '', modoTxt]);
+  });
   downloadXLSX(`stockferre_ingresos_${boliviaDateKey()}.xlsx`, [{ name: 'Ingresos', header, rows, types }]);
   toast('Ingresos exportados a Excel', 'success');
 }
@@ -6122,8 +6276,6 @@ function importComprasCSV(file){
           nombre,
           cantidad,
           precioUnitario: compra,          // PRECIO DE COMPRA
-          precioDistribuidor: dist,        // PRECIO DISTRIBUIDOR
-          descuento: desc,                 // DESCUENTO (%)
           total,
           metodoPago: idx.metodoPago > -1 ? (String(r[idx.metodoPago]||'').toLowerCase().includes('qr') ? 'qr' : 'efectivo') : 'efectivo',
           fecha: idx.fecha > -1 ? fechaCeldaToISO(r[idx.fecha]) : boliviaDateKey(),
@@ -6131,6 +6283,19 @@ function importComprasCSV(file){
           observaciones,
           productoId: p ? p.id : null
         };
+        // PRECIO DISTRIBUIDOR y DESCUENTO (%) solo se guardan si el Excel realmente los traía
+        // en esa fila. Un ingreso antiguo (celdas vacías) queda sin ellos y el historial
+        // muestra "—": no se inventa "distribuidor = compra, 0 %".
+        if(!vacia(celDist) || !vacia(celDesc)){
+          compraNueva.precioDistribuidor = dist;
+          compraNueva.descuento = desc;
+        }
+        // Manuales: columna PRECIO DE VENTA del Excel (si viene). Si la fila no la
+        // trae, no se inventa; si el producto es nuevo, ya se creó con ese precio.
+        if(currentModo === 'manual' && idx.precioVenta > -1 && !vacia(r[idx.precioVenta])){
+          const pv = parsePrecio(r[idx.precioVenta]);
+          if(!isNaN(pv)) compraNueva.precioVenta = pv;
+        }
         db.compras.push(compraNueva);
         nuevasCompras.push(compraNueva);
         importadas++;
@@ -7041,7 +7206,6 @@ function openCompraDetalleForm(producto, codigo, opts){
 // fuente = el campo que acaba de cambiar ('distribuidor' | 'descuento' | 'compra').
 const compraEstadoPrecios = { ultimo: 'descuento' };
 const estadoPreciosProducto = { ultimo: 'descuento' };
-const estadoPreciosBorrador = { ultimo: 'descuento' };
 function calcPreciosBidireccional(elDist, elDesc, elComp, estado, fuente){
   if(!elDist || !elDesc || !elComp) return;
   if(fuente === 'descuento') estado.ultimo = 'descuento';
@@ -7265,6 +7429,9 @@ function handleCompraSubmit(e){
     observaciones,
     productoId: p.id
   };
+  // Manuales: el ingreso también guarda el precio de venta que tenía el producto
+  // en ese momento (ya con el valor del formulario aplicado arriba).
+  if(currentModo === 'manual' && !isNaN(Number(p.precioVenta))) nuevaCompra.precioVenta = Number(p.precioVenta);
   db.compras.unshift(nuevaCompra);
   db.compras.sort((a,b)=> new Date(b.fecha) - new Date(a.fecha));
   syncCompraDoc(nuevaCompra, currentModo); // al instante, en SU documento de la nube
@@ -7349,6 +7516,19 @@ function openCodigoBarrasView(){
   });
 }
 
+// Cabecera con la FOTO del producto (igual que en Escanear). Si no tiene foto
+// muestra el recuadro 🖼️; al tocarla se abre la ventana para agregar una.
+function cbHeadHtml(p){
+  const img = getImage(p.id);
+  const imgHtml = img
+    ? `<img src="${img}" class="sr-img" alt="" data-img-product="${p.id}" decoding="async">`
+    : `<div class="sr-img sr-img-empty" data-img-product="${p.id}">🖼️</div>`;
+  return `<div class="sr-head">
+        <div class="sr-img-wrap">${imgHtml}${nuevoTag(p)}</div>
+        <h4>📦 ${escapeHtml(p.nombre)}</h4>
+      </div>`;
+}
+
 function handleCodigoBarrasScan(codigo, fromCamera){
   const box = document.getElementById('codigoBarrasResult');
   if(!box) return;
@@ -7364,7 +7544,7 @@ function handleCodigoBarrasScan(codigo, fromCamera){
     barcodePendingProduct = p;
     box.innerHTML = `
       <div class="scan-result-card">
-        <h4>📦 ${escapeHtml(p.nombre)}</h4>
+        ${cbHeadHtml(p)}
         <div class="sr-row"><span>Código</span><strong>${escapeHtml(p.codigo)}</strong></div>
         <div class="sr-row"><span>Código de barras actual</span><strong>${escapeHtml(p.codigoBarras || '-')}</strong></div>
         <p class="hint" style="margin:10px 0 0;">📷 Ahora escaneá el <strong>código de barras</strong> de este producto: la cámara ya cambió sola y se guardará automáticamente.</p>
@@ -7386,6 +7566,7 @@ function handleCodigoBarrasScan(codigo, fromCamera){
   syncProductoDoc(p); // mantiene el documento del producto en la nube al día
   box.innerHTML = `
     <div class="scan-result-card">
+      ${cbHeadHtml(p)}
       <h4>✅ Código de barras guardado</h4>
       <div class="sr-row"><span>Producto</span><strong>${escapeHtml(p.nombre)}</strong></div>
       <div class="sr-row"><span>Código</span><strong>${escapeHtml(p.codigo)}</strong></div>
@@ -7789,8 +7970,7 @@ function ocrConfirmarIngresos(){
       added++;
     }else{
       // Producto nuevo: solo la PC principal puede crearlo. Los demás
-      // dispositivos lo reportan como omitido para cargarlo en
-      // "📥 Productos nuevos" y pasarlo a la PC principal con un Excel.
+      // dispositivos lo reportan como omitido.
       const newProd = {
         id: 'ocr_' + Date.now() + '_' + Math.random().toString(36).slice(2,6),
         codigo: it.codigo,
@@ -7840,7 +8020,7 @@ function ocrConfirmarIngresos(){
   let msgOcr = added + ' ingreso(s) registrado(s) correctamente';
   if(omitidos){
     msgOcr += ' — ' + omitidos + ' producto(s) nuevo(s) NO registrado(s) (solo la PC principal crea productos): ' +
-      codigosOmitidos.join(', ') + '. Guárdalos en "📥 Productos nuevos".';
+      codigosOmitidos.join(', ') + '. Pídele a la PC principal que los cree.';
   }
   toast(msgOcr, omitidos && !added ? 'error' : (omitidos ? 'warning' : 'success'));
 }
@@ -8343,191 +8523,6 @@ function exportProductosExcel(){
   ]);
   downloadXLSX(`stockferre_productos_${boliviaDateKey()}.xlsx`, [{ name: 'Productos', header, rows, types }]);
   toast('Productos exportados a Excel (las fotos se respaldan con "Exportar backup")', 'success');
-}
-
-/* -------------------------------------------------------------------------
-   4z. PRODUCTOS NUEVOS (borradores locales de ESTE dispositivo)
-   Dispositivos que no son la PC principal no pueden crear productos en el
-   catálogo. Aquí cargan los productos nuevos como borradores locales, los
-   exportan a Excel (mismas columnas que "Exportar Excel") y ese Excel se
-   importa en la PC principal con "📥 Importar Excel", que es lo que sube los
-   productos a la nube y los reparte a todos los dispositivos.
-   ------------------------------------------------------------------------- */
-const DRAFTS_KEY = 'stockferre_productos_nuevos_v1';
-
-function loadDrafts(){
-  try{
-    const l = JSON.parse(localStorage.getItem(DRAFTS_KEY));
-    return Array.isArray(l) ? l : [];
-  }catch(e){ return []; }
-}
-function saveDrafts(list){
-  try{ localStorage.setItem(DRAFTS_KEY, JSON.stringify(list || [])); }catch(e){}
-}
-
-function renderProductosNuevos(){
-  const tbody = document.querySelector('#draftsTable tbody');
-  if(!tbody) return;
-  const dManualT = currentModo !== 'electrico';
-  const thr = document.querySelector('#draftsTable thead tr');
-  if(thr) thr.innerHTML = '<th>Código</th><th>Cód. Barras</th><th>Descripción</th><th>Marca</th><th>Categoría</th>' +
-    (dManualT
-      ? '<th class="price-guest-hide">P. Distribuidor</th><th class="price-guest-hide">Desc.</th><th class="price-guest-hide">P. Compra</th><th>P. Venta</th>'
-      : '<th class="price-guest-hide">P. Compra</th><th class="price-guest-hide">P. Marca</th><th>P. Venta</th>') +
-    '<th>Stock</th><th>Stock mín.</th><th>Acciones</th>';
-  const list = loadDrafts();
-  tbody.innerHTML = list.length ? list.map((d, i)=>`
-    <tr>
-      <td>${escapeHtml(d.codigo || '')}</td>
-      <td>${escapeHtml(d.codigoBarras || '')}</td>
-      <td>${escapeHtml(d.nombre || '')}</td>
-      <td>${escapeHtml(d.marca || '-')}</td>
-      <td>${d.categoria ? `<span class="badge badge-muted">${escapeHtml(d.categoria)}</span>` : '-'}</td>
-      ${dManualT
-        ? `<td class="price-guest-hide">${fmtMoney(precioDistribuidorDe(d))}</td><td class="price-guest-hide">${descuentoDe(d)}%</td><td class="price-guest-hide">${fmtMoney(d.precioCompra || 0)}</td><td>${fmtMoney(d.precioVenta || 0)}</td>`
-        : `<td class="price-guest-hide">${fmtMoney(d.precioCompra || 0)}</td><td class="price-guest-hide">${fmtMoney(d.precioMarca || 0)}</td><td>${fmtMoney(d.precioVenta || 0)}</td>`}
-      <td>${d.stock || 0}</td>
-      <td>${d.stockMin || 0}</td>
-      <td>
-        <button class="btn-icon" title="Editar" data-draft-edit="${i}">✏️</button>
-        <button class="btn-icon" title="Eliminar" data-draft-del="${i}">🗑️</button>
-      </td>
-    </tr>`).join('') : `<tr><td colspan="11" style="text-align:center; padding:18px;" class="hint">Sin borradores todavía. Pulsa "+ Nuevo borrador" para cargar productos que quieras agregar desde este dispositivo.</td></tr>`;
-  const count = document.getElementById('draftsCount');
-  if(count) count.textContent = list.length + ' borrador(es)';
-}
-
-function openDraftModal(idx){
-  const form = document.getElementById('formBorrador');
-  form.reset();
-  populateCategoryDatalist();
-  const list = loadDrafts();
-  const d = (idx === null || idx === undefined) ? null : list[idx];
-  document.getElementById('modalBorradorTitle').textContent = d ? 'Editar borrador' : 'Nuevo borrador';
-  document.getElementById('dIdx').value = (idx === null || idx === undefined) ? '' : String(idx);
-  document.getElementById('dCodigo').value = d ? (d.codigo || '') : '';
-  document.getElementById('dCodigoBarras').value = d ? (d.codigoBarras || '') : '';
-  document.getElementById('dNombre').value = d ? (d.nombre || '') : '';
-  document.getElementById('dMarca').value = d ? (d.marca || '') : '';
-  document.getElementById('dCategoria').value = d ? (d.categoria || '') : '';
-  const dManual = currentModo !== 'electrico';
-  document.getElementById('dDistWrap').style.display = dManual ? '' : 'none';
-  document.getElementById('dDescWrap').style.display = dManual ? '' : 'none';
-  document.getElementById('dMarcaWrap').style.display = dManual ? 'none' : '';
-  estadoPreciosBorrador.ultimo = 'descuento';
-  document.getElementById('dPrecioDistribuidor').value = (d && dManual) ? (precioDistribuidorDe(d) || '') : '';
-  document.getElementById('dDescuento').value = (d && dManual) ? (descuentoDe(d) || '') : '';
-  document.getElementById('dPrecioCompra').value = d ? (d.precioCompra || '') : '';
-  document.getElementById('dPrecioMarca').value = (d && !dManual) ? (d.precioMarca || '') : '';
-  document.getElementById('dPrecioVenta').value = d ? (d.precioVenta || '') : '';
-  document.getElementById('dStock').value = d ? (d.stock || 0) : '';
-  document.getElementById('dStockMin').value = d ? (d.stockMin || 0) : '';
-  document.getElementById('dCaracteristicas').value = d ? (d.caracteristicas || '') : '';
-  openModal('modalBorrador');
-}
-
-// Precios del borrador según el dueño: Manuales usa distribuidor/descuento/compra/venta.
-function preciosBorradorDesdeForm(){
-  const venta = parseFloat(document.getElementById('dPrecioVenta').value) || 0;
-  if(currentModo !== 'electrico'){
-    const dd = numONaN(document.getElementById('dPrecioDistribuidor').value);
-    const cc = numONaN(document.getElementById('dPrecioCompra').value);
-    const r = resolverPrecios(dd, numONaN(document.getElementById('dDescuento').value), cc);
-    return { precioDistribuidor: r.dist, descuento: r.desc, precioCompra: r.compra, precioMarca: 0, precioVenta: venta };
-  }
-  return {
-    precioCompra: parseFloat(document.getElementById('dPrecioCompra').value) || 0,
-    precioMarca: parseFloat(document.getElementById('dPrecioMarca').value) || 0,
-    precioVenta: venta
-  };
-}
-
-function handleDraftSubmit(e){
-  e.preventDefault();
-  const idxVal = document.getElementById('dIdx').value;
-  const editIdx = idxVal === '' ? -1 : parseInt(idxVal, 10);
-  const data = {
-    codigo: document.getElementById('dCodigo').value.trim(),
-    codigoBarras: document.getElementById('dCodigoBarras').value.trim(),
-    nombre: document.getElementById('dNombre').value.trim(),
-    marca: document.getElementById('dMarca').value.trim(),
-    categoria: document.getElementById('dCategoria').value.trim(),
-    ...preciosBorradorDesdeForm(),
-    stock: parseInt(document.getElementById('dStock').value, 10) || 0,
-    stockMin: parseInt(document.getElementById('dStockMin').value, 10) || 0,
-    caracteristicas: document.getElementById('dCaracteristicas').value.trim()
-  };
-  if(!data.codigo || !data.nombre){
-    toast('Código y descripción son obligatorios', 'error');
-    return;
-  }
-  const list = loadDrafts();
-  const dup = list.findIndex((x, i)=> i !== editIdx && normalize(x.codigo) === normalize(data.codigo));
-  if(dup > -1){
-    toast('Ya hay un borrador con ese código', 'error');
-    return;
-  }
-  if(editIdx < 0 || isNaN(editIdx)){
-    list.push(data);
-    toast('Borrador guardado en este dispositivo', 'success');
-  }else{
-    list[editIdx] = data;
-    toast('Borrador actualizado', 'success');
-  }
-  saveDrafts(list);
-  closeAllModals();
-  renderProductosNuevos();
-}
-
-function deleteDraft(i){
-  confirmDialog('Eliminar borrador', '¿Quitar este borrador de la lista?', ()=>{
-    const list = loadDrafts();
-    list.splice(i, 1);
-    saveDrafts(list);
-    renderProductosNuevos();
-    toast('Borrador eliminado', 'success');
-  });
-}
-
-// Exporta los borradores con EXACTAMENTE las mismas 12 columnas de
-// "Exportar Excel" para que la PC principal los importe sin cambios.
-function exportDraftsExcel(){
-  const list = loadDrafts();
-  if(!list.length){
-    toast('No hay borradores para exportar', 'error');
-    return;
-  }
-  const manual = currentModo !== 'electrico';
-  const header = manual
-    ? ['CODIGO','DESCRIPCION','MARCA','PRECIO DISTRIBUIDOR','DESCUENTO (%)','PRECIO DE COMPRA','PRECIO DE VENTA','CODIGO DE BARRAS','CATEGORIA','STOCK','STOCK MIN','CARACTERISTICAS','IMAGEN']
-    : ['CODIGO','CODIGO DE BARRAS','DESCRIPCION','MARCA','CATEGORIA','PRECIO COMPRA','PRECIO MARCA','PRECIO VENTA','STOCK','STOCK MIN','CARACTERISTICAS','IMAGEN'];
-  const types = manual
-    ? ['text','text','text','number','number','number','number','text','text','number','number','text','text']
-    : ['text','text','text','text','text','number','number','number','number','number','text','text'];
-  const rows = list.map(d => manual ? [
-    d.codigo || '', d.nombre || '', d.marca || '',
-    precioDistribuidorDe(d), descuentoDe(d), d.precioCompra || 0, d.precioVenta || 0,
-    d.codigoBarras || '', d.categoria || '', d.stock || 0, d.stockMin || 0, d.caracteristicas || '', ''
-  ] : [
-    d.codigo || '', d.codigoBarras || '', d.nombre || '', d.marca || '', d.categoria || '',
-    d.precioCompra || 0, d.precioMarca || 0, d.precioVenta || 0,
-    d.stock || 0, d.stockMin || 0, d.caracteristicas || '', ''
-  ]);
-  downloadXLSX(`stockferre_productos_nuevos_${boliviaDateKey()}.xlsx`, [{ name: 'Productos nuevos', header, rows, types }]);
-  toast('Excel exportado con ' + list.length + ' borrador(es). Pásalo a la PC principal e impórtalo con "📥 Importar Excel"', 'success');
-}
-
-function clearDrafts(){
-  const list = loadDrafts();
-  if(!list.length){
-    toast('No hay borradores para vaciar', 'error');
-    return;
-  }
-  confirmDialog('Vaciar lista', '¿Quitar los ' + list.length + ' borrador(es) de este dispositivo? (Si antes exportaste el Excel, esos productos siguen en el archivo)', ()=>{
-    saveDrafts([]);
-    renderProductosNuevos();
-    toast('Lista de borradores vaciada', 'success');
-  });
 }
 
 // Importa un archivo Excel/CSV de inventario (CODIGO, DESCRIPCION, ..., STOCK) para
@@ -9351,7 +9346,7 @@ function handleProductSubmit(e){
     return;
   }
   if(!data.id && !esMaestro()){
-    toast('Solo la PC principal crea productos nuevos. Usa "📥 Productos nuevos" y exporta el Excel.', 'error');
+    toast('Solo la PC principal crea productos nuevos.', 'error');
     return; // el modal queda abierto para no perder lo escrito
   }
   const saved = saveProducto(data);
@@ -10203,7 +10198,7 @@ function readTableFile(file, cb){
 
 function importProductsCSV(file){
   if(!esMaestro()){
-    toast('Importar productos solo está disponible en la PC principal. En este dispositivo usa "📥 Productos nuevos".', 'error');
+    toast('Importar productos solo está disponible en la PC principal.', 'error');
     return;
   }
   const reader = new FileReader();
@@ -10988,7 +10983,6 @@ const VIEW_TITLES = {
   inicio: 'Inicio',
   escaner: 'Escanear',
   productos: 'Productos',
-  productosnuevos: '📥 Productos nuevos',
   categorias: 'Categorías',
   ventas: 'Ventas',
   topventas: 'Productos más vendidos',
@@ -11016,7 +11010,7 @@ function updateInicioClock(){
 function showView(name){
   if(welcomeTimer){ clearTimeout(welcomeTimer); welcomeTimer = null; }
   currentView = name;
-  if(currentRole === 'guest' && (name === 'inventario' || name === 'compras' || name === 'finanzas' || name === 'retiros' || name === 'deudas' || name === 'gastos' || name === 'codigobarras' || name === 'topventas' || name === 'pedidos' || name === 'productosnuevos')){
+  if(currentRole === 'guest' && (name === 'inventario' || name === 'compras' || name === 'finanzas' || name === 'retiros' || name === 'deudas' || name === 'gastos' || name === 'codigobarras' || name === 'topventas' || name === 'pedidos')){
     toast('Los invitados no tienen acceso a esa sección', 'error');
     name = 'productos';
   }
@@ -11039,7 +11033,6 @@ function showView(name){
 
   if(name === 'inicio') updateInicioClock();
   if(name === 'productos') renderProductos();
-  if(name === 'productosnuevos') renderProductosNuevos();
   if(name === 'categorias') renderCategorias();
   if(name === 'ventas') renderVentas();
   if(name === 'topventas') renderTopVentas();
@@ -12565,13 +12558,13 @@ function setupEventListeners(){
 
   // "PC principal (maestra)": solo se enciende EN la PC principal del dueño.
   // Con el interruptor apagado este dispositivo no crea ni borra productos
-  // (usa la pestaña "📥 Productos nuevos" para cargar nuevos con Excel).
+  // (los productos nuevos los crea la PC principal).
   const swMaster = document.getElementById('masterSwitchConfig');
   if(swMaster) swMaster.addEventListener('change', (e)=>{
     setEsMaestro(e.target.checked);
     toast(e.target.checked
       ? 'Esta PC ahora es la PC principal: puede crear y borrar productos'
-      : 'Modo normal: los productos nuevos se cargan en "📥 Productos nuevos" y se exportan con Excel', 'success');
+      : 'Modo normal: los productos nuevos solo los crea la PC principal', 'success');
   });
 
   // Instalar la app (PWA): el botón de Configuración y la guía según cómo se
@@ -12687,17 +12680,6 @@ function setupEventListeners(){
   document.getElementById('btnExportProducts').addEventListener('click', exportProductosExcel);
   document.getElementById('formProducto').addEventListener('submit', handleProductSubmit);
 
-  // Productos nuevos (borradores locales de este dispositivo → Excel → PC principal)
-  document.getElementById('btnNewDraft').addEventListener('click', ()=> openDraftModal(null));
-  document.getElementById('btnExportDrafts').addEventListener('click', exportDraftsExcel);
-  document.getElementById('btnClearDrafts').addEventListener('click', clearDrafts);
-  document.getElementById('formBorrador').addEventListener('submit', handleDraftSubmit);
-  document.querySelector('#draftsTable tbody').addEventListener('click', (e)=>{
-    const editIdx = e.target.closest('[data-draft-edit]')?.dataset.draftEdit;
-    const delIdx = e.target.closest('[data-draft-del]')?.dataset.draftDel;
-    if(editIdx !== undefined && editIdx !== null && editIdx !== '') openDraftModal(parseInt(editIdx, 10));
-    if(delIdx !== undefined && delIdx !== null && delIdx !== '') deleteDraft(parseInt(delIdx, 10));
-  });
   let _prodSearchTimer = null;
   document.getElementById('prodSearch').addEventListener('input', ()=>{
     clearTimeout(_prodSearchTimer);
@@ -13089,7 +13071,6 @@ function setupEventListeners(){
   document.getElementById('cDescuento').addEventListener('input', ()=>{ recalcCompraPrecios('descuento'); recalcCompraTotal(); });
   document.getElementById('cPrecioCompra').addEventListener('input', ()=>{ recalcCompraPrecios('compra'); recalcCompraTotal(); });
   bindPreciosBidireccional('pPrecioDistribuidor', 'pDescuento', 'pPrecioCompra', estadoPreciosProducto);
-  bindPreciosBidireccional('dPrecioDistribuidor', 'dDescuento', 'dPrecioCompra', estadoPreciosBorrador);
   document.getElementById('btnCompraNuevoProducto').addEventListener('click', ()=>{
     closeAllModals();
     openNuevoProductoForm();
@@ -13326,9 +13307,239 @@ function setupEventListeners(){
     e.target.value = '';
   });
   document.getElementById('btnManualSync').addEventListener('click', manualSync);
+  const btnDiagAlm = document.getElementById('btnDiagAlmacen');
+  if(btnDiagAlm) btnDiagAlm.addEventListener('click', abrirDiagAlmacen);
+  const btnDiagCopiar = document.getElementById('btnDiagAlmacenCopiar');
+  if(btnDiagCopiar) btnDiagCopiar.addEventListener('click', ()=>{
+    const pre = document.getElementById('diagAlmacenOut');
+    if(!pre) return;
+    try{ navigator.clipboard.writeText(pre.textContent).then(()=> toast('Informe copiado', 'success')); }
+    catch(e){ toast('No se pudo copiar; selecciona el texto manualmente', 'warning'); }
+  });
   document.getElementById('btnVaciarCatalogo').addEventListener('click', vaciarCatalogo);
   document.getElementById('btnFactoryReset').addEventListener('click', factoryReset);
   document.getElementById('btnGlobalReset').addEventListener('click', globalReset);
+}
+
+/* -------------------------------------------------------------------------
+   DIAGNÓSTICO DE ALMACENAMIENTO (SOLO LECTURA)
+   Mide qué ocupa espacio en ESTE navegador. No borra, no escribe y no cambia
+   nada: sirve para saber la causa real del aviso "almacenamiento lleno" antes
+   de decidir si algo se puede limpiar.
+   ------------------------------------------------------------------------- */
+function diagBytesUtf8(str){
+  try{ return new TextEncoder().encode(str).length; }catch(e){ return String(str).length; }
+}
+function diagFmt(n){
+  n = Number(n) || 0;
+  if(n >= 1048576) return (n / 1048576).toFixed(2) + ' MB';
+  if(n >= 1024) return (n / 1024).toFixed(1) + ' KB';
+  return n + ' B';
+}
+// Desglose de una base de catálogo: cuánto pesa cada sección y cuántos registros tiene.
+function diagDesgloseBase(nombre, raw, out){
+  let o;
+  try{ o = JSON.parse(raw); }catch(e){ out.push('  (' + nombre + ': no se pudo leer el JSON)'); return null; }
+  const partes = [];
+  Object.keys(o || {}).forEach(k => {
+    let sz = 0;
+    try{ sz = diagBytesUtf8(JSON.stringify(o[k])); }catch(e){}
+    const v = o[k];
+    const cant = Array.isArray(v) ? v.length + ' reg.' : (v && typeof v === 'object' ? Object.keys(v).length + ' claves' : '');
+    partes.push({ k, sz, cant });
+  });
+  partes.sort((a,b)=> b.sz - a.sz);
+  partes.slice(0, 8).forEach(p => out.push('    · ' + p.k + ': ' + diagFmt(p.sz) + (p.cant ? ' (' + p.cant + ')' : '')));
+  return o;
+}
+
+async function medirAlmacenamiento(){
+  const out = [];
+  const L = t => out.push(t);
+  L('INFORME DE ALMACENAMIENTO — ' + new Date().toLocaleString());
+  L('Modo activo: ' + currentModo + ' · Navegador: ' + (navigator.onLine ? 'con internet' : 'SIN internet'));
+  L('');
+
+  // 1) Total del navegador para este sitio
+  let est = null;
+  try{ if(navigator.storage && navigator.storage.estimate) est = await navigator.storage.estimate(); }catch(e){}
+  if(est){
+    L('== TOTAL DEL NAVEGADOR PARA ESTE SITIO ==');
+    L('Usado: ' + diagFmt(est.usage) + ' de ' + diagFmt(est.quota) + ' (' + (est.quota ? (est.usage / est.quota * 100).toFixed(1) : '?') + '%)');
+    const ud = est.usageDetails || null;
+    if(ud){
+      Object.keys(ud).forEach(k => L('  · ' + k + ': ' + diagFmt(ud[k])));
+    }
+    L('');
+  }
+
+  // 2) localStorage
+  L('== LOCALSTORAGE (límite típico ~5 MB) ==');
+  let lsTotal = 0;
+  const lsItems = [];
+  try{
+    for(let i = 0; i < localStorage.length; i++){
+      const k = localStorage.key(i);
+      const v = localStorage.getItem(k) || '';
+      const sz = (k.length + v.length) * 2; // el navegador cuenta 2 bytes por carácter
+      lsTotal += sz;
+      lsItems.push({ k, sz, v });
+    }
+  }catch(e){ L('  no se pudo leer: ' + e.message); }
+  lsItems.sort((a,b)=> b.sz - a.sz);
+  L('Total: ' + diagFmt(lsTotal) + ' en ' + lsItems.length + ' claves');
+  lsItems.slice(0, 12).forEach(it => L('  · ' + it.k + ': ' + diagFmt(it.sz)));
+  const catalogos = lsItems.filter(it => /^stockferre_catalogo_v1(_|$)/.test(it.k));
+  if(catalogos.length){
+    L('');
+    L('Desglose de cada copia del catálogo en localStorage:');
+    catalogos.forEach(it => {
+      L('  ▸ ' + it.k + ' (' + diagFmt(it.sz) + ')');
+      diagDesgloseBase(it.k, it.v, out);
+    });
+  }
+  const legacy = lsItems.find(it => it.k === LEGACY_STORAGE_KEY);
+  const manualNuevo = lsItems.find(it => it.k === 'stockferre_catalogo_v1_manual');
+  if(legacy && manualNuevo){
+    L('');
+    L('⚠ DUPLICADO: existe la copia ANTIGUA "' + LEGACY_STORAGE_KEY + '" (' + diagFmt(legacy.sz) + ') además de la actual de Manuales (' + diagFmt(manualNuevo.sz) + '). Es una migración vieja que nunca se retiró.');
+  }
+  L('');
+
+  // 3) IndexedDB propio (almacén ampliado)
+  L('== INDEXEDDB: ALMACÉN AMPLIADO (' + KV_DB + ') ==');
+  let kvTotal = 0;
+  try{
+    const d = await openKV();
+    const items = await new Promise(resolve => {
+      const arr = [];
+      try{
+        const tx = d.transaction(KV_STORE, 'readonly');
+        const req = tx.objectStore(KV_STORE).openCursor();
+        req.onsuccess = () => {
+          const cur = req.result;
+          if(cur){ arr.push({ k: cur.key, v: typeof cur.value === 'string' ? cur.value : JSON.stringify(cur.value) }); cur.continue(); }
+          else resolve(arr);
+        };
+        req.onerror = () => resolve(arr);
+      }catch(e){ resolve(arr); }
+    });
+    items.forEach(it => { it.sz = diagBytesUtf8(it.v); kvTotal += it.sz; });
+    items.sort((a,b)=> b.sz - a.sz);
+    L('Total: ' + diagFmt(kvTotal) + ' en ' + items.length + ' claves');
+    items.slice(0, 12).forEach(it => {
+      const enLs = lsItems.find(x => x.k === it.k);
+      let igual = '';
+      if(enLs) igual = (enLs.v === it.v) ? ' · IDÉNTICA a la de localStorage (copia duplicada a propósito)' : ' · distinta a la de localStorage';
+      else if(/^stockferre_catalogo_v1/.test(it.k)) igual = ' · SOLO aquí (localStorage no la tiene: estaba lleno)';
+      L('  · ' + it.k + ': ' + diagFmt(it.sz) + igual);
+    });
+  }catch(e){ L('  no se pudo leer: ' + (e && e.message || e)); }
+  L('');
+
+  // 4) Fotos (solo en este dispositivo)
+  L('== FOTOS DE PRODUCTOS (IndexedDB ' + IMG_DB_NAME + ') — NO están en Firebase ==');
+  try{
+    const idb = await openImgDB();
+    for(const st of ['imgs_manual', 'imgs_electrico']){
+      if(!idb.objectStoreNames.contains(st)) continue;
+      const r = await new Promise(resolve => {
+        let n = 0, fotos = 0, bytes = 0;
+        try{
+          const tx = idb.transaction(st, 'readonly');
+          const req = tx.objectStore(st).openCursor();
+          req.onsuccess = () => {
+            const cur = req.result;
+            if(cur){
+              n++;
+              const v = cur.value || {};
+              const arr = Array.isArray(v.data) ? v.data : (v.data ? [v.data] : []);
+              fotos += arr.length;
+              arr.forEach(x => { bytes += typeof x === 'string' ? x.length : 0; });
+              cur.continue();
+            }else resolve({ n, fotos, bytes });
+          };
+          req.onerror = () => resolve({ n, fotos, bytes });
+        }catch(e){ resolve({ n, fotos, bytes }); }
+      });
+      L('  · ' + st + ': ' + r.n + ' productos con foto, ' + r.fotos + ' fotos, ≈ ' + diagFmt(r.bytes));
+    }
+  }catch(e){ L('  no se pudo leer: ' + (e && e.message || e)); }
+  L('');
+
+  // 5) Bases de datos IndexedDB que existen (incluye la copia offline de Firestore)
+  L('== TODAS LAS BASES INDEXEDDB DE ESTE SITIO ==');
+  try{
+    if(indexedDB.databases){
+      const dbs = await indexedDB.databases();
+      (dbs || []).forEach(x => L('  · ' + x.name + (x.version ? ' (v' + x.version + ')' : '')));
+      L('  (Las que empiezan por "firestore/" son la caché offline que guarda el propio Firebase de cada proyecto.)');
+    }else L('  este navegador no permite listarlas');
+  }catch(e){ L('  no se pudo listar: ' + (e && e.message || e)); }
+  L('');
+
+  // 6) Cache Storage (Service Worker)
+  L('== CACHE STORAGE (Service Worker) ==');
+  try{
+    if(window.caches){
+      const names = await caches.keys();
+      for(const nm of names){
+        const c = await caches.open(nm);
+        const reqs = await c.keys();
+        let bytes = 0, opacos = 0;
+        const grandes = [];
+        for(const rq of reqs){
+          try{
+            const res = await c.match(rq);
+            if(!res) continue;
+            if(res.type === 'opaque'){ opacos++; continue; }
+            const b = await res.clone().blob();
+            bytes += b.size;
+            grandes.push({ u: rq.url, sz: b.size });
+          }catch(e){}
+        }
+        grandes.sort((a,b)=> b.sz - a.sz);
+        L('  · ' + nm + ': ' + reqs.length + ' archivos, ' + diagFmt(bytes) + (opacos ? ' (+' + opacos + ' opacos de tamaño oculto)' : ''));
+        grandes.slice(0, 4).forEach(g => L('      - ' + g.u.slice(0, 80) + ': ' + diagFmt(g.sz)));
+      }
+      if(!names.length) L('  (vacío)');
+    }else L('  no disponible');
+  }catch(e){ L('  no se pudo leer: ' + (e && e.message || e)); }
+  L('');
+
+  // 7) Tamaño del documento grande que se sube a Firestore (límite 1 MiB = 1.048.576 B)
+  L('== DOCUMENTO GRANDE QUE SE SUBE A FIRESTORE (límite 1.048.576 B) ==');
+  ['manual', 'electrico'].forEach(modo => {
+    try{
+      const base = (modo === currentModo && db) ? db : loadModoDB(modo);
+      const { historialEscaneos, historialBusquedas, historialInventario, ventas, ajustes, gastosPrestamos, compras, ...syncData } = base;
+      const sz = diagBytesUtf8(JSON.stringify(syncData));
+      const pct = (sz / 1048576 * 100).toFixed(0);
+      L('  · ' + modo + ': ' + diagFmt(sz) + ' (' + pct + '% del límite) · ' + (base.productos || []).length + ' productos' +
+        (sz > 900000 ? '  ⚠ CERCA O SOBRE EL LÍMITE' : ''));
+    }catch(e){ L('  · ' + modo + ': no se pudo calcular'); }
+  });
+  L('');
+
+  // 8) Qué existe solo en este dispositivo (nunca se sube a Firebase)
+  L('== SOLO EN ESTE DISPOSITIVO (no está en Firebase) ==');
+  L('  · Fotos de productos (arriba).');
+  L('  · Historial de escaneos, búsquedas e inventario (máx. ' + HISTORY_MAX + ' c/u).');
+  L('  · Preferencias (tema, modo pro, recordar sesión, etc.).');
+  L('  · Cualquier cambio hecho SIN internet o con la sincronización apagada hasta que se suba.');
+  L('');
+  L('Este informe no modificó nada.');
+  return out.join('\n');
+}
+
+async function abrirDiagAlmacen(){
+  const pre = document.getElementById('diagAlmacenOut');
+  if(pre) pre.textContent = 'Midiendo… (puede tardar unos segundos)';
+  openModal('modalDiagAlmacen');
+  let txt;
+  try{ txt = await medirAlmacenamiento(); }
+  catch(e){ txt = 'No se pudo completar el informe: ' + (e && e.message || e); }
+  if(pre) pre.textContent = txt;
 }
 
 function init(){

@@ -486,6 +486,24 @@ function finishQueuedWrite(docId, ref, toSend){
 const MASTER_KEY = 'stockferre_master_v1';            // '1' = esta PC es la maestra
 const ALIGN_KEY = 'stockferre_catalog_align_v1';      // '1' = catálogo local ya alineado con la nube
 
+/* ---------- Distintivo "NUEVO" ----------
+   Un producto es NUEVO durante 1 mes contado desde su PRIMER registro en la
+   base de datos (campo fechaRegistro, que se escribe una sola vez al crearlo).
+   Un ingreso o un aumento de stock de un producto que ya existía NO lo toca.
+   Los productos sin fechaRegistro (catálogo anterior o importado en bloque) no
+   se marcan. Se calcula al dibujar, así desaparece solo al cumplirse el mes. */
+function productoEsNuevo(p){
+  if(!p || !p.fechaRegistro) return false;
+  const d = new Date(p.fechaRegistro);
+  if(isNaN(d.getTime())) return false;
+  const fin = new Date(d.getTime());
+  fin.setMonth(fin.getMonth() + 1);
+  return Date.now() < fin.getTime();
+}
+function nuevoTag(p){
+  return productoEsNuevo(p) ? '<span class="tag-nuevo">NUEVO</span>' : '';
+}
+
 function esMaestro(){
   if(currentRole === 'guest') return false;
   try{ return localStorage.getItem(MASTER_KEY) === '1'; }catch(e){ return false; }
@@ -520,7 +538,11 @@ function alinearCatalogoUnaVez(dbObj, remote){
     if(localStorage.getItem(ALIGN_KEY) === '1') return false;
     if(!remote || !Array.isArray(remote.productos) || !remote.productos.length) return false;
     localStorage.setItem(ALIGN_KEY, '1');
-    dbObj.productos = remote.productos.slice();
+    // Los productos NUEVOS que este dispositivo registró desde Ingresos antes de
+    // alinearse no se pierden: se conservan junto al catálogo de la nube.
+    const propios = (dbObj.productos || []).filter(p => p && p.fechaRegistro &&
+      !remote.productos.some(r => r && (r.id === p.id || (normalize(r.codigo) && normalize(r.codigo) === normalize(p.codigo)))));
+    dbObj.productos = remote.productos.slice().concat(propios);
     return true;
   }catch(e){}
   return false;
@@ -753,6 +775,15 @@ function mergeRemoteIntoLocal(local, remote){
   remote = normalizeDB(Object.assign({}, remote || defaultDB()));
   const merged = Object.assign({}, remote);
   merged.productos = mergeById(local.productos, remote.productos, '_updatedAt');
+  // La fecha de primer registro (distintivo NUEVO) no se pierde ni se reinicia:
+  // gana siempre la más antigua de las dos copias.
+  (()=>{
+    const fr = new Map();
+    (local.productos || []).concat(remote.productos || []).forEach(p => {
+      if(p && p.id != null && p.fechaRegistro && (!fr.has(p.id) || String(p.fechaRegistro) < String(fr.get(p.id)))) fr.set(p.id, p.fechaRegistro);
+    });
+    merged.productos.forEach(p => { if(p && fr.has(p.id)) p.fechaRegistro = fr.get(p.id); });
+  })();
   merged.categorias = Array.from(new Set(
     (local.categorias||[]).concat(remote.categorias||[])
       .map(c => String(c||'').trim()).filter(Boolean)
@@ -1461,7 +1492,7 @@ function fbProductsCol(modo){
 
 // Datos que se guardan en el documento del producto.
 function productoDocData(p){
-  return {
+  const d = {
     id: p.id,
     codigo: p.codigo || '',
     nombre: p.nombre || '',
@@ -1476,12 +1507,19 @@ function productoDocData(p){
     caracteristicas: String(p.caracteristicas || ''),
     _updatedAt: typeof p._updatedAt === 'number' ? p._updatedAt : Date.now()
   };
+  // Fecha del primer registro (para el distintivo NUEVO): solo si el producto la tiene.
+  if(p.fechaRegistro) d.fechaRegistro = p.fechaRegistro;
+  // Precio distribuidor y descuento (Manuales): solo si el producto los tiene.
+  if(p.precioDistribuidor !== undefined && p.precioDistribuidor !== null && !isNaN(Number(p.precioDistribuidor))) d.precioDistribuidor = Number(p.precioDistribuidor);
+  if(p.descuento !== undefined && p.descuento !== null && !isNaN(Number(p.descuento))) d.descuento = Number(p.descuento);
+  return d;
 }
 
 // Crea (si no existe) el documento del producto SIN tocar su stock: el stock
 // solo se modifica con incrementos atómicos para no pisar a otro dispositivo.
-async function ensureProductoDoc(p, modo){
-  if(!subidaCatalogoPermitida()) return false;
+async function ensureProductoDoc(p, modo, opts){
+  const crear = !!(opts && opts.crear); // producto nuevo creado desde Ingresos
+  if(!subidaCatalogoPermitida() && !crear) return false;
   const col = fbProductsCol(modo);
   if(!col || !p || !p.id) return false;
   try{
@@ -1495,7 +1533,7 @@ async function ensureProductoDoc(p, modo){
 // Aplica un cambio ATÓMICO de stock en la nube (suma o resta). Esto es lo que
 // evita que dos celulares se pisen: Firestore suma la cantidad sobre el valor
 // actual que tenga en ese momento, así que ningún registro se pierde.
-async function applyStockDelta(p, delta, modo){
+async function applyStockDelta(p, delta, modo, opts){
   const col = fbProductsCol(modo);
   if(!col || !p || !p.id) return;
   delta = Number(delta) || 0;
@@ -1509,7 +1547,7 @@ async function applyStockDelta(p, delta, modo){
     if(err && err.code === 'not-found'){
       // Producto creado antes de esta actualización: se crea su documento
       // primero y luego se aplica el incremento sobre el stock de la nube.
-      await ensureProductoDoc(p, modo);
+      await ensureProductoDoc(p, modo, opts);
       try{
         await col.doc(p.id).update({
           stock: firebase.firestore.FieldValue.increment(delta),
@@ -1538,14 +1576,18 @@ async function applyStockAbsolute(p, value, modo){
 }
 
 // Guarda (crea o actualiza) el documento completo de un producto.
-async function syncProductoDoc(p, modo){
-  if(!subidaCatalogoPermitida()) return;
+async function syncProductoDoc(p, modo, opts){
+  // opts.crear = producto NUEVO registrado desde Ingresos: cualquier dueño puede
+  // crearlo en la nube (con su código y marca). Editar productos que ya existen
+  // sigue siendo solo de la PC madre.
+  const crear = !!(opts && opts.crear);
+  if(!subidaCatalogoPermitida() && !crear) return;
   const col = fbProductsCol(modo);
   if(!col || !p || !p.id) return;
   const data = productoDocData(p);
   // Un dispositivo que no es la maestra nunca pisa código/marca en la nube
   // (merge: true deja esos campos intactos si no se mandan).
-  if(!esMaestro()){ delete data.codigo; delete data.marca; }
+  if(!esMaestro() && !crear){ delete data.codigo; delete data.marca; }
   try{
     await col.doc(p.id).set(data, { merge: true });
   }catch(e){ console.error('Error sincronizando producto en la nube', e); }
@@ -1768,12 +1810,12 @@ function fbComprasCol(modo){
 }
 
 function compraDocData(c){
-  return {
+  const d = {
     id: c.id,
     codigo: c.codigo || '',
     nombre: c.nombre || '',
     cantidad: Number(c.cantidad) || 0,
-    precioUnitario: Number(c.precioUnitario) || 0,
+    precioUnitario: Number(c.precioUnitario) || 0, // = PRECIO DE COMPRA (ya con descuento)
     total: Number(c.total) || 0,
     metodoPago: c.metodoPago || '',
     fecha: c.fecha || todayISO(),
@@ -1782,6 +1824,15 @@ function compraDocData(c){
     productoId: c.productoId || null,
     _ts: Date.now()
   };
+  // Precio del distribuidor y descuento (%): solo si el ingreso los tiene
+  // (los ingresos viejos no los tenían y no se inventan).
+  if(c.precioDistribuidor !== undefined && c.precioDistribuidor !== null && !isNaN(Number(c.precioDistribuidor))){
+    d.precioDistribuidor = Number(c.precioDistribuidor);
+  }
+  if(c.descuento !== undefined && c.descuento !== null && !isNaN(Number(c.descuento))){
+    d.descuento = Number(c.descuento);
+  }
+  return d;
 }
 
 // Sube (crea o actualiza) el documento de UN ingreso.
@@ -1869,8 +1920,11 @@ function startComprasListener(modo){
   if(fbComprasUnsub){ try{ fbComprasUnsub(); }catch(e){ /* ignorar */ } }
   comprasStoreCache.list = null;
   let timer = null, changed = false;
+  const tokenListener = modeToken; // si se cambia de modo, este listener ya no aplica nada
+  const modoListener = modo || currentModo;
 
   const flush = () => {
+    if(tokenListener !== modeToken || currentModo !== modoListener){ changed = false; comprasStoreCache.list = null; return; }
     if(!changed) return;
     changed = false;
     const store = comprasStoreCache.list;
@@ -1885,6 +1939,7 @@ function startComprasListener(modo){
   };
 
   fbComprasUnsub = col.onSnapshot(snap => {
+    if(tokenListener !== modeToken || currentModo !== modoListener) return; // snapshot de otro modo: se ignora
     const tbs = (db.tombstones || {}).compras || {};
     snap.docChanges().forEach(ch => {
       if(ch.doc.metadata.hasPendingWrites) return; // espera la confirmación de la nube
@@ -2407,9 +2462,14 @@ function startStockListener(modo){
           p.codigoBarras = data.codigoBarras;
           touched = true;
         }
+        // Primer registro: se conserva siempre la fecha MÁS ANTIGUA (nunca se reinicia).
+        if(data.fechaRegistro && (!p.fechaRegistro || String(data.fechaRegistro) < String(p.fechaRegistro))){
+          p.fechaRegistro = data.fechaRegistro;
+          touched = true;
+        }
         const remoteTs = typeof data._updatedAt === 'number' ? data._updatedAt : 0;
         if(remoteTs >= (p._updatedAt || 0)){
-          ['codigo','nombre','marca','categoria','precioCompra','precioMarca','precioVenta','stockMin','caracteristicas'].forEach(f => {
+          ['codigo','nombre','marca','categoria','precioCompra','precioMarca','precioVenta','precioDistribuidor','descuento','stockMin','caracteristicas'].forEach(f => {
             if(data[f] !== undefined && String(data[f]) !== String(p[f])){
               p[f] = typeof data[f] === 'number' ? Number(data[f]) : data[f];
               touched = true;
@@ -2433,12 +2493,15 @@ function startStockListener(modo){
           precioCompra: Number(data.precioCompra) || 0,
           precioMarca: Number(data.precioMarca) || 0,
           precioVenta: Number(data.precioVenta) || 0,
+          precioDistribuidor: data.precioDistribuidor,
+          descuento: data.descuento,
           stock: Number(data.stock) || 0,
           stockMin: Number(data.stockMin) || 0,
           caracteristicas: data.caracteristicas || '',
           fechaCreacion: todayISO(),
           _updatedAt: typeof data._updatedAt === 'number' ? data._updatedAt : Date.now()
         };
+        if(data.fechaRegistro) nuevo.fechaRegistro = data.fechaRegistro;
         store.productos.push(nuevo);
         touched = true;
       }
@@ -2466,7 +2529,7 @@ function stopStockListeners(){
 // Convierte el documento de producto de la nube (delgado) a un producto local
 // completo, para agregarlo al catálogo cuando llega desde otro dispositivo.
 function cloudProductoToDB(data){
-  return {
+  const r = {
     id: data.id,
     codigo: data.codigo || '',
     nombre: data.nombre || '',
@@ -2476,12 +2539,16 @@ function cloudProductoToDB(data){
     precioCompra: Number(data.precioCompra) || 0,
     precioMarca: Number(data.precioMarca) || 0,
     precioVenta: Number(data.precioVenta) || 0,
+    precioDistribuidor: data.precioDistribuidor,
+    descuento: data.descuento,
     stock: Number(data.stock) || 0,
     stockMin: Number(data.stockMin) || 0,
     caracteristicas: data.caracteristicas || '',
     fechaCreacion: todayISO(),
     _updatedAt: typeof data._updatedAt === 'number' ? data._updatedAt : Date.now()
   };
+  if(data.fechaRegistro) r.fechaRegistro = data.fechaRegistro;
+  return r;
 }
 
 // UNA vez por dispositivo, relee la colección completa de productos de un modo y
@@ -2618,20 +2685,110 @@ function todayISO(){
   return new Date().toISOString();
 }
 
+/* ---------- PRECIOS DE PRODUCTO EN MANUALES ----------
+   Estructura nueva: precioDistribuidor → descuento (%) → precioCompra → precioVenta.
+   (Ya no se usa "precio de marca" en Manuales; Eléctricas conserva su estructura.)
+   Los productos viejos que todavía no tienen estos campos se leen así: el antiguo
+   "precio de marca" pasa a ser el precio distribuidor y el descuento se deduce. */
+const r2n = n => Math.round(n * 100) / 100;
+function numONaN(v){
+  if(v === undefined || v === null || String(v).trim() === '') return NaN;
+  return parseFloat(String(v).replace(',', '.'));
+}
+function celdaVacia(v){ return v === undefined || v === null || String(v).trim() === ''; }
+function precioDistribuidorDe(p){
+  if(!p) return 0;
+  if(p.precioDistribuidor !== undefined && p.precioDistribuidor !== null && p.precioDistribuidor !== '' && !isNaN(Number(p.precioDistribuidor))) return Number(p.precioDistribuidor);
+  return Number(p.precioMarca) > 0 ? Number(p.precioMarca) : (Number(p.precioCompra) || 0);
+}
+function descuentoDe(p){
+  if(!p) return 0;
+  if(p.descuento !== undefined && p.descuento !== null && p.descuento !== '' && !isNaN(Number(p.descuento))) return Number(p.descuento);
+  const dist = precioDistribuidorDe(p), comp = Number(p.precioCompra) || 0;
+  if(dist > 0 && comp >= 0 && comp <= dist) return r2n((1 - comp / dist) * 100);
+  return 0;
+}
+// A partir de lo que haya (NaN = vacío) completa el tercero:
+//   distribuidor + descuento → compra;  distribuidor + compra → descuento.
+function resolverPrecios(dist, desc, compra){
+  if(!isNaN(compra)){
+    if(isNaN(dist)) dist = compra;
+    desc = dist > 0 ? Math.min(100, Math.max(0, r2n((1 - compra / dist) * 100))) : 0;
+  }else if(!isNaN(dist)){
+    desc = isNaN(desc) ? 0 : Math.min(100, Math.max(0, desc));
+    compra = r2n(dist * (1 - desc / 100));
+  }else{
+    dist = 0; desc = 0; compra = 0;
+  }
+  return { dist, desc, compra };
+}
+// Descuento de una celda de Excel: acepta 40, "40%" y 0,4 (Excel guarda 40% como 0,4).
+function parseDescuentoCelda(cel, dist, compra){
+  if(celdaVacia(cel)) return NaN;
+  const txt = String(cel).trim();
+  const d = parsePrecio(txt.replace('%', ''));
+  if(isNaN(d)) return NaN;
+  if(!txt.includes('%') && d > 0 && d <= 1){
+    if(dist > 0 && compra >= 0){
+      const der = (1 - compra / dist) * 100;
+      if(Math.abs(der - d * 100) < 0.5) return d * 100;
+    }else if(isNaN(compra) && d < 1){
+      return d * 100;
+    }
+  }
+  return d;
+}
+// Aplica los precios de un formulario (Productos / borradores) al producto, según el dueño.
+function aplicarPreciosProductoForm(p, data){
+  if(esProductoElectrico(p)){
+    p.precioCompra = parseFloat(data.precioCompra) || 0;
+    p.precioMarca = parseFloat(data.precioMarca) || 0;
+    p.precioVenta = parseFloat(data.precioVenta) || 0;
+    return;
+  }
+  const r = resolverPrecios(numONaN(data.precioDistribuidor), numONaN(data.descuento), numONaN(data.precioCompra));
+  p.precioDistribuidor = r.dist;
+  p.descuento = r.desc;
+  p.precioCompra = r.compra;
+  p.precioMarca = 0;
+  p.precioVenta = parseFloat(data.precioVenta) || 0;
+}
+
+/* ---------- FECHA Y HORA DE BOLIVIA (UTC-4, sin horario de verano) ----------
+   Todas las fechas de la app se calculan con la hora de Bolivia, sin importar la
+   zona horaria que tenga configurada la computadora o el celular. Así lo que se
+   registra el 5 de octubre aparece siempre como 5 de octubre. */
+const BOLIVIA_OFFSET_H = 4; // Bolivia = UTC-4
+function boliviaParts(date){
+  const t = new Date((date ? new Date(date) : new Date()).getTime() - BOLIVIA_OFFSET_H * 3600000);
+  return { y: t.getUTCFullYear(), m: t.getUTCMonth() + 1, d: t.getUTCDate(),
+           h: t.getUTCHours(), mi: t.getUTCMinutes(), s: t.getUTCSeconds() };
+}
+// "YYYY-MM-DD" del día de Bolivia al que pertenece ese instante (por defecto, ahora).
+function boliviaDateKey(date){
+  const p = boliviaParts(date);
+  return p.y + '-' + String(p.m).padStart(2,'0') + '-' + String(p.d).padStart(2,'0');
+}
+// Instante (ISO) de un día de Bolivia. Si no se da hora, usa la hora actual de Bolivia.
+// boliviaStamp('2026-10-05') → ese día con la hora de ahora; boliviaStamp('2026-10-05','14:30').
+function boliviaStamp(dayKey, horaStr){
+  const n = boliviaParts();
+  let y = n.y, m = n.m, d = n.d, hh = n.h, mi = n.mi, s = n.s;
+  if(/^\d{4}-\d{2}-\d{2}$/.test(dayKey || '')){
+    const p = dayKey.split('-').map(Number); y = p[0]; m = p[1]; d = p[2];
+  }
+  if(/^\d{2}:\d{2}$/.test(horaStr || '')){
+    const hm = horaStr.split(':').map(Number); hh = hm[0]; mi = hm[1]; s = 0;
+  }
+  return new Date(Date.UTC(y, m - 1, d, hh + BOLIVIA_OFFSET_H, mi, s)).toISOString();
+}
+
 // Construye un timestamp ISO del DÍA indicado (YYYY-MM-DD) usando la HORA local
 // ACTUAL. La fecha se guarda con hora para que, al mostrarla, coincida con el día
 // seleccionado en Ventas (los timestamps "solo fecha" tipo new Date('2026-09-07')
 // retroceden un día en zonas detrás de UTC, como Bolivia).
 function stampForDay(dayKey){
-  const now = new Date();
-  let y, m, d;
-  if(/^\d{4}-\d{2}-\d{2}$/.test(dayKey || '')){
-    const parts = dayKey.split('-');
-    y = +parts[0]; m = +parts[1]; d = +parts[2];
-  }else{
-    y = now.getFullYear(); m = now.getMonth()+1; d = now.getDate();
-  }
-  return new Date(y, m-1, d, now.getHours(), now.getMinutes(), now.getSeconds(), 0).toISOString();
+  return boliviaStamp(dayKey);
 }
 
 /* -------------------------------------------------------------------------
@@ -3072,9 +3229,7 @@ function saveProducto(data){
     p.nombre = data.nombre.trim();
     p.categoria = data.categoria.trim();
     p.codigoBarras = (data.codigoBarras||'').trim();
-    p.precioCompra = parseFloat(data.precioCompra) || 0;
-    p.precioMarca = parseFloat(data.precioMarca) || 0;
-    p.precioVenta = parseFloat(data.precioVenta) || 0;
+    aplicarPreciosProductoForm(p, data);
     touchProducto(p);
     saveDB();
     syncProductoDoc(p); // mantiene el documento del producto en la nube al día
@@ -3087,9 +3242,7 @@ function saveProducto(data){
       if(maestro) existing.marca = data.marca.trim();
       existing.categoria = data.categoria.trim();
       existing.codigoBarras = (data.codigoBarras||'').trim() || existing.codigoBarras;
-      existing.precioCompra = parseFloat(data.precioCompra) || 0;
-      existing.precioMarca = parseFloat(data.precioMarca) || 0;
-      existing.precioVenta = parseFloat(data.precioVenta) || 0;
+      aplicarPreciosProductoForm(existing, data);
       touchProducto(existing);
       saveDB();
       syncProductoDoc(existing);
@@ -3106,14 +3259,16 @@ function saveProducto(data){
       marca: data.marca.trim(),
       categoria: data.categoria.trim(),
       codigoBarras: (data.codigoBarras||'').trim(),
-      precioCompra: parseFloat(data.precioCompra) || 0,
-      precioMarca: parseFloat(data.precioMarca) || 0,
-      precioVenta: parseFloat(data.precioVenta) || 0,
+      precioCompra: 0,
+      precioMarca: 0,
+      precioVenta: 0,
       caracteristicas: '',
       stock: 0,
       fechaCreacion: todayISO(),
+      fechaRegistro: todayISO(), // producto nuevo: distintivo NUEVO por 1 mes
       _updatedAt: Date.now()
     };
+    aplicarPreciosProductoForm(p, data);
     db.productos.push(p);
     saveDB();
     syncProductoDoc(p);
@@ -3640,7 +3795,7 @@ function renderScanResultInto(elementId, codigo, context){
           ⚠️ No se encontró ningún producto con el código <strong>${escapeHtml(codigo)}</strong>.<br>
           <span style="font-size:12px;">No hay problema: se creará un producto nuevo al registrar la compra.</span>
           <div style="margin-top:10px;">
-            <button class="btn btn-primary btn-sm" id="btnCompraCreate_${elementId}">🛒 Registrar ingreso</button>
+            <button class="btn btn-primary btn-sm" id="btnCompraCreate_${elementId}">🛒 Registrar nuevo producto</button>
           </div>
         </div>`;
       const btnCreate = document.getElementById(`btnCompraCreate_${elementId}`);
@@ -3683,9 +3838,12 @@ function renderScanResultInto(elementId, codigo, context){
       <div class="sr-row"><span>Marca</span><strong>${escapeHtml(p.marca || '-')}</strong></div>
       <div class="sr-row"><span>Categoría</span><strong>${escapeHtml(p.categoria || '-')}</strong></div>
       ${stockRowHtml}
-      ${currentRole === 'guest' ? '' : `
+      ${currentRole === 'guest' ? '' : (esProductoElectrico(p) ? `
       <div class="sr-row"><span>Precio de compra</span><strong>${fmtMoney(p.precioCompra)}</strong></div>
-      <div class="sr-row"><span>Precio de marca</span><strong>${fmtMoney(p.precioMarca)}</strong></div>`}
+      <div class="sr-row"><span>Precio de marca</span><strong>${fmtMoney(p.precioMarca)}</strong></div>` : `
+      <div class="sr-row"><span>Precio distribuidor</span><strong>${fmtMoney(precioDistribuidorDe(p))}</strong></div>
+      <div class="sr-row"><span>Descuento</span><strong>${descuentoDe(p)}%</strong></div>
+      <div class="sr-row"><span>Precio de compra</span><strong>${fmtMoney(p.precioCompra)}</strong></div>`)}
       <div class="sr-row"><span>Precio de venta</span><strong>${fmtMoney(p.precioVenta)}</strong></div>`;
 
   const img = getImage(p.id);
@@ -3696,7 +3854,7 @@ function renderScanResultInto(elementId, codigo, context){
   resultDiv.innerHTML = `
     <div class="scan-result-card">
       <div class="sr-head">
-        <div class="sr-img-wrap">${imgHtml}</div>
+        <div class="sr-img-wrap">${imgHtml}${nuevoTag(p)}</div>
         <h4>📦 ${escapeHtml(p.nombre)}</h4>
       </div>
       <div class="sr-row"><span>Código</span><strong>${escapeHtml(p.codigo)}</strong></div>
@@ -4030,7 +4188,7 @@ function logInventarioHistorial(producto, cantidad, tipo){
 function fmtHistoryDate(iso){
   try{
     const d = new Date(iso);
-    return d.toLocaleString('es-BO', { day:'2-digit', month:'2-digit', year:'2-digit', hour:'2-digit', minute:'2-digit' });
+    return d.toLocaleString('es-BO', { timeZone:'America/La_Paz', day:'2-digit', month:'2-digit', year:'2-digit', hour:'2-digit', minute:'2-digit' });
   }catch(e){ return ''; }
 }
 
@@ -4038,7 +4196,7 @@ function fmtHistoryDate(iso){
 function fmtDateShort(iso){
   try{
     const d = new Date(iso);
-    return d.toLocaleDateString('es-BO', { day:'2-digit', month:'2-digit', year:'2-digit' });
+    return d.toLocaleDateString('es-BO', { timeZone:'America/La_Paz', day:'2-digit', month:'2-digit', year:'2-digit' });
   }catch(e){ return ''; }
 }
 
@@ -4055,7 +4213,7 @@ function renderHistorial(){
         : `<div class="venta-thumb venta-thumb-empty">🖼️</div>`;
       return `
       <tr>
-        <td class="venta-img-cell">${thumb}</td>
+        <td class="venta-img-cell">${thumb}${nuevoTag(p)}</td>
         <td><strong>${escapeHtml(h.codigo)}</strong></td>
         <td>${h.encontrado ? escapeHtml(h.nombre) : '-'}</td>
         <td>${h.encontrado ? '<span class="badge badge-success-soft">Encontrado</span>' : '<span class="badge badge-danger-soft">No encontrado</span>'}</td>
@@ -4077,7 +4235,7 @@ function renderHistorial(){
           : `<div class="venta-thumb venta-thumb-empty">🖼️</div>`;
         return `
         <tr>
-          <td class="venta-img-cell">${thumb}</td>
+          <td class="venta-img-cell">${thumb}${nuevoTag(p)}</td>
           <td><strong>${escapeHtml(h.codigo)}</strong></td>
           <td>${escapeHtml(h.nombre)}</td>
           <td>${h.cantidad > 0 ? '+' : ''}${h.cantidad}</td>
@@ -4132,7 +4290,7 @@ function openQrPersonaPicker(){
 let ventaDateFilter = 'hoy';
 
 function localDateKey(d){
-  return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
+  return boliviaDateKey(d); // día de Bolivia (UTC-4), no el de la zona del dispositivo
 }
 function ventaFechaKey(iso){
   // Las fechas "YYYY-MM-DD" (p.ej. la fecha con la que se guardan los gastos)
@@ -4143,9 +4301,7 @@ function ventaFechaKey(iso){
   try{ return localDateKey(new Date(iso)); }catch(e){ return ''; }
 }
 function dateKeyOffset(days){
-  const d = new Date();
-  d.setDate(d.getDate() - days);
-  return localDateKey(d);
+  return boliviaDateKey(new Date(Date.now() - days * 86400000));
 }
 function ventasFiltradas(){
   return db.ventas.filter(v => {
@@ -4959,8 +5115,8 @@ function renderVentas(){
     const p = getProductoByCodigo(v.codigo);
     const img = p ? getImage(p.id) : '';
     const thumbCell = img
-      ? `<td class="venta-img-cell"><img src="${img}" class="venta-thumb" alt="" loading="lazy" decoding="async"></td>`
-      : `<td class="venta-img-cell"><div class="venta-thumb venta-thumb-empty">🖼️</div></td>`;
+      ? `<td class="venta-img-cell"><img src="${img}" class="venta-thumb" alt="" loading="lazy" decoding="async">${nuevoTag(p)}</td>`
+      : `<td class="venta-img-cell"><div class="venta-thumb venta-thumb-empty">🖼️</div>${nuevoTag(p)}</td>`;
     return `
     <tr>
       <td class="venta-num">${idx + 1}</td>
@@ -5133,7 +5289,7 @@ function renderTopVentas(){
     return `
     <tr class="${top20 ? 'top-row' : ''}">
       <td>${top20 ? `<span class="top-star" title="Top ${pos} más vendido">⭐ ${pos}</span>` : pos}</td>
-      <td class="venta-img-cell">${thumb}</td>
+      <td class="venta-img-cell">${thumb}${nuevoTag(r.p)}</td>
       <td><strong>${escapeHtml(r.p.nombre)}</strong><br><small class="hint">${escapeHtml(r.p.codigo)}</small></td>
       <td><strong>${r.vendidos}</strong></td>
       <td>${r.p.stock}${bajo ? ' <span class="badge badge-danger-soft">Bajo</span>' : ''}</td>
@@ -5301,7 +5457,7 @@ function renderPedidos(){
     return `
     <tr class="${bajo ? 'pedido-bajo' : ''}">
       <td>${i + 1}</td>
-      <td class="venta-img-cell">${thumb}</td>
+      <td class="venta-img-cell">${thumb}${nuevoTag(p)}</td>
       <td>${p.marca ? escapeHtml(p.marca) : '-'}</td>
       <td><strong>${escapeHtml(p.nombre)}</strong><br><small class="hint">${escapeHtml(p.codigo)}</small></td>
       <td>${p.stock}${bajo ? ' <span class="badge badge-danger-soft">Bajo</span>' : ''}</td>
@@ -5322,7 +5478,7 @@ function exportPedidosCSV(){
     i + 1, p.marca || '', p.codigo, p.nombre,
     Number(p.stock)||0, Number(p.stockMin)||0, Number(pedidoCant(p))||0
   ]);
-  downloadXLSX(`stockferre_pedidos_${todayISO().slice(0,10)}.xlsx`, [{ name: 'Pedido', header, rows: data, types }]);
+  downloadXLSX(`stockferre_pedidos_${boliviaDateKey()}.xlsx`, [{ name: 'Pedido', header, rows: data, types }]);
   toast('Pedido exportado a Excel', 'success');
 }
 
@@ -5413,11 +5569,22 @@ function syncComprasChips(){
 
 // Agrupa los ingresos por código de producto. Si se pasa una lista (por
 // ejemplo ya filtrada por fecha), agrupa solo esos.
+// Los ingresos importados sin código quedan con "OTRO": para que productos
+// distintos NO se junten en un solo grupo, "OTRO" se agrupa además por nombre.
+function compraGrupoKey(c){
+  const cod = String(c.codigo || '').trim();
+  if(!cod || cod.toUpperCase() === 'OTRO') return 'OTRO · ' + String(c.nombre || '').trim();
+  return cod;
+}
+function compraCodigoVisible(key){
+  return String(key).startsWith('OTRO · ') ? 'OTRO' : key;
+}
 function comprasPorProducto(lista){
   const map = new Map();
   (lista || db.compras).forEach(c => {
-    if(!map.has(c.codigo)) map.set(c.codigo, []);
-    map.get(c.codigo).push(c);
+    const k = compraGrupoKey(c);
+    if(!map.has(k)) map.set(k, []);
+    map.get(k).push(c);
   });
   return map;
 }
@@ -5488,8 +5655,8 @@ function renderCompras(){
       : `<div class="venta-thumb venta-thumb-empty">🖼️</div>`;
     return `
     <tr data-compra-prod="${escapeHtml(e.codigo)}" style="cursor:pointer;" title="Ver historial de ingresos">
-      <td class="venta-img-cell">${thumb}</td>
-      <td><strong>${escapeHtml(e.codigo)}</strong></td>
+      <td class="venta-img-cell">${thumb}${nuevoTag(prod)}</td>
+      <td><strong>${escapeHtml(compraCodigoVisible(e.codigo))}</strong></td>
       <td>${escapeHtml(e.nombre)}</td>
       <td title="${e.ultimaObs ? escapeHtml(e.ultimaObs) : ''}">${e.ultimaObs ? escapeHtml(obsPreview(e.ultimaObs)) : '-'}</td>
       <td>${e.veces}</td>
@@ -5521,10 +5688,10 @@ function pintarBordeModal(modalId, color){
 }
 
 function openCompraHistorial(codigo){
-  const compras = db.compras.filter(c => c.codigo === codigo);
+  const compras = db.compras.filter(c => compraGrupoKey(c) === codigo);
   const p = getProductoByCodigo(codigo);
   const nombre = compras[0]?.nombre || (p ? p.nombre : codigo);
-  document.getElementById('histProdInfo').innerHTML = `📦 <strong>${escapeHtml(nombre)}</strong> · <span style="font-size:12px;">Código: ${escapeHtml(codigo)}</span>`;
+  document.getElementById('histProdInfo').innerHTML = `📦 <strong>${escapeHtml(nombre)}</strong> · <span style="font-size:12px;">Código: ${escapeHtml(compraCodigoVisible(codigo))}</span>`;
   const tbody = document.querySelector('#histComprasTable tbody');
   if(compras.length === 0){
     tbody.innerHTML = `<tr class="empty-row"><td colspan="6">Todavía no hay ingresos registrados para este producto.</td></tr>`;
@@ -5618,7 +5785,7 @@ function deleteCompra(id, mantenerInventario){
   // producto se quedó sin ingresos).
   const histModal = document.getElementById('modalCompraHistorial');
   if(histModal && histModal.classList.contains('open')){
-    if(db.compras.some(c => c.codigo === compra.codigo)) openCompraHistorial(compra.codigo);
+    if(db.compras.some(c => compraGrupoKey(c) === compraGrupoKey(compra))) openCompraHistorial(compraGrupoKey(compra));
     else closeAllModals();
   }
   toast('Ingreso eliminado', 'success');
@@ -5699,12 +5866,18 @@ function exportComprasCSV(){
     toast('No hay ingresos para exportar', 'error');
     return;
   }
-  const header = ['FECHA','CODIGO','PRODUCTO','PROVEEDOR','CANTIDAD','PRECIO UNITARIO','TOTAL','METODO DE PAGO','OBSERVACIONES'];
-  const types = ['text','text','text','text','number','number','number','text','text'];
+  const header = ['FECHA','CODIGO','PRODUCTO','PROVEEDOR','CANTIDAD','PRECIO DISTRIBUIDOR','DESCUENTO (%)','PRECIO DE COMPRA','TOTAL','METODO DE PAGO','OBSERVACIONES','MODO'];
+  const types = ['text','text','text','text','number','number','number','number','number','text','text','text'];
+  const modoTxt = MODO_LABELS[currentModo] || currentModo;
+  const tieneNum = v => v !== undefined && v !== null && v !== '' && !isNaN(Number(v));
   const rows = db.compras.map(c => [
-    c.fecha, c.codigo, c.nombre, c.proveedor || '', Number(c.cantidad)||0, Number(c.precioUnitario)||0, Number(c.total)||0, c.metodoPago, c.observaciones || ''
+    ventaFechaKey(c.fecha), c.codigo, c.nombre, c.proveedor || '', Number(c.cantidad)||0,
+    // Los ingresos viejos (antes del descuento) no tienen estos dos datos: se dejan en blanco.
+    tieneNum(c.precioDistribuidor) ? Number(c.precioDistribuidor) : '',
+    tieneNum(c.descuento) ? Number(c.descuento) : '',
+    Number(c.precioUnitario)||0, Number(c.total)||0, c.metodoPago, c.observaciones || '', modoTxt
   ]);
-  downloadXLSX(`stockferre_ingresos_${todayISO().slice(0,10)}.xlsx`, [{ name: 'Ingresos', header, rows, types }]);
+  downloadXLSX(`stockferre_ingresos_${boliviaDateKey()}.xlsx`, [{ name: 'Ingresos', header, rows, types }]);
   toast('Ingresos exportados a Excel', 'success');
 }
 
@@ -5717,14 +5890,36 @@ function exportComprasCSV(){
 // desde 1899-12-30): "8/8/2025" se guarda como 45876 y, sin convertir, la app
 // la mostraría como un número raro. También acepta texto "8/8/2025" (d/m/a,
 // el orden que se usa en Bolivia) y el timestamp ISO que exporta la app.
+// Texto de fecha para Excel: "YYYY-MM-DD HH:mm" en hora de Bolivia (sin la "Z" de UTC,
+// que en la noche mostraba el día siguiente). Las fechas de solo día pasan igual.
+function fmtExcelFecha(iso){
+  if(!iso) return '';
+  if(/^\d{4}-\d{2}-\d{2}$/.test(iso)) return iso;
+  const d = new Date(iso);
+  if(isNaN(d.getTime())) return String(iso);
+  const p = boliviaParts(d);
+  return boliviaDateKey(d) + ' ' + String(p.h).padStart(2,'0') + ':' + String(p.mi).padStart(2,'0');
+}
+// Fecha de una venta importada → instante exacto, leyendo la hora como hora de Bolivia.
+function fechaImportToStamp(raw){
+  const s = String(raw === undefined || raw === null ? '' : raw).trim();
+  if(!s) return todayISO();
+  const m = /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2})(:\d{2})?$/.exec(s);
+  if(m) return boliviaStamp(m[1], m[2]);
+  if(/^\d{4}-\d{2}-\d{2}T.*(Z|[+-]\d{2}:?\d{2})$/.test(s)) return s;
+  const k = fechaCeldaToISO(s);
+  return /^\d{4}-\d{2}-\d{2}$/.test(k) ? boliviaStamp(k) : todayISO();
+}
 function fechaCeldaToISO(raw){
-  const vacio = todayISO().slice(0,10);
+  const vacio = boliviaDateKey();
   if(raw === undefined || raw === null) return vacio;
   const s = String(raw).trim();
   if(!s) return vacio;
   // Ya es "YYYY-MM-DD" (solo fecha o timestamp con hora).
   if(/^\d{4}-\d{2}-\d{2}/.test(s)){
     if(/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+    // "2026-10-05 21:30": sin zona horaria = hora de Bolivia → el día es el mismo.
+    if(/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(:\d{2})?$/.test(s)) return s.slice(0,10);
     const d = new Date(s);
     return isNaN(d.getTime()) ? s.slice(0,10) : (localDateKey(d) || s.slice(0,10));
   }
@@ -5767,8 +5962,8 @@ function fmtCompraFecha(iso){
     return Number(p[2]) + '/' + Number(p[1]) + '/' + p[0];
   }
   try{
-    const d = new Date(iso);
-    return d.getDate() + '/' + (d.getMonth()+1) + '/' + d.getFullYear();
+    const p = boliviaParts(new Date(iso));
+    return p.d + '/' + p.m + '/' + p.y;
   }catch(e){ return ''; }
 }
 
@@ -5790,37 +5985,148 @@ function importComprasCSV(file){
         nombre: headers.findIndex(h => h.includes('PRODUCTO') || h.includes('DESCRIPCION')),
         proveedor: headers.indexOf('PROVEEDOR'),
         cantidad: headers.indexOf('CANTIDAD'),
+        // Las tres columnas del ingreso, cada una por su propio encabezado:
+        precioDistribuidor: headers.findIndex(h => h.includes('DISTRIBUIDOR')),
+        descuento: headers.findIndex(h => h.includes('DESCUENTO')),
+        precioCompra: headers.findIndex(h => h.includes('PRECIO') && h.includes('COMPRA') && !h.includes('DISTRIBUIDOR')),
+        // Archivos viejos: una sola columna "PRECIO UNITARIO" (= precio de compra).
         precioUnitario: headers.findIndex(h => h.includes('PRECIO') && h.includes('UNITARIO')),
         total: headers.indexOf('TOTAL'),
         metodoPago: headers.findIndex(h => h.includes('PAGO')),
-        observaciones: headers.findIndex(h => h.includes('OBSERVACION') || h.includes('NOTA'))
+        observaciones: headers.findIndex(h => h.includes('OBSERVACION') || h.includes('NOTA')),
+        modo: headers.indexOf('MODO'),
+        // Opcionales, para crear productos nuevos con más datos
+        marca: headers.indexOf('MARCA'),
+        precioVenta: headers.findIndex(h => h.includes('PRECIO') && h.includes('VENTA'))
       };
-      if(idx.codigo === -1 || idx.nombre === -1 || idx.total === -1){
-        toast('El archivo debe tener al menos columnas CODIGO, PRODUCTO y TOTAL', 'error');
+      const hayPrecio = idx.total > -1 || idx.precioCompra > -1 || idx.precioUnitario > -1 || idx.precioDistribuidor > -1;
+      if(idx.codigo === -1 || idx.nombre === -1 || !hayPrecio){
+        toast('El archivo debe tener al menos columnas CODIGO, PRODUCTO y TOTAL (o PRECIO DE COMPRA)', 'error');
         return;
       }
-      let importadas = 0;
+      const vacia = v => v === undefined || v === null || String(v).trim() === '';
+      const r2 = n => Math.round(n * 100) / 100;
+      const modoDeTexto = t => {
+        const s = normalizeHeader(t);
+        if(!s) return '';
+        if(s.includes('MANUAL')) return 'manual';
+        if(s.includes('ELECTRIC')) return 'electrico';
+        if(s.includes('INVITADO')) return 'invitado';
+        return '';
+      };
+      // ¿Es un ingreso REAL (suma stock y crea los productos que falten) o solo
+      // restaurar el historial de un respaldo (no toca el stock)?
+      const sumarStock = confirm(
+        'IMPORTAR INGRESOS\n\n' +
+        'Aceptar → ingreso real: suma la cantidad al STOCK y crea como productos NUEVOS los que no existan.\n\n' +
+        'Cancelar → solo guarda el historial de ingresos (respaldo): no cambia el stock ni crea productos.'
+      );
+      let importadas = 0, otroModo = 0, creados = 0, sinCodigo = 0;
       const nuevasCompras = [];
+      const stockPorProducto = new Map(); // id -> { p, delta, nuevo }
       for(let i = 1; i < rows.length; i++){
         const r = rows[i];
         const nombre = String(r[idx.nombre] || '').trim();
         if(!nombre) continue;
+
+        // Un ingreso exportado desde OTRO dueño (Manuales/Eléctricas) no se
+        // mezcla aquí: la columna MODO lo identifica y esa fila se omite.
+        if(idx.modo > -1){
+          const mFila = modoDeTexto(r[idx.modo]);
+          if(mFila && mFila !== currentModo){ otroModo++; continue; }
+        }
+
         const cantidad = idx.cantidad > -1 ? (parseFloat(String(r[idx.cantidad]).replace(',','.')) || 1) : 1;
-        const total = parsePrecio(r[idx.total]);
-        const precioUnitario = idx.precioUnitario > -1 ? parsePrecio(r[idx.precioUnitario]) : (cantidad > 0 ? total / cantidad : 0);
-        const codigo = String(r[idx.codigo] || '').trim() || 'OTRO';
+
+        // --- Precio distribuidor / descuento / precio de compra ---
+        const celDist = idx.precioDistribuidor > -1 ? r[idx.precioDistribuidor] : undefined;
+        const celDesc = idx.descuento > -1 ? r[idx.descuento] : undefined;
+        const celCompra = idx.precioCompra > -1 ? r[idx.precioCompra] : (idx.precioUnitario > -1 ? r[idx.precioUnitario] : undefined);
+        const celTotal = idx.total > -1 ? r[idx.total] : undefined;
+        let dist = vacia(celDist) ? NaN : parsePrecio(celDist);
+        let compra = vacia(celCompra) ? NaN : parsePrecio(celCompra);
+        let desc = NaN;
+        if(!vacia(celDesc)){
+          const txt = String(celDesc).trim();
+          desc = parsePrecio(txt.replace('%', ''));
+          // Excel guarda 40% como 0,4: si cuadra con los precios, se pasa a 40.
+          if(!txt.includes('%') && desc > 0 && desc <= 1 && dist > 0 && compra >= 0){
+            const derivado = (1 - compra / dist) * 100;
+            if(Math.abs(derivado - desc * 100) < 0.5) desc = desc * 100;
+          }else if(!txt.includes('%') && desc > 0 && desc < 1 && isNaN(compra)){
+            desc = desc * 100; // sin precio de compra para comprobar: una fracción (0,25) es un porcentaje de Excel (25%)
+          }
+        }
+        if(!isNaN(dist) && !isNaN(desc) && isNaN(compra)){
+          compra = r2(dist * (1 - Math.min(Math.max(desc, 0), 100) / 100));   // distribuidor + descuento → compra
+        }else if(!isNaN(dist) && !isNaN(compra) && isNaN(desc)){
+          desc = dist > 0 ? r2((1 - compra / dist) * 100) : 0;                 // distribuidor + compra → descuento
+        }else if(isNaN(dist) && !isNaN(compra)){
+          dist = compra; if(isNaN(desc)) desc = 0;                             // archivo viejo: solo precio de compra
+        }else if(!isNaN(dist) && isNaN(compra) && isNaN(desc)){
+          compra = dist; desc = 0;                                             // solo distribuidor
+        }
+        let total = vacia(celTotal) ? NaN : parsePrecio(celTotal);
+        if(isNaN(compra)){
+          // Sin ninguna columna de precio: se saca del total.
+          compra = !isNaN(total) && cantidad > 0 ? r2(total / cantidad) : 0;
+          if(isNaN(dist)) dist = compra;
+          if(isNaN(desc)) desc = 0;
+        }
+        if(isNaN(total)) total = r2(compra * cantidad);
+        if(isNaN(desc)) desc = 0;
+        if(desc < 0) desc = 0;
+        if(desc > 100) desc = 100;
+
+        let codigo = String(r[idx.codigo] || '').trim();
+        let p = codigo ? getProductoByCodigo(codigo) : null;
+        // Sin código: solo se enlaza si el NOMBRE coincide exacto con un producto de este dueño.
+        if(!codigo){
+          p = db.productos.find(x => normalize(x.nombre) === normalize(nombre)) || null;
+        }
+        let esProductoNuevo = false;
+        if(!p && sumarStock){
+          // Producto que no existe en ESTE dueño (Manuales o Eléctricas): se crea
+          // como producto nuevo, con su fecha de primer registro.
+          if(!codigo){ sinCodigo++; continue; }
+          p = {
+            id: uid('producto'),
+            codigo,
+            nombre,
+            marca: idx.marca > -1 ? String(r[idx.marca] || '').trim() : '',
+            categoria: '',
+            codigoBarras: '',
+            precioCompra: compra,
+            precioDistribuidor: dist,
+            descuento: desc,
+            precioMarca: 0,
+            precioVenta: idx.precioVenta > -1 ? parsePrecio(r[idx.precioVenta]) : 0,
+            stock: 0,
+            stockMin: 0,
+            caracteristicas: '',
+            fechaCreacion: todayISO(),
+            fechaRegistro: todayISO(),
+            _updatedAt: Date.now()
+          };
+          db.productos.push(p);
+          syncProductoDoc(p, undefined, { crear: true });
+          esProductoNuevo = true;
+          creados++;
+        }
+        codigo = p ? p.codigo : (codigo || 'OTRO');
         const proveedor = idx.proveedor > -1 ? String(r[idx.proveedor] || '').trim() : '';
         const observaciones = idx.observaciones > -1 ? String(r[idx.observaciones] || '').trim() : '';
-        const p = getProductoByCodigo(codigo);
         const compraNueva = {
           id: uid('compra'),
           codigo,
           nombre,
           cantidad,
-          precioUnitario,
+          precioUnitario: compra,          // PRECIO DE COMPRA
+          precioDistribuidor: dist,        // PRECIO DISTRIBUIDOR
+          descuento: desc,                 // DESCUENTO (%)
           total,
           metodoPago: idx.metodoPago > -1 ? (String(r[idx.metodoPago]||'').toLowerCase().includes('qr') ? 'qr' : 'efectivo') : 'efectivo',
-          fecha: idx.fecha > -1 ? fechaCeldaToISO(r[idx.fecha]) : todayISO().slice(0,10),
+          fecha: idx.fecha > -1 ? fechaCeldaToISO(r[idx.fecha]) : boliviaDateKey(),
           proveedor,
           observaciones,
           productoId: p ? p.id : null
@@ -5828,12 +6134,33 @@ function importComprasCSV(file){
         db.compras.push(compraNueva);
         nuevasCompras.push(compraNueva);
         importadas++;
+        if(sumarStock && p){
+          // Suma al stock (producto nuevo o existente). El distintivo NUEVO solo lo
+          // lleva el producto recién creado; un existente nunca se vuelve a marcar.
+          p.stock = (Number(p.stock) || 0) + cantidad;
+          touchProducto(p);
+          logInventarioHistorial(p, cantidad, 'compra');
+          const e = stockPorProducto.get(p.id) || { p, delta: 0, nuevo: false };
+          e.delta += cantidad;
+          e.nuevo = e.nuevo || esProductoNuevo;
+          stockPorProducto.set(p.id, e);
+        }
       }
       db.compras.sort((a,b)=> new Date(b.fecha) - new Date(a.fecha));
       syncCompraDocs(nuevasCompras, currentModo); // cada ingreso, a su documento en la nube
       saveDB();
+      // Stock en la nube: incremento atómico por producto (no pisa a otros dispositivos).
+      stockPorProducto.forEach(e => applyStockDelta(e.p, e.delta, undefined, { crear: e.nuevo }));
+      updateSidebarProductCount();
       renderCompras();
-      toast(`Ingresos importados: ${importadas} (no se modificó el stock)`, 'success');
+      renderProductos();
+      renderInventario();
+      let msg = sumarStock
+        ? `Ingresos importados: ${importadas} · productos nuevos creados: ${creados} · stock actualizado`
+        : `Ingresos importados: ${importadas} (solo historial: no se modificó el stock)`;
+      if(sinCodigo) msg += ` · ${sinCodigo} fila(s) omitida(s) por no tener código`;
+      if(otroModo) msg += ` · ${otroModo} fila(s) omitida(s) por ser de otro dueño`;
+      toast(msg, (otroModo || sinCodigo) && !importadas ? 'warning' : 'success');
     }catch(err){
       console.error(err);
       toast('No se pudo leer el archivo Excel/CSV. Verifica el formato.', 'error');
@@ -5887,12 +6214,12 @@ function exportFinanzasCSV(){
   const header = ['FECHA','CONCEPTO','MONTO'];
   const types = ['text','text','number'];
   const rows = [
-    [todayISO(), 'Capital en productos (stock x precio de compra)', capital],
-    [todayISO(), 'Efectivo actual', caja],
-    [todayISO(), 'Deuda pendiente (deudas - pagos)', deudaPendienteTotal()],
-    [todayISO(), 'Patrimonio total (productos + efectivo)', capital + caja]
+    [fmtExcelFecha(todayISO()), 'Capital en productos (stock x precio de compra)', capital],
+    [fmtExcelFecha(todayISO()), 'Efectivo actual', caja],
+    [fmtExcelFecha(todayISO()), 'Deuda pendiente (deudas - pagos)', deudaPendienteTotal()],
+    [fmtExcelFecha(todayISO()), 'Patrimonio total (productos + efectivo)', capital + caja]
   ];
-  downloadXLSX(`stockferre_finanzas_${todayISO().slice(0,10)}.xlsx`, [{ name: 'Finanzas', header, rows, types }]);
+  downloadXLSX(`stockferre_finanzas_${boliviaDateKey()}.xlsx`, [{ name: 'Finanzas', header, rows, types }]);
   toast('Estado financiero exportado a Excel', 'success');
 }
 
@@ -6062,8 +6389,8 @@ function exportRetirosCSV(){
   if(list.length === 0){ toast('No hay pagos para exportar', 'error'); return; }
   const header = ['FECHA','MONTO','MARCA','OBSERVACION'];
   const types = ['text','number','text','text'];
-  const rows = list.map(r => [r.fecha, Number(r.monto)||0, retiroMarca(r), r.obs || '']);
-  downloadXLSX(`stockferre_pagos_${todayISO().slice(0,10)}.xlsx`, [{ name: 'Pagos', header, rows, types }]);
+  const rows = list.map(r => [fmtExcelFecha(r.fecha), Number(r.monto)||0, retiroMarca(r), r.obs || '']);
+  downloadXLSX(`stockferre_pagos_${boliviaDateKey()}.xlsx`, [{ name: 'Pagos', header, rows, types }]);
   toast('Pagos exportados a Excel', 'success');
 }
 
@@ -6289,8 +6616,8 @@ function exportDeudasCSV(){
   if(list.length === 0){ toast('No hay deudas para exportar', 'error'); return; }
   const header = ['FECHA','MARCA','MONTO','VENCIMIENTO','OBSERVACION'];
   const types = ['text','text','number','text','text'];
-  const rows = list.map(d => [d.fecha, d.marca || '', Number(d.monto)||0, d.vencimiento || '', d.obs || '']);
-  downloadXLSX(`stockferre_deudas_${todayISO().slice(0,10)}.xlsx`, [{ name: 'Deudas', header, rows, types }]);
+  const rows = list.map(d => [fmtExcelFecha(d.fecha), d.marca || '', Number(d.monto)||0, d.vencimiento || '', d.obs || '']);
+  downloadXLSX(`stockferre_deudas_${boliviaDateKey()}.xlsx`, [{ name: 'Deudas', header, rows, types }]);
   toast('Deudas exportadas a Excel', 'success');
 }
 
@@ -6308,25 +6635,16 @@ function setLastGastoFecha(dateStr){
   try{ localStorage.setItem(GASTO_FECHA_KEY + currentModo, dateStr || ''); }catch(e){}
 }
 function horaNow(){
-  const d = new Date();
-  return String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0');
+  const p = boliviaParts();
+  return String(p.h).padStart(2,'0') + ':' + String(p.mi).padStart(2,'0');
 }
 function horaKey(d){
-  return String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0');
+  const p = boliviaParts(d);
+  return String(p.h).padStart(2,'0') + ':' + String(p.mi).padStart(2,'0');
 }
 // Combina la fecha y la hora elegidas en un ISO que conserva ese momento local.
 function gastoFechaFromInput(dateStr, horaStr){
-  const now = new Date();
-  const d = new Date(now.getFullYear(), now.getMonth(), now.getDate(), now.getHours(), now.getMinutes(), now.getSeconds());
-  if(/^\d{4}-\d{2}-\d{2}$/.test(dateStr)){
-    const parts = dateStr.split('-').map(Number);
-    d.setFullYear(parts[0], parts[1]-1, parts[2]);
-  }
-  if(/^\d{2}:\d{2}$/.test(horaStr)){
-    const hm = horaStr.split(':').map(Number);
-    d.setHours(hm[0], hm[1], 0, 0);
-  }
-  return new Date(d.getTime() - d.getTimezoneOffset()*60000).toISOString();
+  return boliviaStamp(dateStr, horaStr);
 }
 function fmtFechaBonita(key){
   try{
@@ -6486,7 +6804,7 @@ function renderInventario(){
       : `<div class="venta-thumb venta-thumb-empty">🖼️</div>`;
     return `
     <tr>
-      <td class="venta-img-cell">${thumb}</td>
+      <td class="venta-img-cell">${thumb}${nuevoTag(p)}</td>
       <td><strong>${escapeHtml(p.codigo)}</strong></td>
       <td>${escapeHtml(p.codigoBarras || '-')}</td>
       <td>${escapeHtml(p.nombre)}</td>
@@ -6589,8 +6907,8 @@ function openInventarioCantidadBox(producto, codigo){
   if(imgWrap){
     const im = getImage(producto.id);
     imgWrap.innerHTML = im
-      ? `<img src="${im}" class="sr-img" alt="" data-img-product="${producto.id}" decoding="async">`
-      : `<div class="sr-img sr-img-empty" data-img-product="${producto.id}">🖼️</div>`;
+      ? `<img src="${im}" class="sr-img" alt="" data-img-product="${producto.id}" decoding="async">${nuevoTag(producto)}`
+      : `<div class="sr-img sr-img-empty" data-img-product="${producto.id}">🖼️</div>${nuevoTag(producto)}`;
   }
   document.getElementById('invCodigo').value = codigo;
   document.getElementById('invCodigoDisplay').textContent = codigo;
@@ -6665,32 +6983,115 @@ function handleCompraScan(codigo){
 
 // Abre el recuadro "Registrar compra". Si el producto NO existe (producto==null)
 // se creará al guardar; en ese caso siempre se guardan marca y precio de venta.
-function openCompraDetalleForm(producto, codigo){
+// Un SOLO formulario para dos usos:
+//   • 'ingreso' → 🛒 Registrar ingreso de un producto que ya existe.
+//   • 'nuevo'   → 🛒 Registrar nuevo producto: pide además código, marca y precio
+//                 de venta, crea el producto en la base y registra su primer ingreso.
+// Mismos campos y mismo cálculo (distribuidor / descuento / compra / total).
+let compraFormModo = 'ingreso';
+let compraFormOrigen = 'scan';        // 'scan' = viene del escáner/lista (sigue escaneando); 'boton' = botón + Nuevo producto
+
+function openNuevoProductoForm(codigo){
+  openCompraDetalleForm(null, codigo || '', { origen: 'boton' });
+}
+
+function applyCompraFormModo(){
+  const nuevo = compraFormModo === 'nuevo';
+  document.getElementById('compraModalTitle').textContent = nuevo ? '🛒 Registrar nuevo producto' : '🛒 Registrar ingreso';
+  document.getElementById('btnCompraSubmit').textContent = nuevo ? 'Registrar nuevo producto' : 'Registrar ingreso';
+  document.getElementById('cCodigo').readOnly = !nuevo;
+  // Marca y precio de venta están SIEMPRE en el formulario (sin casillas que activar).
+  // La marca es obligatoria solo al crear un producto; en uno existente solo la PC
+  // principal puede cambiarla.
+  document.getElementById('cMarcaLbl').textContent = nuevo ? 'Marca *' : 'Marca';
+  document.getElementById('cMarca').readOnly = !nuevo && !esMaestro();
+}
+
+function openCompraDetalleForm(producto, codigo, opts){
   const esNuevo = !producto;
-  document.getElementById('cCodigo').value = codigo;
+  compraFormModo = esNuevo ? 'nuevo' : 'ingreso';
+  compraFormOrigen = (opts && opts.origen) || 'scan';
+  compraEstadoPrecios.ultimo = 'descuento';
+  document.getElementById('cCodigo').value = codigo || '';
   document.getElementById('cNombreInput').value = producto ? producto.nombre : '';
   document.getElementById('cNombreDisplay').textContent = producto ? producto.nombre : 'Producto nuevo (se creará al guardar)';
   document.getElementById('cCantidad').value = 1;
   // El precio del distribuidor arranca con el último precio de compra conocido
   // y sin descuento; el precio de compra se calcula solo.
-  document.getElementById('cPrecioDistribuidor').value = producto ? (producto.precioCompra || '') : '';
-  document.getElementById('cDescuento').value = '';
+  // Al ingresar un producto que ya existe, arranca con su precio distribuidor y su
+  // descuento actuales; el precio de compra se calcula solo.
+  document.getElementById('cPrecioDistribuidor').value = producto ? (precioDistribuidorDe(producto) || '') : '';
+  document.getElementById('cDescuento').value = producto ? (descuentoDe(producto) || '') : '';
   document.getElementById('cProveedor').value = getLastCompraProveedor();
   document.getElementById('cObservaciones').value = '';
   document.getElementById('cFecha').value = getLastCompraFecha();
   document.getElementById('cMarca').value = producto ? (producto.marca || '') : '';
   document.getElementById('cPrecioVenta').value = producto ? (producto.precioVenta || '') : '';
-  document.getElementById('cActualizarDatos').checked = false;
-  // Producto nuevo → la casilla no hace falta: siempre se guardan los datos.
-  document.getElementById('compraUpdateToggle').style.display = esNuevo ? 'none' : 'flex';
-  document.getElementById('compraUpdateFields').style.display = esNuevo ? 'grid' : 'none';
+  applyCompraFormModo();
+  recalcCompraPrecios('distribuidor');
   recalcCompraTotal();
   openModal('modalCompraDetalle');
+  if(esNuevo) setTimeout(()=>{ const c = document.getElementById('cCodigo'); if(c && !c.value) c.focus(); }, 80);
 }
 
-// Precio de compra = precio distribuidor − (precio distribuidor × descuento / 100)
-// Ej.: 100 Bs con 40% de descuento → 60 Bs.
+// Cálculo en los DOS sentidos, según lo que vayas escribiendo:
+//   • precio distribuidor + descuento      → precio de compra
+//   • precio distribuidor + precio de compra → descuento (%)
+// Ej.: 100 Bs con 40% → 60 Bs;  100 Bs con compra 60 Bs → 40%.
+// fuente = el campo que acaba de cambiar ('distribuidor' | 'descuento' | 'compra').
+const compraEstadoPrecios = { ultimo: 'descuento' };
+const estadoPreciosProducto = { ultimo: 'descuento' };
+const estadoPreciosBorrador = { ultimo: 'descuento' };
+function calcPreciosBidireccional(elDist, elDesc, elComp, estado, fuente){
+  if(!elDist || !elDesc || !elComp) return;
+  if(fuente === 'descuento') estado.ultimo = 'descuento';
+  if(fuente === 'compra') estado.ultimo = 'compra';
+  const dist = parseFloat(elDist.value);
+  const hayDist = !isNaN(dist) && dist >= 0;
+  const compTxt = elComp.value.trim();
+  const descTxt = elDesc.value.trim();
+  if(fuente === 'compra' && compTxt === ''){ elDesc.value = ''; return; } // borró el precio de compra: no se rellena solo
+  const desdeCompra = estado.ultimo === 'compra' && compTxt !== '';
+  if(desdeCompra){
+    const comp = parseFloat(compTxt);
+    if(hayDist && dist > 0 && !isNaN(comp)){
+      let d = (1 - comp / dist) * 100;
+      if(d < 0) d = 0;      // compra mayor al distribuidor: se valida al guardar
+      if(d > 100) d = 100;
+      elDesc.value = String(r2n(d));
+    }else if(!hayDist){
+      elDesc.value = '';
+    }
+  }else{
+    if(hayDist){
+      let d = parseFloat(descTxt);
+      if(isNaN(d) || d < 0) d = 0;
+      if(d > 100) d = 100;
+      elComp.value = r2n(dist * (1 - d / 100)).toFixed(2);
+    }else if(fuente !== 'compra'){
+      elComp.value = '';
+    }
+  }
+}
+// Cálculo en los DOS sentidos, según lo que vayas escribiendo:
+//   • precio distribuidor + descuento        → precio de compra
+//   • precio distribuidor + precio de compra → descuento (%)
+function recalcCompraPrecios(fuente){
+  calcPreciosBidireccional(document.getElementById('cPrecioDistribuidor'), document.getElementById('cDescuento'),
+    document.getElementById('cPrecioCompra'), compraEstadoPrecios, fuente);
+}
+function bindPreciosBidireccional(idDist, idDesc, idComp, estado){
+  const eD = document.getElementById(idDist), eS = document.getElementById(idDesc), eC = document.getElementById(idComp);
+  if(!eD || !eS || !eC) return;
+  eD.addEventListener('input', ()=> calcPreciosBidireccional(eD, eS, eC, estado, 'distribuidor'));
+  eS.addEventListener('input', ()=> calcPreciosBidireccional(eD, eS, eC, estado, 'descuento'));
+  eC.addEventListener('input', ()=> calcPreciosBidireccional(eD, eS, eC, estado, 'compra'));
+}
+
+// Precio de compra final del formulario (ya con el descuento aplicado).
 function calcPrecioCompra(){
+  const comp = parseFloat(document.getElementById('cPrecioCompra').value);
+  if(!isNaN(comp)) return comp;
   const dist = parseFloat(document.getElementById('cPrecioDistribuidor').value);
   let desc = parseFloat(document.getElementById('cDescuento').value);
   if(isNaN(dist)) return NaN;
@@ -6699,9 +7100,9 @@ function calcPrecioCompra(){
   return Math.round(dist * (1 - desc / 100) * 100) / 100;
 }
 
+// Total = cantidad × precio de compra.
 function recalcCompraTotal(){
   const calc = calcPrecioCompra();
-  document.getElementById('cPrecioCompra').value = isNaN(calc) ? '' : calc.toFixed(2);
   const cant = parseFloat(document.getElementById('cCantidad').value) || 0;
   const pre = isNaN(calc) ? 0 : calc;
   document.getElementById('cTotalDisplay').value = (cant * pre).toFixed(2);
@@ -6712,13 +7113,7 @@ function recalcCompraTotal(){
 // igual que lo hacen las ventas con todayISO(). Si no hay fecha, usa ahora.
 function compraFechaFromInput(dateStr){
   if(!dateStr) return todayISO();
-  const now = new Date();
-  const d = new Date(now.getFullYear(), now.getMonth(), now.getDate(), now.getHours(), now.getMinutes(), now.getSeconds());
-  if(/^\d{4}-\d{2}-\d{2}$/.test(dateStr)){
-    const parts = dateStr.split('-').map(Number);
-    d.setFullYear(parts[0], parts[1] - 1, parts[2]);
-  }
-  return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString();
+  return boliviaStamp(dateStr);
 }
 
 // La fecha de compra elegida se recuerda por modo (este dispositivo) y se
@@ -6727,12 +7122,15 @@ function compraFechaFromInput(dateStr){
 const COMPRA_FECHA_KEY = 'stockferre_compra_fecha_v1_';
 function getLastCompraFecha(){
   try{
-    const val = localStorage.getItem(COMPRA_FECHA_KEY + currentModo);
-    return /^\d{4}-\d{2}-\d{2}$/.test(val) ? val : dateKeyOffset(0);
+    const raw = localStorage.getItem(COMPRA_FECHA_KEY + currentModo) || '';
+    const partes = raw.split('|');
+    // La fecha recordada solo vale el MISMO día en que se eligió: al día siguiente
+    // el formulario vuelve a proponer "hoy" (así no se registra con la fecha de ayer).
+    return (/^\d{4}-\d{2}-\d{2}$/.test(partes[0]) && partes[1] === dateKeyOffset(0)) ? partes[0] : dateKeyOffset(0);
   }catch(e){ return dateKeyOffset(0); }
 }
 function setLastCompraFecha(dateStr){
-  try{ localStorage.setItem(COMPRA_FECHA_KEY + currentModo, dateStr || ''); }catch(e){}
+  try{ localStorage.setItem(COMPRA_FECHA_KEY + currentModo, (dateStr || '') + '|' + dateKeyOffset(0)); }catch(e){}
 }
 
 // El último proveedor usado se recuerda por modo (como la fecha) para agilizar
@@ -6750,21 +7148,40 @@ function handleCompraSubmit(e){
   const codigo = document.getElementById('cCodigo').value.trim();
   const nombre = document.getElementById('cNombreInput').value.trim();
   const cantidad = parseFloat(document.getElementById('cCantidad').value);
-  const precioDistribuidor = parseFloat(document.getElementById('cPrecioDistribuidor').value);
-  const descuentoRaw = parseFloat(document.getElementById('cDescuento').value);
-  const descuento = isNaN(descuentoRaw) ? 0 : descuentoRaw;
   const precioCompra = calcPrecioCompra();
+  let precioDistribuidor = parseFloat(document.getElementById('cPrecioDistribuidor').value);
+  // Si solo se escribió el precio de compra, el distribuidor queda igual (sin descuento).
+  if(isNaN(precioDistribuidor) && !isNaN(precioCompra)) precioDistribuidor = precioCompra;
+  const descuentoRaw = parseFloat(document.getElementById('cDescuento').value);
+  let descuento = isNaN(descuentoRaw) ? 0 : descuentoRaw;
+  if(!isNaN(precioDistribuidor) && precioDistribuidor > 0 && !isNaN(precioCompra)){
+    // Siempre consistente: descuento = lo que realmente se descontó.
+    descuento = Math.round((1 - precioCompra / precioDistribuidor) * 10000) / 100;
+    if(descuento < 0) descuento = 0;
+  }
+  const esFormNuevo = compraFormModo === 'nuevo';
 
   if(!codigo || !nombre){
     toast('Ingresa el código y la descripción', 'error');
     return;
+  }
+  if(esFormNuevo){
+    const existente = getProductoByCodigo(codigo);
+    if(existente){
+      toast(`El código "${codigo}" ya existe (${existente.nombre}). Para sumarle stock usa 🛒 Nuevo ingreso y búscalo en la lista.`, 'error');
+      return;
+    }
+    if(!document.getElementById('cMarca').value.trim()){
+      toast('Ingresa la marca del producto nuevo', 'error');
+      return;
+    }
   }
   if(!cantidad || cantidad <= 0){
     toast('Ingresa una cantidad válida', 'error');
     return;
   }
   if(isNaN(precioDistribuidor) || precioDistribuidor < 0){
-    toast('Ingresa un precio de distribuidor válido', 'error');
+    toast('Ingresa el precio del distribuidor o el precio de compra', 'error');
     return;
   }
   if(descuento < 0 || descuento > 100){
@@ -6775,18 +7192,24 @@ function handleCompraSubmit(e){
     toast('Ingresa un precio de compra válido', 'error');
     return;
   }
+  if(precioCompra > precioDistribuidor + 0.005){
+    toast('El precio de compra no puede ser mayor al precio del distribuidor', 'error');
+    return;
+  }
 
-  const actualizar = document.getElementById('cActualizarDatos').checked;
   const marca = document.getElementById('cMarca').value.trim();
   const precioVenta = parseFloat(document.getElementById('cPrecioVenta').value);
 
+  if(currentRole === 'guest'){
+    toast('Los invitados no pueden registrar ingresos', 'error');
+    return;
+  }
+  // Cualquier dueño (cualquier dispositivo) puede registrar ingresos de
+  // productos existentes o NUEVOS. Si el código no existe en ESTE modo
+  // (Manuales o Eléctricas), el producto se crea solo, con su fecha de primer registro.
   let p = getProductoByCodigo(codigo);
   const esNuevo = !p;
   if(esNuevo){
-    if(!esMaestro()){
-      toast('"' + codigo + '" no está en el catálogo: solo la PC principal crea productos. Regístralo en "📥 Productos nuevos".', 'error');
-      return;
-    }
     p = {
       id: uid('producto'),
       codigo,
@@ -6795,26 +7218,31 @@ function handleCompraSubmit(e){
       categoria: '',
       codigoBarras: '',
       precioCompra,
+      precioDistribuidor,
+      descuento,
       precioMarca: 0,
       precioVenta: !isNaN(precioVenta) && precioVenta >= 0 ? precioVenta : 0,
       stock: 0,
       fechaCreacion: todayISO(),
+      fechaRegistro: todayISO(), // primer registro: de aquí cuenta el mes del distintivo NUEVO
       _updatedAt: Date.now()
     };
     db.productos.push(p);
-    syncProductoDoc(p); // el producto nuevo también tiene documento en la nube
+    syncProductoDoc(p, undefined, { crear: true }); // el producto nuevo también tiene documento en la nube
   }
 
   p.stock = (p.stock || 0) + cantidad;
 
-  // Opcional: actualiza los datos del producto (marca y precios). Las ventas
-  // ya registradas guardan su propio precio, así que NO cambian.
-  if(esNuevo || actualizar){
-    if(marca && esMaestro()) p.marca = marca;
-    p.precioCompra = precioCompra;
-    if(!isNaN(precioVenta) && precioVenta >= 0) p.precioVenta = precioVenta;
-    if(!esNuevo) syncProductoDoc(p); // datos actualizados también en la nube
-  }
+  // Los datos del formulario se aplican al producto: marca (solo la PC principal en
+  // uno existente), precio distribuidor, descuento, precio de compra y precio de
+  // venta (si lo escribiste). Las ventas ya registradas guardan su propio precio.
+  if(marca && (esNuevo || esMaestro())) p.marca = marca;
+  p.precioDistribuidor = precioDistribuidor;
+  p.descuento = descuento;
+  p.precioCompra = precioCompra;
+  if(!esProductoElectrico(p)) p.precioMarca = 0; // Manuales ya no usan "precio de marca"
+  if(!isNaN(precioVenta) && precioVenta >= 0) p.precioVenta = precioVenta;
+  if(!esNuevo) syncProductoDoc(p); // datos actualizados también en la nube
   touchProducto(p);
 
   const fechaElegida = document.getElementById('cFecha').value;
@@ -6824,7 +7252,7 @@ function handleCompraSubmit(e){
   setLastCompraProveedor(proveedor);
   const nuevaCompra = {
     id: uid('compra'),
-    codigo,
+    codigo: p.codigo || codigo, // código oficial del producto: así sus ingresos no se parten en grupos distintos
     nombre,
     cantidad,
     precioUnitario: precioCompra,
@@ -6843,15 +7271,16 @@ function handleCompraSubmit(e){
 
   logInventarioHistorial(p, cantidad, 'compra');
   saveDB();
-  applyStockDelta(p, cantidad); // la compra suma stock TAMBIÉN en la nube, atómica
+  applyStockDelta(p, cantidad, undefined, { crear: esNuevo }); // la compra suma stock TAMBIÉN en la nube, atómica
+  updateSidebarProductCount();
   renderCompras();
   renderInventario();
   renderProductos();
   closeAllModals();
-  toast(`Ingreso registrado: ${nombre} → stock ${p.stock}`, 'success');
+  toast(esNuevo ? `Producto nuevo creado: ${nombre} → stock ${p.stock}` : `Ingreso registrado: ${nombre} → stock ${p.stock}`, 'success');
 
-  // Sigue escaneando el siguiente producto para registrar más compras seguido
-  openCompraScan();
+  // Al registrar, el formulario se cierra y la app se queda en la pestaña Ingresos
+  // (ya no abre el escáner de "Registrar producto" después de cada ingreso).
 }
 
 /* -------------------------------------------------------------------------
@@ -7000,7 +7429,7 @@ function renderVentaSearchResults(){
       : `<div class="vsi-thumb vsi-thumb-empty">🖼️</div>`;
     return `
     <button type="button" class="venta-search-item" data-venta-select="${p.id}">
-      ${thumb}
+      ${thumb}${nuevoTag(p)}
       <span class="vsi-info">
         <span class="vsi-nombre">${escapeHtml(p.nombre)}</span>
         <span class="vsi-meta">${escapeHtml(p.codigo)} · ${fmtMoney(p.precioVenta)} · ${escapeHtml(p.marca || 'Sin marca')}</span>
@@ -7042,7 +7471,7 @@ function renderCompraSearchResults(){
       : `<div class="vsi-thumb vsi-thumb-empty">🖼️</div>`;
     return `
     <button type="button" class="venta-search-item" data-compra-select="${p.id}">
-      ${thumb}
+      ${thumb}${nuevoTag(p)}
       <span class="vsi-info">
         <span class="vsi-nombre">${escapeHtml(p.nombre)}</span>
         <span class="vsi-meta">${escapeHtml(p.codigo)} · Compra ${fmtMoney(p.precioCompra)} · ${escapeHtml(p.marca || 'Sin marca')}</span>
@@ -7344,9 +7773,12 @@ function ocrConfirmarIngresos(){
         nombre: prod.nombre,
         cantidad: it.cantidad,
         precioUnitario: it.precio,
+        precioDistribuidor: it.precio,
+        descuento: 0,
         total: it.total,
         fecha: fecha,
-        metodoPago: 'efectivo'
+        metodoPago: 'efectivo',
+        productoId: prod.id
       };
       db.compras.push(compraNueva);
       nuevasCompras.push(compraNueva);
@@ -7359,11 +7791,6 @@ function ocrConfirmarIngresos(){
       // Producto nuevo: solo la PC principal puede crearlo. Los demás
       // dispositivos lo reportan como omitido para cargarlo en
       // "📥 Productos nuevos" y pasarlo a la PC principal con un Excel.
-      if(!esMaestro()){
-        omitidos++;
-        codigosOmitidos.push(it.codigo);
-        return;
-      }
       const newProd = {
         id: 'ocr_' + Date.now() + '_' + Math.random().toString(36).slice(2,6),
         codigo: it.codigo,
@@ -7372,11 +7799,16 @@ function ocrConfirmarIngresos(){
         marca: '',
         categoria: '',
         precioCompra: it.precio,
+        precioDistribuidor: it.precio,
+        descuento: 0,
         precioMarca: 0,
         precioVenta: it.precio,
         stock: it.cantidad,
         stockMin: 0,
-        caracteristicas: ''
+        caracteristicas: '',
+        fechaCreacion: todayISO(),
+        fechaRegistro: todayISO(),
+        _updatedAt: Date.now()
       };
       db.productos.push(newProd);
       const compraNuevaOcr = {
@@ -7385,14 +7817,17 @@ function ocrConfirmarIngresos(){
         nombre: newProd.nombre,
         cantidad: it.cantidad,
         precioUnitario: it.precio,
+        precioDistribuidor: it.precio,
+        descuento: 0,
         total: it.total,
         fecha: fecha,
-        metodoPago: 'efectivo'
+        metodoPago: 'efectivo',
+        productoId: newProd.id
       };
       db.compras.push(compraNuevaOcr);
       nuevasCompras.push(compraNuevaOcr);
       touchProducto(newProd);
-      syncProductoDoc(newProd);
+      syncProductoDoc(newProd, undefined, { crear: true });
       added++;
     }
   });
@@ -7884,16 +8319,29 @@ function exportProductosExcel(){
     toast('No hay productos para exportar', 'error');
     return;
   }
-  const header = ['CODIGO','CODIGO DE BARRAS','DESCRIPCION','MARCA','CATEGORIA','PRECIO COMPRA','PRECIO MARCA','PRECIO VENTA','STOCK','STOCK MIN','CARACTERISTICAS','IMAGEN'];
-  const types = ['text','text','text','text','text','number','number','number','number','number','text','text'];
-  const rows = db.productos.map(p => [
+  // Manuales: CODIGO | DESCRIPCION | MARCA | PRECIO DISTRIBUIDOR | DESCUENTO | PRECIO DE COMPRA | PRECIO DE VENTA | ...
+  // Eléctricas: conserva su estructura (precio compra / precio marca / precio venta).
+  const manual = currentModo !== 'electrico';
+  const header = manual
+    ? ['CODIGO','DESCRIPCION','MARCA','PRECIO DISTRIBUIDOR','DESCUENTO (%)','PRECIO DE COMPRA','PRECIO DE VENTA','CODIGO DE BARRAS','CATEGORIA','STOCK','STOCK MIN','CARACTERISTICAS','IMAGEN']
+    : ['CODIGO','CODIGO DE BARRAS','DESCRIPCION','MARCA','CATEGORIA','PRECIO COMPRA','PRECIO MARCA','PRECIO VENTA','STOCK','STOCK MIN','CARACTERISTICAS','IMAGEN'];
+  const types = manual
+    ? ['text','text','text','number','number','number','number','text','text','number','number','text','text']
+    : ['text','text','text','text','text','number','number','number','number','number','text','text'];
+  const rows = db.productos.map(p => manual ? [
+    p.codigo || '', p.nombre, p.marca || '',
+    precioDistribuidorDe(p), descuentoDe(p), Number(p.precioCompra) || 0, Number(p.precioVenta) || 0,
+    p.codigoBarras || '', p.categoria || '', p.stock, p.stockMin,
+    p.caracteristicas || '',
+    getImage(p.id) ? '[foto local]' : ''
+  ] : [
     p.codigo || '', p.codigoBarras || '', p.nombre, p.marca || '', p.categoria || '',
     p.precioCompra, p.precioMarca, p.precioVenta, p.stock,
     p.stockMin,
     p.caracteristicas || '',
     getImage(p.id) ? '[foto local]' : ''
   ]);
-  downloadXLSX(`stockferre_productos_${todayISO().slice(0,10)}.xlsx`, [{ name: 'Productos', header, rows, types }]);
+  downloadXLSX(`stockferre_productos_${boliviaDateKey()}.xlsx`, [{ name: 'Productos', header, rows, types }]);
   toast('Productos exportados a Excel (las fotos se respaldan con "Exportar backup")', 'success');
 }
 
@@ -7920,6 +8368,13 @@ function saveDrafts(list){
 function renderProductosNuevos(){
   const tbody = document.querySelector('#draftsTable tbody');
   if(!tbody) return;
+  const dManualT = currentModo !== 'electrico';
+  const thr = document.querySelector('#draftsTable thead tr');
+  if(thr) thr.innerHTML = '<th>Código</th><th>Cód. Barras</th><th>Descripción</th><th>Marca</th><th>Categoría</th>' +
+    (dManualT
+      ? '<th class="price-guest-hide">P. Distribuidor</th><th class="price-guest-hide">Desc.</th><th class="price-guest-hide">P. Compra</th><th>P. Venta</th>'
+      : '<th class="price-guest-hide">P. Compra</th><th class="price-guest-hide">P. Marca</th><th>P. Venta</th>') +
+    '<th>Stock</th><th>Stock mín.</th><th>Acciones</th>';
   const list = loadDrafts();
   tbody.innerHTML = list.length ? list.map((d, i)=>`
     <tr>
@@ -7928,9 +8383,9 @@ function renderProductosNuevos(){
       <td>${escapeHtml(d.nombre || '')}</td>
       <td>${escapeHtml(d.marca || '-')}</td>
       <td>${d.categoria ? `<span class="badge badge-muted">${escapeHtml(d.categoria)}</span>` : '-'}</td>
-      <td class="price-guest-hide">${fmtMoney(d.precioCompra || 0)}</td>
-      <td class="price-guest-hide">${fmtMoney(d.precioMarca || 0)}</td>
-      <td>${fmtMoney(d.precioVenta || 0)}</td>
+      ${dManualT
+        ? `<td class="price-guest-hide">${fmtMoney(precioDistribuidorDe(d))}</td><td class="price-guest-hide">${descuentoDe(d)}%</td><td class="price-guest-hide">${fmtMoney(d.precioCompra || 0)}</td><td>${fmtMoney(d.precioVenta || 0)}</td>`
+        : `<td class="price-guest-hide">${fmtMoney(d.precioCompra || 0)}</td><td class="price-guest-hide">${fmtMoney(d.precioMarca || 0)}</td><td>${fmtMoney(d.precioVenta || 0)}</td>`}
       <td>${d.stock || 0}</td>
       <td>${d.stockMin || 0}</td>
       <td>
@@ -7955,13 +8410,36 @@ function openDraftModal(idx){
   document.getElementById('dNombre').value = d ? (d.nombre || '') : '';
   document.getElementById('dMarca').value = d ? (d.marca || '') : '';
   document.getElementById('dCategoria').value = d ? (d.categoria || '') : '';
+  const dManual = currentModo !== 'electrico';
+  document.getElementById('dDistWrap').style.display = dManual ? '' : 'none';
+  document.getElementById('dDescWrap').style.display = dManual ? '' : 'none';
+  document.getElementById('dMarcaWrap').style.display = dManual ? 'none' : '';
+  estadoPreciosBorrador.ultimo = 'descuento';
+  document.getElementById('dPrecioDistribuidor').value = (d && dManual) ? (precioDistribuidorDe(d) || '') : '';
+  document.getElementById('dDescuento').value = (d && dManual) ? (descuentoDe(d) || '') : '';
   document.getElementById('dPrecioCompra').value = d ? (d.precioCompra || '') : '';
-  document.getElementById('dPrecioMarca').value = d ? (d.precioMarca || '') : '';
+  document.getElementById('dPrecioMarca').value = (d && !dManual) ? (d.precioMarca || '') : '';
   document.getElementById('dPrecioVenta').value = d ? (d.precioVenta || '') : '';
   document.getElementById('dStock').value = d ? (d.stock || 0) : '';
   document.getElementById('dStockMin').value = d ? (d.stockMin || 0) : '';
   document.getElementById('dCaracteristicas').value = d ? (d.caracteristicas || '') : '';
   openModal('modalBorrador');
+}
+
+// Precios del borrador según el dueño: Manuales usa distribuidor/descuento/compra/venta.
+function preciosBorradorDesdeForm(){
+  const venta = parseFloat(document.getElementById('dPrecioVenta').value) || 0;
+  if(currentModo !== 'electrico'){
+    const dd = numONaN(document.getElementById('dPrecioDistribuidor').value);
+    const cc = numONaN(document.getElementById('dPrecioCompra').value);
+    const r = resolverPrecios(dd, numONaN(document.getElementById('dDescuento').value), cc);
+    return { precioDistribuidor: r.dist, descuento: r.desc, precioCompra: r.compra, precioMarca: 0, precioVenta: venta };
+  }
+  return {
+    precioCompra: parseFloat(document.getElementById('dPrecioCompra').value) || 0,
+    precioMarca: parseFloat(document.getElementById('dPrecioMarca').value) || 0,
+    precioVenta: venta
+  };
 }
 
 function handleDraftSubmit(e){
@@ -7974,9 +8452,7 @@ function handleDraftSubmit(e){
     nombre: document.getElementById('dNombre').value.trim(),
     marca: document.getElementById('dMarca').value.trim(),
     categoria: document.getElementById('dCategoria').value.trim(),
-    precioCompra: parseFloat(document.getElementById('dPrecioCompra').value) || 0,
-    precioMarca: parseFloat(document.getElementById('dPrecioMarca').value) || 0,
-    precioVenta: parseFloat(document.getElementById('dPrecioVenta').value) || 0,
+    ...preciosBorradorDesdeForm(),
     stock: parseInt(document.getElementById('dStock').value, 10) || 0,
     stockMin: parseInt(document.getElementById('dStockMin').value, 10) || 0,
     caracteristicas: document.getElementById('dCaracteristicas').value.trim()
@@ -8021,14 +8497,23 @@ function exportDraftsExcel(){
     toast('No hay borradores para exportar', 'error');
     return;
   }
-  const header = ['CODIGO','CODIGO DE BARRAS','DESCRIPCION','MARCA','CATEGORIA','PRECIO COMPRA','PRECIO MARCA','PRECIO VENTA','STOCK','STOCK MIN','CARACTERISTICAS','IMAGEN'];
-  const types = ['text','text','text','text','text','number','number','number','number','number','text','text'];
-  const rows = list.map(d => [
+  const manual = currentModo !== 'electrico';
+  const header = manual
+    ? ['CODIGO','DESCRIPCION','MARCA','PRECIO DISTRIBUIDOR','DESCUENTO (%)','PRECIO DE COMPRA','PRECIO DE VENTA','CODIGO DE BARRAS','CATEGORIA','STOCK','STOCK MIN','CARACTERISTICAS','IMAGEN']
+    : ['CODIGO','CODIGO DE BARRAS','DESCRIPCION','MARCA','CATEGORIA','PRECIO COMPRA','PRECIO MARCA','PRECIO VENTA','STOCK','STOCK MIN','CARACTERISTICAS','IMAGEN'];
+  const types = manual
+    ? ['text','text','text','number','number','number','number','text','text','number','number','text','text']
+    : ['text','text','text','text','text','number','number','number','number','number','text','text'];
+  const rows = list.map(d => manual ? [
+    d.codigo || '', d.nombre || '', d.marca || '',
+    precioDistribuidorDe(d), descuentoDe(d), d.precioCompra || 0, d.precioVenta || 0,
+    d.codigoBarras || '', d.categoria || '', d.stock || 0, d.stockMin || 0, d.caracteristicas || '', ''
+  ] : [
     d.codigo || '', d.codigoBarras || '', d.nombre || '', d.marca || '', d.categoria || '',
     d.precioCompra || 0, d.precioMarca || 0, d.precioVenta || 0,
     d.stock || 0, d.stockMin || 0, d.caracteristicas || '', ''
   ]);
-  downloadXLSX(`stockferre_productos_nuevos_${todayISO().slice(0,10)}.xlsx`, [{ name: 'Productos nuevos', header, rows, types }]);
+  downloadXLSX(`stockferre_productos_nuevos_${boliviaDateKey()}.xlsx`, [{ name: 'Productos nuevos', header, rows, types }]);
   toast('Excel exportado con ' + list.length + ' borrador(es). Pásalo a la PC principal e impórtalo con "📥 Importar Excel"', 'success');
 }
 
@@ -8104,10 +8589,10 @@ function exportVentasCSV(){
   const header = ['FECHA','CODIGO','PRODUCTO','CANTIDAD','PRECIO UNITARIO','TOTAL','METODO DE PAGO','EFECTIVO','QR','QR PERSONA'];
   const types = ['text','text','text','number','number','number','text','number','number','text'];
   const rows = db.ventas.map(v => [
-    v.fecha, v.codigo, v.nombre, Number(v.cantidad)||0, Number(v.precioUnitario)||0, Number(v.total)||0, v.metodoPago,
+    fmtExcelFecha(v.fecha), v.codigo, v.nombre, Number(v.cantidad)||0, Number(v.precioUnitario)||0, Number(v.total)||0, v.metodoPago,
     Number(efectivoMontoDeVenta(v))||0, Number(qrMontoDeVenta(v))||0, v.qrPersona || ''
   ]);
-  downloadXLSX(`stockferre_ventas_${todayISO().slice(0,10)}.xlsx`, [{ name: 'Ventas', header, rows, types }]);
+  downloadXLSX(`stockferre_ventas_${boliviaDateKey()}.xlsx`, [{ name: 'Ventas', header, rows, types }]);
   toast('Ventas exportadas a Excel', 'success');
 }
 
@@ -8569,7 +9054,7 @@ function importVentasCSV(file){
           qrPersona: idx.qrPersona > -1 ? String(r[idx.qrPersona] || '').trim() : '',
           efectivoMonto,
           qrMonto,
-          fecha: idx.fecha > -1 ? (r[idx.fecha] || todayISO()) : todayISO()
+          fecha: idx.fecha > -1 ? fechaImportToStamp(r[idx.fecha]) : todayISO()
         });
         importadas++;
       }
@@ -8595,7 +9080,7 @@ function exportInventarioCSV(){
   const rows = db.productos.map(p => [
     p.codigo, p.nombre, p.marca||'', p.categoria||'', p.codigoBarras||'', Number(p.stock)||0
   ]);
-  downloadXLSX(`stockferre_inventario_${todayISO().slice(0,10)}.xlsx`, [{ name: 'Inventario', header, rows, types }]);
+  downloadXLSX(`stockferre_inventario_${boliviaDateKey()}.xlsx`, [{ name: 'Inventario', header, rows, types }]);
   toast('Inventario exportado a Excel', 'success');
 }
 
@@ -8698,6 +9183,7 @@ function renderProductosTarjetas(grid, list){
     <div class="guest-card" data-guest-product="${p.id}">
       <span class="guest-card-img" data-img-product="${p.id}">
         ${thumb}
+        ${nuevoTag(p)}
         ${countImg > 1 ? `<span class="nphotos">📷 ${countImg}</span>` : ''}
       </span>
       <span class="guest-card-body">
@@ -8792,6 +9278,9 @@ function renderCategorias(){
    ------------------------------------------------------------------------- */
 
 function openProductModal(producto, prefillCodigo){
+  // Producto NUEVO: se usa el mismo formulario que "+ Nuevo producto" de Ingresos
+  // (crea el producto y registra su primer ingreso). Editar sigue como antes.
+  if(!producto){ openNuevoProductoForm(prefillCodigo); return; }
   const form = document.getElementById('formProducto');
   form.reset();
   populateCategoryDatalist();
@@ -8810,8 +9299,16 @@ function openProductModal(producto, prefillCodigo){
     document.getElementById('pNombre').value = producto.nombre;
     document.getElementById('pMarca').value = producto.marca || '';
     document.getElementById('pCategoria').value = producto.categoria || '';
+    // Manuales: distribuidor → descuento → compra → venta. Eléctricas: compra, marca, venta.
+    const pManual = !esProductoElectrico(producto);
+    document.getElementById('pDistWrap').style.display = pManual ? '' : 'none';
+    document.getElementById('pDescWrap').style.display = pManual ? '' : 'none';
+    document.getElementById('pMarcaWrap').style.display = pManual ? 'none' : '';
+    estadoPreciosProducto.ultimo = 'descuento';
+    document.getElementById('pPrecioDistribuidor').value = pManual ? (precioDistribuidorDe(producto) || '') : '';
+    document.getElementById('pDescuento').value = pManual ? (descuentoDe(producto) || '') : '';
     document.getElementById('pPrecioCompra').value = producto.precioCompra || '';
-    document.getElementById('pPrecioMarca').value = producto.precioMarca || '';
+    document.getElementById('pPrecioMarca').value = pManual ? '' : (producto.precioMarca || '');
     document.getElementById('pPrecioVenta').value = producto.precioVenta || '';
   }else{
     document.getElementById('modalProductoTitle').textContent = 'Nuevo producto';
@@ -8830,6 +9327,8 @@ function handleProductSubmit(e){
     nombre: document.getElementById('pNombre').value,
     marca: document.getElementById('pMarca').value,
     categoria: document.getElementById('pCategoria').value,
+    precioDistribuidor: document.getElementById('pPrecioDistribuidor').value,
+    descuento: document.getElementById('pDescuento').value,
     precioCompra: document.getElementById('pPrecioCompra').value,
     precioMarca: document.getElementById('pPrecioMarca').value,
     precioVenta: document.getElementById('pPrecioVenta').value
@@ -8837,6 +9336,13 @@ function handleProductSubmit(e){
   if(!data.codigo.trim() || !data.nombre.trim()){
     toast('Código y descripción son obligatorios', 'error');
     return;
+  }
+  if(document.getElementById('pDistWrap').style.display !== 'none'){
+    const dd = numONaN(data.precioDistribuidor), cc = numONaN(data.precioCompra);
+    if(!isNaN(dd) && !isNaN(cc) && cc > dd + 0.005){
+      toast('El precio de compra no puede ser mayor al precio del distribuidor', 'error');
+      return;
+    }
   }
   // Evitar duplicar código en otro producto distinto
   const dup = getProductoByCodigo(data.codigo);
@@ -8906,14 +9412,17 @@ function openProductDetails(productId){
   document.getElementById('detPCompra').textContent = fmtMoney(p.precioCompra);
   document.getElementById('detPMarca').textContent = fmtMoney(p.precioMarca);
   document.getElementById('detPVenta').textContent = fmtMoney(p.precioVenta);
-  // En Eléctricas la vista de precios es solo: "Precio último" + "Precio de venta"
-  // (el precio de compra se oculta). En Manuales se mantiene tal cual.
+  document.getElementById('detPDist').textContent = fmtMoney(precioDistribuidorDe(p));
+  document.getElementById('detPDesc').textContent = descuentoDe(p) + '%';
+  // Manuales: Precio distribuidor → Descuento → Precio de compra → Precio de venta.
+  // Eléctricas: "Precio último" + "Precio de venta" (el precio de compra se oculta).
   const detEsElec = esProductoElectrico(p);
+  ['detRowDist','detRowDesc'].forEach(id => { const el = document.getElementById(id); if(el) el.style.display = detEsElec ? 'none' : ''; });
   const detRowPCompra = document.getElementById('detPCompra').closest('.detail-row');
   const detRowPMarca = document.getElementById('detPMarca').closest('.detail-row');
   if(detRowPCompra) detRowPCompra.style.display = detEsElec ? 'none' : '';
   if(detRowPMarca){
-    detRowPMarca.style.display = '';
+    detRowPMarca.style.display = detEsElec ? '' : 'none';
     detRowPMarca.classList.toggle('price-guest-hide', !detEsElec);
     const detLblPMarca = detRowPMarca.querySelector('.detail-label');
     if(detLblPMarca) detLblPMarca.textContent = detEsElec ? 'Precio último' : 'Precio de marca';
@@ -9735,8 +10244,11 @@ function importProductsCSV(file){
         nombre: headers.findIndex(h => h.includes('DESCRIPCION') || h === 'NOMBRE'),
         marca: headers.indexOf('MARCA'),
         categoria: headers.indexOf('CATEGORIA'),
-        // Acepta "PRECIO COMPRA", "PRECIO DE COMPRA", "PRECIO_COMPRA", etc.
-        precioCompra: headers.findIndex(h => h.includes('PRECIO') && h.includes('COMPRA')),
+        // Manuales: PRECIO DISTRIBUIDOR → DESCUENTO → PRECIO DE COMPRA → PRECIO DE VENTA
+        precioDistribuidor: headers.findIndex(h => h.includes('DISTRIBUIDOR')),
+        descuento: headers.findIndex(h => h.includes('DESCUENTO')),
+        // Acepta "PRECIO COMPRA", "PRECIO DE COMPRA", "PRECIO_COMPRA", etc. (sin confundirse con el distribuidor)
+        precioCompra: headers.findIndex(h => h.includes('PRECIO') && h.includes('COMPRA') && !h.includes('DISTRIBUIDOR')),
         precioMarca: headers.findIndex(h => h.includes('PRECIO') && h.includes('MARCA') && !h.includes('BARRA')),
         precioVenta: headers.findIndex(h => h.includes('PRECIO') && h.includes('VENTA')),
         stock: headers.findIndex(h => h.includes('STOCK') && !h.includes('MIN')),
@@ -9748,7 +10260,7 @@ function importProductsCSV(file){
         toast('El archivo debe tener al menos columnas CODIGO y DESCRIPCION', 'error');
         return;
       }
-      if(idx.precioCompra === -1 || idx.precioVenta === -1){
+      if(idx.precioVenta === -1 || (idx.precioCompra === -1 && idx.precioDistribuidor === -1)){
         toast('No se encontraron las columnas de precio (se importarán los productos, pero revisa los precios manualmente)', 'warning');
       }
 
@@ -9769,8 +10281,22 @@ function importProductsCSV(file){
         const nombre = String(r[idx.nombre] || '').trim();
         const marca = idx.marca > -1 ? String(r[idx.marca] || '').trim() : '';
         const categoria = idx.categoria > -1 ? String(r[idx.categoria] || '').trim() : '';
-        const precioCompra = idx.precioCompra > -1 ? parsePrecio(r[idx.precioCompra]) : 0;
-        const precioMarca = idx.precioMarca > -1 ? parsePrecio(r[idx.precioMarca]) : 0;
+        let precioCompra = idx.precioCompra > -1 ? parsePrecio(r[idx.precioCompra]) : 0;
+        let precioMarca = idx.precioMarca > -1 ? parsePrecio(r[idx.precioMarca]) : 0;
+        // Manuales: cada columna se guarda en su propio campo (distribuidor, descuento, compra).
+        // Un archivo viejo sin PRECIO DISTRIBUIDOR usa PRECIO MARCA como distribuidor.
+        let pDist, pDesc;
+        if(currentModo !== 'electrico'){
+          const celDist = idx.precioDistribuidor > -1 ? r[idx.precioDistribuidor] : (idx.precioMarca > -1 ? r[idx.precioMarca] : undefined);
+          const celComp = idx.precioCompra > -1 ? r[idx.precioCompra] : undefined;
+          const d0 = celdaVacia(celDist) ? NaN : parsePrecio(celDist);
+          const c0 = celdaVacia(celComp) ? NaN : parsePrecio(celComp);
+          const dsc = parseDescuentoCelda(idx.descuento > -1 ? r[idx.descuento] : undefined, d0, c0);
+          const rr = resolverPrecios(d0, dsc, c0);
+          if(rr.dist > 0 || rr.compra > 0){ pDist = rr.dist; pDesc = rr.desc; precioCompra = rr.compra; }
+          else { precioCompra = 0; }
+          precioMarca = 0;
+        }
         const precioVenta = idx.precioVenta > -1 ? parsePrecio(r[idx.precioVenta]) : 0;
         const stockVal = idx.stock > -1 ? parsePrecio(r[idx.stock]) : null;
         const stockMinVal = idx.stockMin > -1 ? parsePrecio(r[idx.stockMin]) : null;
@@ -9788,6 +10314,7 @@ function importProductsCSV(file){
           existing.precioCompra = precioCompra || existing.precioCompra;
           existing.precioMarca = precioMarca || existing.precioMarca;
           existing.precioVenta = precioVenta || existing.precioVenta;
+          if(pDist !== undefined){ existing.precioDistribuidor = pDist; existing.descuento = pDesc; existing.precioMarca = 0; }
           if(stockVal !== null) existing.stock = stockVal;
           if(stockMinVal !== null) existing.stockMin = stockMinVal;
           if(caracteristicas) existing.caracteristicas = caracteristicas;
@@ -9800,6 +10327,7 @@ function importProductsCSV(file){
             id: (cloudCodeMap && cloudCodeMap.get(normalize(codigo))) || uid(),
             codigo, codigoBarras, nombre, marca, categoria,
             precioCompra, precioMarca, precioVenta,
+            precioDistribuidor: pDist, descuento: pDesc,
             caracteristicas,
             stock: stockVal !== null ? stockVal : 0,
             stockMin: stockMinVal !== null ? stockMinVal : 0,
@@ -9849,7 +10377,7 @@ function exportBackup(){
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = `stockferre_backup_${todayISO().slice(0,10)}.json`;
+  a.download = `stockferre_backup_${boliviaDateKey()}.json`;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
@@ -10070,7 +10598,7 @@ function exportFotosProductos(){
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = 'stockferre_fotos_' + todayISO().slice(0,10) + '.json';
+    a.download = 'stockferre_fotos_' + boliviaDateKey() + '.json';
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -10481,8 +11009,8 @@ function updateInicioClock(){
   const dateEl = document.getElementById('inicioDate');
   if(!timeEl || !dateEl) return;
   const now = new Date();
-  timeEl.textContent = now.toLocaleTimeString('es-BO', { hour:'2-digit', minute:'2-digit', second:'2-digit' });
-  dateEl.textContent = now.toLocaleDateString('es-BO', { weekday:'long', day:'numeric', month:'long', year:'numeric' });
+  timeEl.textContent = now.toLocaleTimeString('es-BO', { timeZone:'America/La_Paz', hour:'2-digit', minute:'2-digit', second:'2-digit' });
+  dateEl.textContent = now.toLocaleDateString('es-BO', { timeZone:'America/La_Paz', weekday:'long', day:'numeric', month:'long', year:'numeric' });
 }
 
 function showView(name){
@@ -12557,10 +13085,14 @@ function setupEventListeners(){
   });
   document.getElementById('formCompra').addEventListener('submit', handleCompraSubmit);
   document.getElementById('cCantidad').addEventListener('input', recalcCompraTotal);
-  document.getElementById('cPrecioDistribuidor').addEventListener('input', recalcCompraTotal);
-  document.getElementById('cDescuento').addEventListener('input', recalcCompraTotal);
-  document.getElementById('cActualizarDatos').addEventListener('change', (e)=>{
-    document.getElementById('compraUpdateFields').style.display = e.target.checked ? 'grid' : 'none';
+  document.getElementById('cPrecioDistribuidor').addEventListener('input', ()=>{ recalcCompraPrecios('distribuidor'); recalcCompraTotal(); });
+  document.getElementById('cDescuento').addEventListener('input', ()=>{ recalcCompraPrecios('descuento'); recalcCompraTotal(); });
+  document.getElementById('cPrecioCompra').addEventListener('input', ()=>{ recalcCompraPrecios('compra'); recalcCompraTotal(); });
+  bindPreciosBidireccional('pPrecioDistribuidor', 'pDescuento', 'pPrecioCompra', estadoPreciosProducto);
+  bindPreciosBidireccional('dPrecioDistribuidor', 'dDescuento', 'dPrecioCompra', estadoPreciosBorrador);
+  document.getElementById('btnCompraNuevoProducto').addEventListener('click', ()=>{
+    closeAllModals();
+    openNuevoProductoForm();
   });
   document.querySelectorAll('[data-compra-payment]').forEach(btn=>{
     btn.addEventListener('click', ()=>{

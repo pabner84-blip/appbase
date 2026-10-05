@@ -1039,3 +1039,16 @@ body.theme-amarillo .btn-primary{color:#403000;}
 }
 .modo-detalle-label{font-size:11px; font-weight:600; color:var(--text-muted); text-transform:uppercase; letter-spacing:.03em;}
 .modo-detalle-value{font-size:16px; font-weight:800; color:var(--text);}
+
+
+/* ---------- Distintivo NUEVO (producto registrado hace menos de 1 mes) ---------- */
+.guest-card-img, .sr-img-wrap, #invImgWrap, .venta-img-cell, .venta-search-item{position:relative;}
+.tag-nuevo{
+  position:absolute; top:2px; left:2px; z-index:3;
+  background:#e11d48; color:#fff; font-size:9px; font-weight:800; letter-spacing:.4px;
+  padding:2px 5px; border-radius:4px; line-height:1.1; pointer-events:none;
+  box-shadow:0 1px 3px rgba(0,0,0,.45);
+}
+.guest-card-img .tag-nuevo{top:6px; left:6px; font-size:11px; padding:3px 8px; border-radius:5px;}
+.sr-img-wrap .tag-nuevo, #invImgWrap .tag-nuevo{top:4px; left:4px; font-size:11px; padding:3px 7px;}
+.venta-search-item .tag-nuevo{top:4px; left:4px;}

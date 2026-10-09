@@ -189,20 +189,20 @@
 
     <!-- ---------- PRODUCTOS ---------- -->
     <section class="view" id="view-productos">
-      <!-- Barra fija: buscador + categorías + botón de escanear (no se sube al bajar por los productos) -->
+      <!-- Barra fija: solo buscador + categorías (los botones suben con el scroll) -->
       <div class="prod-sticky" id="prodSticky">
         <div class="prod-sticky-row">
           <input type="text" id="prodSearch" class="input" placeholder="🔍 Buscar por nombre, código o marca...">
           <select id="prodFilterCategoria" class="input select"><option value="">Todas las categorías</option></select>
         </div>
-        <button type="button" class="btn-scan-big" id="btnScanFromProducts">📷 ESCANEAR PRODUCTO</button>
       </div>
       <div class="toolbar">
+        <button type="button" class="btn-scan-big" id="btnScanFromProducts">📷 Escanear producto</button>
         <button class="btn btn-primary admin-only master-only" id="btnNewProduct">+ Nuevo producto</button>
-        <button class="btn btn-secondary admin-only" id="btnExportProducts">📤 Exportar Excel</button>
+        <button class="btn btn-secondary admin-only master-only" id="btnExportProducts">📤 Exportar Excel</button>
         <button class="btn btn-secondary admin-only master-only" id="btnImportProducts">📥 Importar Excel</button>
         <button class="btn btn-danger admin-only master-only" id="btnVaciarProductos">🗑️ Vaciar productos</button>
-        <button class="btn btn-primary admin-only" id="btnAutoFillAll">🖼️ Autollenar todos</button>
+        <button class="btn btn-primary admin-only master-only" id="btnAutoFillAll">🖼️ Autollenar todos</button>
       </div>
       <div class="prod-grid" id="productsGrid" hidden></div>
     </section>

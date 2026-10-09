@@ -25,6 +25,7 @@ let currentRole = 'admin';
 // los invitados no usan esto y conservan el comportamiento de siempre.
 let sfModalHistDepth = 0;
 let sfHistSkip = 0;
+let sfScanHist = false; // true = la vista Escáner dejó una entrada en el historial (para que "atrás" vuelva a Productos)
 let sfClosingFromPop = false;
 // Vista activa actual (para saber si el usuario está en una pestaña exclusiva
 // del modo pro cuando este se desactiva).
@@ -11278,6 +11279,16 @@ function showView(name){
     stopActiveScanner();
   }
   saveSessionViewState(name);
+
+  // "Atrás" del celular/navegador dentro del escáner: vuelve a Productos en
+  // vez de salirse de Chrome. Entrar al escáner deja UNA entrada en el
+  // historial; al salir por otro camino (botón, menú) esa entrada se consume.
+  if(name === 'escaner' && !sfScanHist){
+    try{ history.pushState({ sfScan: 1 }, ''); sfScanHist = true; }catch(e){ /* sin soporte */ }
+  }else if(name !== 'escaner' && sfScanHist){
+    sfScanHist = false;
+    try{ sfHistSkip++; history.back(); }catch(e){ sfHistSkip = Math.max(0, sfHistSkip - 1); }
+  }
 }
 
 function closeSidebarMobile(){
@@ -11921,11 +11932,21 @@ function closeTopModal(){
   closeModalById(top.id);
   return true;
 }
+// "Atrás" estando en la vista Escáner (sin ventanas abiertas): vuelve a Productos.
+function scanBackToProducts(){
+  if(currentView === 'escaner' && sfScanHist){
+    sfScanHist = false;           // la entrada ya la consumió el navegador
+    showView('productos');
+  }
+}
 window.addEventListener('popstate', ()=>{
   if(sfHistSkip > 0){ sfHistSkip--; return; } // pop que solo consume un cierre por UI
-  if(currentRole === 'guest') return;
+  if(currentRole === 'guest'){ scanBackToProducts(); return; }
   if(sfModalHistDepth > 0) sfModalHistDepth--;        // el navegador acaba de comer UNA entrada nuestra
-  if(!document.querySelector('.modal.open')) return;  // nada abierto: que siga el navegador
+  if(!document.querySelector('.modal.open')){         // nada abierto: ¿estamos en el escáner?
+    scanBackToProducts();
+    return;
+  }
   // Quedan ventanas: re-usa la entrada actual (replace) para que el próximo
   // "atrás" cierre la siguiente sin dejar entradas muertas en la historia.
   sfClosingFromPop = true;

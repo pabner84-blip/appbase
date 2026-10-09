@@ -9587,7 +9587,8 @@ function openProductDetails(productId){
   if(detVender){
     detVender.onclick = ()=>{
       closeModalById('modalProductoDetalle');
-      openVentaModal(p);
+      // Espera a que el navegador termine el atrás interno antes de abrir la otra ventana.
+      setTimeout(()=> openVentaModal(p), 150);
     };
   }
   openModal('modalProductoDetalle');
@@ -11933,13 +11934,11 @@ function handleSetPasswordSubmit(e){
    que el próximo atrás cierre la siguiente. Cuando ya no queda ninguna, el
    atrás funciona normal (sale de la app). Los invitados no usan esto. */
 function pushModalHistory(){
-  if(currentRole === 'guest') return;
   try{ history.pushState({ sfModal: 1 }, ''); sfModalHistDepth++; }
   catch(e){ /* sin soporte: el atrás queda como siempre */ }
 }
 // Consume las entradas de historia de modales ya cerrados con la X/fondo.
 function consumeModalHistory(n){
-  if(currentRole === 'guest') return;
   n = Math.min(n || 0, sfModalHistDepth);
   if(n <= 0) return;
   sfModalHistDepth -= n;
@@ -11973,7 +11972,6 @@ function scanBackToProducts(){
 }
 window.addEventListener('popstate', ()=>{
   if(sfHistSkip > 0){ sfHistSkip--; return; } // pop que solo consume un cierre por UI
-  if(currentRole === 'guest'){ scanBackToProducts(); return; }
   if(sfModalHistDepth > 0) sfModalHistDepth--;        // el navegador acaba de comer UNA entrada nuestra
   if(!document.querySelector('.modal.open')){         // nada abierto: ¿estamos en el escáner?
     scanBackToProducts();
@@ -12008,6 +12006,11 @@ function closeModalById(id){
     document.getElementById('modalBackdrop').classList.remove('open');
   }
   if(id === 'modalModoDetalle') currentModoDetalleOpen = null;
+  if(id === 'modalProductoDetalle'){
+    // Libera las fotos (base64) del detalle para no saturar la memoria del celular.
+    const di = document.getElementById('detImg');
+    if(di && di.tagName === 'DIV') di.innerHTML = '';
+  }
   if(estabaAbierto && !sfClosingFromPop) consumeModalHistory(1);
 }
 function closeAllModals(){
@@ -12954,7 +12957,6 @@ function setupEventListeners(){
   // cierran solo la ventana de arriba); el INVITADO cierra todo como antes.
   document.querySelectorAll('[data-close-modal]').forEach(btn=>{
     btn.addEventListener('click', ()=>{
-      if(currentRole === 'guest'){ closeAllModals(); return; }
       const m = btn.closest('.modal');
       if(m){
         stopScannerForModal(m.id);
@@ -12965,7 +12967,6 @@ function setupEventListeners(){
     });
   });
   document.getElementById('modalBackdrop').addEventListener('click', ()=>{
-    if(currentRole === 'guest'){ closeAllModals(); return; }
     closeTopModal();
   });
 

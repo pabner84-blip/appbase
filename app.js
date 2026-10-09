@@ -12967,10 +12967,10 @@ function setupEventListeners(){
   document.querySelectorAll('[data-close-modal]').forEach(btn=>{
     btn.addEventListener('click', ()=> cerrarDesdeBoton(btn));
   });
-  // La "X" de arriba (header de la ventana) cierra al instante al soltar el dedo,
+  // La "X" de arriba y los botones "Cerrar" cierran al instante al soltar el dedo,
   // sin esperar al "click" del navegador (en el celular se retrasaba y parecía
   // colgada). preventDefault evita el click fantasma sobre lo que haya debajo.
-  document.querySelectorAll('.modal-close[data-close-modal]').forEach(btn=>{
+  document.querySelectorAll('[data-close-modal]').forEach(btn=>{
     let t0 = null;
     btn.addEventListener('touchstart', (e)=>{
       const t = e.touches[0];

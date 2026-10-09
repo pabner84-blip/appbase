@@ -1056,3 +1056,38 @@ body.theme-amarillo .btn-primary{color:#403000;}
 /* Panel "Eliminar características": solo en el dueño de Manuales */
 #panelEliminarCaract{display:none;}
 body.modo-manual:not(.role-guest) #panelEliminarCaract{display:block;}
+
+
+/* =========================================================================
+   PRODUCTOS: barra fija (buscador + categorías + ESCANEAR) y botón grande
+   ========================================================================= */
+.prod-sticky{
+  position:sticky; top:var(--topbar-h, 56px); z-index:45;
+  background:var(--bg);
+  margin:-22px -22px 12px; padding:12px 22px 10px;
+  border-bottom:1px solid var(--border);
+  display:flex; flex-direction:column; gap:10px;
+}
+.prod-sticky-row{display:flex; flex-wrap:wrap; gap:10px; align-items:center;}
+.prod-sticky-row .input{margin:0;}
+.btn-scan-big{
+  width:100%; min-height:54px; padding:12px 18px;
+  border:none; border-radius:12px; cursor:pointer;
+  font-size:18px; font-weight:800; letter-spacing:.5px; color:#fff;
+  background:linear-gradient(135deg,#f26522,#d9480f);
+  box-shadow:0 4px 16px rgba(242,101,34,.5);
+  transition:transform .1s ease, filter .15s ease;
+}
+.btn-scan-big:hover{filter:brightness(1.08);}
+.btn-scan-big:active{transform:scale(.98);}
+body.theme-amarillo .btn-scan-big{background:linear-gradient(135deg,#f6c000,#e0a800); color:#403000; box-shadow:0 4px 16px rgba(246,192,0,.5);}
+@media (max-width: 560px){
+  .prod-sticky{margin:-14px -14px 10px; padding:10px 14px 8px;}
+  .btn-scan-big{min-height:50px; font-size:16px;}
+}
+.scan-back-btn{margin-bottom:12px;}
+
+/* Switch de los 3 botones de Inicio: en el menú lateral solo lo ve el invitado
+   (el dueño lo tiene en Configuración → Configuración de invitados). */
+#inicioModosSwitchRow{display:none;}
+body.role-guest #inicioModosSwitchRow{display:flex;}

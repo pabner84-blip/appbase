@@ -11240,8 +11240,10 @@ function showView(name){
   document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
   document.getElementById('view-' + name).classList.add('active');
   document.querySelectorAll('.nav-item[data-view]').forEach(btn=>{
-    btn.classList.toggle('active', btn.dataset.view === name);
+    // El escáner ya no tiene pestaña propia: se abre desde Productos.
+    btn.classList.toggle('active', btn.dataset.view === (name === 'escaner' ? 'productos' : name));
   });
+  updateTopbarHeightVar();
   document.getElementById('viewTitle').textContent = VIEW_TITLES[name] || '';
   document.body.classList.toggle('inicio-theme', name === 'inicio');
   document.body.classList.remove('welcome-view');
@@ -12617,6 +12619,81 @@ function openBarcodeScanModal(){
    13. EVENTOS / INICIALIZACIÓN
    ------------------------------------------------------------------------- */
 
+/* -------------------------------------------------------------------------
+   Barra fija de Productos + 3 botones de Inicio (suich con contraseña)
+   ------------------------------------------------------------------------- */
+// La barra con buscador/categorías/ESCANEAR se queda pegada justo debajo de la
+// barra superior; esta variable CSS guarda la altura real de esa barra.
+function updateTopbarHeightVar(){
+  const t = document.querySelector('.topbar');
+  if(!t) return;
+  document.documentElement.style.setProperty('--topbar-h', t.offsetHeight + 'px');
+}
+
+const INICIO_MODOS_KEY = 'stockferre_inicio_modos_v1';
+const INICIO_MODOS_PASS = '2516';
+// Por defecto ENCENDIDO (como estaba la app antes) para no dejar al dueño sin
+// sus botones. Solo se apaga si alguien lo apaga a propósito.
+function inicioModosActivo(){
+  try{ return localStorage.getItem(INICIO_MODOS_KEY) !== '0'; }catch(e){ return true; }
+}
+function applyInicioModosUI(){
+  const on = inicioModosActivo();
+  ['btnModoManual', 'btnModoElectrico'].forEach(id=>{
+    const el = document.getElementById(id);
+    if(el) el.style.display = on ? '' : 'none';
+  });
+  ['inicioModosSwitch', 'inicioModosSwitchConfig'].forEach(id=>{
+    const el = document.getElementById(id);
+    if(el) el.checked = on;
+  });
+}
+function setInicioModosActivo(on){
+  try{ localStorage.setItem(INICIO_MODOS_KEY, on ? '1' : '0'); }catch(e){}
+  applyInicioModosUI();
+}
+function setupInicioModosSwitch(){
+  ['inicioModosSwitch', 'inicioModosSwitchConfig'].forEach(id=>{
+    const el = document.getElementById(id);
+    if(!el) return;
+    el.addEventListener('change', ()=>{
+      if(el.checked){
+        // Para ENCENDERLO se pide contraseña: se deja apagado hasta validarla.
+        el.checked = false;
+        const inp = document.getElementById('inicioModosPassInput');
+        if(inp) inp.value = '';
+        openModal('modalInicioModosPass');
+        setTimeout(()=>{ if(inp) inp.focus(); }, 150);
+      }else{
+        setInicioModosActivo(false);
+        toast('Reincorporar datos completos: apagado', 'success');
+      }
+    });
+  });
+  const form = document.getElementById('formInicioModosPass');
+  if(form) form.addEventListener('submit', (e)=>{
+    e.preventDefault();
+    const val = document.getElementById('inicioModosPassInput').value;
+    if(val === INICIO_MODOS_PASS){
+      closeAllModals();
+      setInicioModosActivo(true);
+      toast('Reincorporar datos completos: activado', 'success');
+    }else{
+      toast('Contraseña incorrecta', 'error');
+    }
+  });
+  applyInicioModosUI();
+}
+
+function setupProductosScanButton(){
+  const go = document.getElementById('btnScanFromProducts');
+  if(go) go.addEventListener('click', ()=> showView('escaner'));
+  const back = document.getElementById('btnScanBack');
+  if(back) back.addEventListener('click', ()=> showView('productos'));
+  window.addEventListener('resize', updateTopbarHeightVar);
+  updateTopbarHeightVar();
+}
+
 function setupEventListeners(){
   // Navegación
   document.querySelectorAll('.nav-item[data-view]').forEach(btn=>{
@@ -12774,6 +12851,8 @@ function setupEventListeners(){
       toast('Firebase apagado: todo queda solo en este dispositivo', 'success');
     }
   }
+  setupInicioModosSwitch();
+  setupProductosScanButton();
   const swFB = document.getElementById('firebaseSwitch');
   if(swFB) swFB.addEventListener('change', (e)=> aplicarSwitchFirebase(e.target.checked));
   const swFBConfig = document.getElementById('firebaseSwitchConfig');

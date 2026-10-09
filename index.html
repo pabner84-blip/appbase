@@ -32,7 +32,6 @@
   </div>
 
   <nav class="sidebar-nav">
-    <button class="nav-item" data-view="escaner"><span>📷</span> Escanear</button>
     <button class="nav-item" data-view="productos"><span>📦</span> Productos</button>
     <button class="nav-item" data-view="categorias"><span>🗂️</span> Categorías</button>
     <button class="nav-item" data-view="ventas"><span>💰</span> Ventas</button>
@@ -90,6 +89,13 @@
           <small>Sincronizar con otros dispositivos</small>
         </span>
       </label>
+      <label class="remember-switch" id="inicioModosSwitchRow" title="REINCORPORAR DATOS COMPLETOS">
+        <input type="checkbox" id="inicioModosSwitch">
+        <span class="switch-track"><span class="switch-thumb"></span></span>
+        <span class="remember-text">
+          <strong>REINCORPORAR DATOS COMPLETOS</strong>
+        </span>
+      </label>
       <div class="theme-palette" id="themePalette">
         <span class="remember-text"><strong>🎨 Tema</strong></span>
         <div class="palette-row">
@@ -144,6 +150,7 @@
 
     <!-- ---------- ESCÁNER (pantalla principal) ---------- -->
     <section class="view" id="view-escaner">
+      <button type="button" class="btn btn-secondary scan-back-btn" id="btnScanBack">← Volver a Productos</button>
       <div id="scannerBlockHome"><div id="scannerBlock">
       <div class="scan-mode-tabs">
         <button class="scan-tab active" data-scan-code-mode="numerico">🔢 Escanear números</button>
@@ -182,9 +189,15 @@
 
     <!-- ---------- PRODUCTOS ---------- -->
     <section class="view" id="view-productos">
+      <!-- Barra fija: buscador + categorías + botón de escanear (no se sube al bajar por los productos) -->
+      <div class="prod-sticky" id="prodSticky">
+        <div class="prod-sticky-row">
+          <input type="text" id="prodSearch" class="input" placeholder="🔍 Buscar por nombre, código o marca...">
+          <select id="prodFilterCategoria" class="input select"><option value="">Todas las categorías</option></select>
+        </div>
+        <button type="button" class="btn-scan-big" id="btnScanFromProducts">📷 ESCANEAR PRODUCTO</button>
+      </div>
       <div class="toolbar">
-        <input type="text" id="prodSearch" class="input" placeholder="🔍 Buscar por nombre, código o marca...">
-        <select id="prodFilterCategoria" class="input select"><option value="">Todas las categorías</option></select>
         <button class="btn btn-primary admin-only master-only" id="btnNewProduct">+ Nuevo producto</button>
         <button class="btn btn-secondary admin-only" id="btnExportProducts">📤 Exportar Excel</button>
         <button class="btn btn-secondary admin-only master-only" id="btnImportProducts">📥 Importar Excel</button>
@@ -630,6 +643,16 @@
             </div>
             <p class="hint" style="margin:10px 0 0;" id="installPwaHint"></p>
             <p class="hint" style="margin:6px 0 0;">En celulares: menú del navegador → "Añadir a pantalla de inicio". En PC: el botón Instalar o el icono ⬇️ de la barra de direcciones de Chrome/Edge. También puedes usar "TIENDA 1 (App).bat" para abrirla en su propia ventana sin el navegador.</p>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-header"><h3>REINCORPORAR DATOS COMPLETOS</h3></div>
+          <div class="panel-body">
+            <label class="remember-switch" id="inicioModosSwitchConfigRow" title="REINCORPORAR DATOS COMPLETOS">
+              <input type="checkbox" id="inicioModosSwitchConfig">
+              <span class="switch-track"><span class="switch-thumb"></span></span>
+            </label>
           </div>
         </div>
 
@@ -1291,6 +1314,25 @@
       <div class="form-actions" style="justify-content:space-between;">
         <button type="button" class="btn btn-secondary" id="btnGateAsGuest">👤 Entrar como invitado</button>
         <button type="submit" class="btn btn-primary">Ingresar</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Modal: contraseña para activar los 3 botones en Inicio -->
+<div class="modal modal-sm" id="modalInicioModosPass">
+  <div class="modal-header">
+    <h3>🔒 Contraseña requerida</h3>
+    <button class="modal-close" data-close-modal>✕</button>
+  </div>
+  <div class="modal-body">
+    <form id="formInicioModosPass" class="form-grid">
+      <label style="grid-column:1/-1;">Contraseña para activar
+        <input type="password" id="inicioModosPassInput" class="input" placeholder="Contraseña" autocomplete="off" inputmode="numeric">
+      </label>
+      <div class="form-actions" style="justify-content:space-between;">
+        <button type="button" class="btn btn-secondary" data-close-modal>Cancelar</button>
+        <button type="submit" class="btn btn-primary">Activar</button>
       </div>
     </form>
   </div>

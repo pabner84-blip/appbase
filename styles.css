@@ -37,7 +37,8 @@ input,select{font-family:inherit;}
   position:fixed; top:0; left:0; height:100vh; width:var(--sidebar-w);
   background:var(--sidebar-bg); color:var(--sidebar-text);
   display:flex; flex-direction:column; z-index:100;
-  transition:transform .25s ease;
+  transition:transform .18s ease;
+  will-change:transform;
 }
 .sidebar-brand{display:flex; align-items:center; gap:10px; padding:20px 18px; border-bottom:1px solid rgba(255,255,255,.08);}
 .brand-icon{font-size:28px; display:flex; align-items:center; gap:5px; line-height:1;}
@@ -132,8 +133,8 @@ body.modo-invitado .sidebar-logos{display:flex;}
 #view-codigobarras{max-width:480px;}
 
 .view{display:none;}
-.view.active{display:block; animation:fadeIn .2s ease;}
-@keyframes fadeIn{from{opacity:0; transform:translateY(4px);} to{opacity:1; transform:translateY(0);}}
+.view.active{display:block; animation:fadeIn .12s ease-out;}
+@keyframes fadeIn{from{opacity:0;} to{opacity:1;}}
 
 /* ---------- CARDS ---------- */
 .cards-grid{
@@ -233,7 +234,7 @@ body.modo-invitado .sidebar-logos{display:flex;}
   text-align:left; font-family:inherit; color:var(--text);
   display:flex; flex-direction:column; box-shadow:var(--shadow);
   cursor:pointer; transition:transform .16s ease, box-shadow .16s ease, border-color .16s ease;
-  animation:guestCardPop .22s ease both;
+  content-visibility:auto; contain-intrinsic-size:auto 300px;
 }
 @keyframes guestCardPop{from{opacity:0; transform:translateY(8px);} to{opacity:1; transform:none;}}
 .guest-card:hover{transform:translateY(-3px); border-color:var(--primary); box-shadow:0 8px 22px rgba(0,0,0,.5);}
@@ -1086,8 +1087,21 @@ body.theme-amarillo .btn-scan-big{background:linear-gradient(135deg,#f6c000,#e0a
   .btn-scan-big{min-height:38px; font-size:14px;}
 }
 .scan-back-btn{margin-bottom:12px;}
+.prod-filter-row{display:flex; gap:10px; align-items:center; margin-bottom:12px;}
+.prod-filter-row .input{margin:0; flex:1 1 auto; min-width:0;}
+.prod-filter-row .btn-scan-big{flex:none; white-space:nowrap;}
+.prod-sticky-row .input{flex:1 1 100%;}
 
 /* Switch de los 3 botones de Inicio: en el menú lateral solo lo ve el invitado
    (el dueño lo tiene en Configuración → Configuración de invitados). */
 #inicioModosSwitchRow{display:none;}
 body.role-guest #inicioModosSwitchRow{display:flex;}
+
+
+/* ---------- FLUIDEZ (solo visual, no toca datos) ---------- */
+button, a, select, input, .nav-item, .guest-card{ touch-action:manipulation; -webkit-tap-highlight-color:transparent; }
+.prod-grid{ contain:layout style; }
+@media (prefers-reduced-motion: reduce){
+  .view.active{animation:none;}
+  *{transition-duration:.01ms !important;}
+}

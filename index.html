@@ -189,15 +189,17 @@
 
     <!-- ---------- PRODUCTOS ---------- -->
     <section class="view" id="view-productos">
-      <!-- Barra fija: solo buscador + categorías (los botones suben con el scroll) -->
+      <!-- Barra fija: SOLO el buscador. Categorías + escáner + botones suben con el scroll -->
       <div class="prod-sticky" id="prodSticky">
         <div class="prod-sticky-row">
           <input type="text" id="prodSearch" class="input" placeholder="🔍 Buscar por nombre, código o marca...">
-          <select id="prodFilterCategoria" class="input select"><option value="">Todas las categorías</option></select>
         </div>
       </div>
+      <div class="prod-filter-row">
+        <select id="prodFilterCategoria" class="input select"><option value="">Todas las categorías</option></select>
+        <button type="button" class="btn-scan-big" id="btnScanFromProducts">📷 Escanear</button>
+      </div>
       <div class="toolbar">
-        <button type="button" class="btn-scan-big" id="btnScanFromProducts">📷 Escanear producto</button>
         <button class="btn btn-primary admin-only master-only" id="btnNewProduct">+ Nuevo producto</button>
         <button class="btn btn-secondary admin-only master-only" id="btnExportProducts">📤 Exportar Excel</button>
         <button class="btn btn-secondary admin-only master-only" id="btnImportProducts">📥 Importar Excel</button>

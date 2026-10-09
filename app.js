@@ -9277,15 +9277,17 @@ function renderProductos(){
    El invitado solo consulta. El dueño además ve los botones para editar y
    eliminar, y el botón de autollenar fotos. Tocar el resto de la tarjeta
    abre la ventana de características, igual que antes al tocar la fila. */
+let _prodRenderToken = 0;
 function renderProductosTarjetas(grid, list){
   if(!grid) return;
   grid.hidden = false;
   if(list.length === 0){
+    _prodRenderToken++;
     grid.innerHTML = `<p class="hint prod-grid-empty">No hay productos que coincidan.</p>`;
     return;
   }
   const esInvitado = currentRole === 'guest';
-  grid.innerHTML = list.map((p, idx) => {
+  const cardHtml = (p, idx) => {
     const img = getImage(p.id);
     const countImg = getImageCount(p.id);
     const thumb = img
@@ -9322,8 +9324,29 @@ function renderProductosTarjetas(grid, list){
         </span>
       </span>
     </div>`;
-  }).join('');
+  };
+  // Render por tandas: las primeras tarjetas aparecen al instante y el resto
+  // se agrega en los siguientes cuadros, así la pestaña abre sin congelarse
+  // aunque haya miles de productos. (Solo dibuja; no toca datos.)
+  const token = ++_prodRenderToken;
+  const FIRST = 48, CHUNK = 120;
+  const first = Math.min(FIRST, list.length);
+  let html = '';
+  for(let i = 0; i < first; i++) html += cardHtml(list[i], i);
+  grid.innerHTML = html;
   armImgLazyLoader(grid);
+  let pos = first;
+  const next = ()=>{
+    if(token !== _prodRenderToken || pos >= list.length) return;
+    const end = Math.min(pos + CHUNK, list.length);
+    let h = '';
+    for(let i = pos; i < end; i++) h += cardHtml(list[i], i);
+    pos = end;
+    grid.insertAdjacentHTML('beforeend', h);
+    armImgLazyLoader(grid);
+    if(pos < list.length) requestAnimationFrame(next);
+  };
+  if(pos < list.length) requestAnimationFrame(next);
 }
 
 function updateSidebarProductCount(){
@@ -11244,7 +11267,7 @@ function showView(name){
     // El escáner ya no tiene pestaña propia: se abre desde Productos.
     btn.classList.toggle('active', btn.dataset.view === (name === 'escaner' ? 'productos' : name));
   });
-  updateTopbarHeightVar();
+  requestAnimationFrame(updateTopbarHeightVar);
   document.getElementById('viewTitle').textContent = VIEW_TITLES[name] || '';
   document.body.classList.toggle('inicio-theme', name === 'inicio');
   document.body.classList.remove('welcome-view');
@@ -11696,7 +11719,7 @@ function playLoginSound(){
   try{
     const AC = window.AudioContext || window.webkitAudioContext;
     if(!AC) return;
-    const ctx = new AC();
+    const ctx = sfAudioCtx(AC);
     if(ctx.state === 'suspended' && ctx.resume) ctx.resume();
     const now = ctx.currentTime;
 
@@ -11725,11 +11748,20 @@ function playLoginSound(){
 // Sonido al apretar los botones del menú lateral (distinto al de ingreso de
 // sesión), generado con Web Audio. Chime suave, similar al de la pantalla de
 // inicio/bienvenida pero más corto y discreto.
+// Un solo AudioContext reutilizado: crear uno nuevo en cada clic era lo que
+// hacía lenta la navegación del menú (y el navegador limita cuántos caben).
+let _sfSharedAudioCtx = null;
+function sfAudioCtx(AC){
+  try{
+    if(!_sfSharedAudioCtx || _sfSharedAudioCtx.state === 'closed') _sfSharedAudioCtx = new AC();
+    return _sfSharedAudioCtx;
+  }catch(e){ return new AC(); }
+}
 function playClickSound(){
   try{
     const AC = window.AudioContext || window.webkitAudioContext;
     if(!AC) return;
-    const ctx = new AC();
+    const ctx = sfAudioCtx(AC);
     if(ctx.state === 'suspended' && ctx.resume) ctx.resume();
     const now = ctx.currentTime;
 
@@ -11761,7 +11793,7 @@ function playCashRegisterSound(){
   try{
     const AC = window.AudioContext || window.webkitAudioContext;
     if(!AC) return;
-    const ctx = new AC();
+    const ctx = sfAudioCtx(AC);
     if(ctx.state === 'suspended' && ctx.resume) ctx.resume();
     const now = ctx.currentTime;
 

@@ -1052,3 +1052,7 @@ body.theme-amarillo .btn-primary{color:#403000;}
 .guest-card-img .tag-nuevo{top:6px; left:6px; font-size:11px; padding:3px 8px; border-radius:5px;}
 .sr-img-wrap .tag-nuevo, #invImgWrap .tag-nuevo{top:4px; left:4px; font-size:11px; padding:3px 7px;}
 .venta-search-item .tag-nuevo{top:4px; left:4px;}
+
+/* Panel "Eliminar características": solo en el dueño de Manuales */
+#panelEliminarCaract{display:none;}
+body.modo-manual:not(.role-guest) #panelEliminarCaract{display:block;}

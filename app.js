@@ -260,6 +260,9 @@ function normalizeDB(obj){
   obj.finanzas.deudas = obj.finanzas.deudas || [];
   obj.ajustes = obj.ajustes || {};
   obj.tombstones = obj.tombstones || {};
+  // Marca de la última "Eliminar características" de este catálogo (solo existe
+  // si el dueño la usó). Se sincroniza junto con el catálogo.
+  if(obj.sinCaracteristicasAt) obj.sinCaracteristicasAt = Number(obj.sinCaracteristicasAt) || 0;
   obj.productos.forEach(p=>{
     p.codigoBarras = p.codigoBarras || '';
     p.stock = typeof p.stock === 'number' ? p.stock : 0;
@@ -275,17 +278,45 @@ function normalizeDB(obj){
   // ids nuevos), aquí se conserva SOLO el ejemplar más útil (con stock, con
   // características o el más reciente) y se descartan las copias extra. Sin
   // esto, cada dispositivo terminaría mostrando el producto duplicado.
-  dedupeProductosByCode(obj.productos);
+  // Si el dueño eliminó las características, ninguna copia vieja (de este u otro
+  // dispositivo) puede devolverlas: se descartan ANTES de elegir cuál duplicado gana.
+  aplicarLimpiezaCaracteristicas(obj);
+  dedupeProductosByCode(obj.productos, obj.sinCaracteristicasAt);
   return obj;
+}
+
+// ¿Esas características (con su marca _carAt de última edición) son ANTERIORES
+// a la última eliminación masiva del catálogo? Si sí, están obsoletas.
+function caracteristicasObsoletas(store, carAt){
+  const m = Number(store && store.sinCaracteristicasAt) || 0;
+  return m > 0 && (Number(carAt) || 0) < m;
+}
+
+// Vacía las características obsoletas de un catálogo (idempotente). Solo toca
+// el campo `caracteristicas`: nada más del producto cambia.
+function aplicarLimpiezaCaracteristicas(obj){
+  const m = Number(obj && obj.sinCaracteristicasAt) || 0;
+  if(!m || !Array.isArray(obj.productos)) return 0;
+  let n = 0;
+  obj.productos.forEach(p => {
+    if(p && String(p.caracteristicas || '').length > 0 && (Number(p._carAt) || 0) < m){
+      p.caracteristicas = '';
+      n++;
+    }
+  });
+  return n;
 }
 
 // Elimina del arreglo los productos que comparten el MISMO código. Modifica el
 // arreglo en el lugar; los que no tienen código no se tocan (no hay forma de
-// saber si son duplicados).
-function dedupeProductosByCode(list){
+// saber si son duplicados). Si el producto descartado tenía FOTO en este
+// dispositivo, la foto se pasa al producto que se queda (las fotos están ligadas
+// al id y, sin esto, quedaban "huérfanas": el producto parecía haber perdido la foto).
+function dedupeProductosByCode(list, marker){
   if(!Array.isArray(list)) return list;
   const seen = Object.create(null); // código normalizado -> índice en `keep`
   const keep = [];
+  const fotos = []; // pares [id descartado, id que se queda]
   for(let i = 0; i < list.length; i++){
     const p = list[i];
     if(!p || p.id == null){ keep.push(p); continue; }
@@ -297,20 +328,29 @@ function dedupeProductosByCode(list){
       continue;
     }
     const idx = seen[code];
-    keep[idx] = mejorProducto(keep[idx], p);
+    const actual = keep[idx];
+    const ganador = mejorProducto(actual, p, marker);
+    const perdedor = (ganador === actual) ? p : actual;
+    if(perdedor && ganador && perdedor.id != null && ganador.id != null && perdedor.id !== ganador.id){
+      fotos.push([perdedor.id, ganador.id]);
+    }
+    keep[idx] = ganador;
   }
   list.length = 0;
   Array.prototype.push.apply(list, keep);
+  if(fotos.length) migrarFotosDeDuplicados(fotos);
   return list;
 }
 
 // De dos productos con el mismo código, elige cuál se queda: primero el que
-// tenga stock (no 0), después el que tenga características, después el más
+// tenga stock (no 0), después el que tenga características VIGENTES, después el más
 // reciente y, si todo es igual, el primero. Es DETERMINISTA: todos los
 // dispositivos eligen al mismo ganador y el catálogo converge a uno por código.
-function mejorProducto(a, b){
-  const aCar = String(a.caracteristicas || '').length > 0 ? 1 : 0;
-  const bCar = String(b.caracteristicas || '').length > 0 ? 1 : 0;
+function mejorProducto(a, b, marker){
+  const vigente = p => String(p.caracteristicas || '').length > 0 &&
+    !(Number(marker) > 0 && (Number(p._carAt) || 0) < Number(marker));
+  const aCar = vigente(a) ? 1 : 0;
+  const bCar = vigente(b) ? 1 : 0;
   if(aCar !== bCar) return aCar ? a : b;
   const aStock = (typeof a.stock === 'number' && a.stock > 0) ? 1 : 0;
   const bStock = (typeof b.stock === 'number' && b.stock > 0) ? 1 : 0;
@@ -584,6 +624,9 @@ function syncMasterSwitchUI(){
 
 function saveDB(){
   persistLocalCache();
+  // Datos locales recién borrados en este dispositivo: no se sube un catálogo
+  // vacío encima del compartido; se espera a recibir la copia de la nube.
+  try{ if(localStorage.getItem('fs_esperar_nube_' + currentModo) === '1') return; }catch(e){}
   // Sube SIEMPRE que Firebase esté configurado (no hace falta esperar a que
   // "fbReady" termine de arrancar): si la conexión todavía no está lista, la
   // cola espera el momento correcto y reenvía sola. Así UNA VENTA REGISTRADA
@@ -841,6 +884,11 @@ function mergeRemoteIntoLocal(local, remote){
   // venta/producto/etc. en cualquier dispositivo, desaparece también aquí y
   // no vuelve a "resucitar" en la próxima escritura del otro dispositivo.
   merged.tombstones = unionTombstones(local.tombstones, remote.tombstones);
+  // La marca de "Eliminar características" siempre gana la más reciente.
+  (()=>{
+    const mk = Math.max(Number(local.sinCaracteristicasAt) || 0, Number(remote.sinCaracteristicasAt) || 0);
+    if(mk) merged.sinCaracteristicasAt = mk;
+  })();
   merged.productos = applyTombstones(merged.productos, merged.tombstones.productos);
   merged.ventas = applyTombstones(merged.ventas, merged.tombstones.ventas);
   merged.compras = applyTombstones(merged.compras, merged.tombstones.compras);
@@ -1326,6 +1374,7 @@ async function connectFirebase(){
       merged.historialBusquedas = db.historialBusquedas;
       merged.historialInventario = db.historialInventario;
       db = merged;
+      try{ localStorage.removeItem('fs_esperar_nube_' + currentModo); }catch(e){}
       // Primera copia de la nube en un dispositivo que no es la PC maestra:
       // adopta el catálogo de la nube y habilita sus propias subidas.
       alinearCatalogoUnaVez(db, remote);
@@ -1359,6 +1408,7 @@ async function connectFirebase(){
       applySnapshot(snap);
     }else if(snap && !snap.exists){
       // Primera vez: sube los datos locales como semilla inicial de la nube
+      try{ localStorage.removeItem('fs_esperar_nube_' + currentModo); }catch(e){}
       const { historialEscaneos, historialBusquedas, historialInventario, ventas, ajustes, gastosPrestamos, compras, ...syncData } = db;
       try{ await withTimeout(fbDocRef.set(syncData), 12000); }catch(e){ /* el SDK reintenta */ }
     }
@@ -1621,6 +1671,8 @@ function productoDocData(p){
   };
   // Fecha del primer registro (para el distintivo NUEVO): solo si el producto la tiene.
   if(p.fechaRegistro) d.fechaRegistro = p.fechaRegistro;
+  // Marca de la última edición MANUAL de las características (si existe).
+  if(typeof p._carAt === 'number' && p._carAt > 0) d._carAt = p._carAt;
   // Precio distribuidor y descuento (Manuales): solo si el producto los tiene.
   if(p.precioDistribuidor !== undefined && p.precioDistribuidor !== null && !isNaN(Number(p.precioDistribuidor))) d.precioDistribuidor = Number(p.precioDistribuidor);
   if(p.descuento !== undefined && p.descuento !== null && !isNaN(Number(p.descuento))) d.descuento = Number(p.descuento);
@@ -1650,10 +1702,14 @@ async function applyStockDelta(p, delta, modo, opts){
   if(!col || !p || !p.id) return;
   delta = Number(delta) || 0;
   if(delta === 0) return;
+  // _stockAt == _updatedAt marca este cambio como "SOLO stock": los demás
+  // dispositivos suben la cantidad pero no copian datos del producto.
+  const ahora = Date.now();
   try{
     await col.doc(p.id).update({
       stock: firebase.firestore.FieldValue.increment(delta),
-      _updatedAt: Date.now()
+      _updatedAt: ahora,
+      _stockAt: ahora
     });
   }catch(err){
     if(err && err.code === 'not-found'){
@@ -1663,7 +1719,8 @@ async function applyStockDelta(p, delta, modo, opts){
       try{
         await col.doc(p.id).update({
           stock: firebase.firestore.FieldValue.increment(delta),
-          _updatedAt: Date.now()
+          _updatedAt: ahora,
+          _stockAt: ahora
         });
       }catch(e2){ console.error('Error incrementando stock tras crear documento', e2); }
     }else{
@@ -2521,7 +2578,7 @@ function startStockListener(modo){
       try{
         // Si en la nube hay DOS documentos del mismo código (duplicados de un
         // re-import), el listener pudo haberlos recibido: se deja solo uno.
-        dedupeProductosByCode(store.productos);
+        dedupeProductosByCode(store.productos, store.sinCaracteristicasAt);
         if(modo === currentModo){
           persistLocalCache();
         }else{
@@ -2588,10 +2645,20 @@ function startStockListener(modo){
           touched = true;
         }
         const remoteTs = typeof data._updatedAt === 'number' ? data._updatedAt : 0;
-        if(remoteTs >= (p._updatedAt || 0)){
+        // Un cambio que fue SOLO de stock (una venta, un ingreso) lleva _stockAt igual
+        // a _updatedAt. En ese caso el documento de la nube NO trae datos nuevos del
+        // producto: copiarlos pisaba el producto local con una copia vieja (devolvía
+        // las características borradas y cambiaba el producto por otro duplicado).
+        const soloStock = typeof data._stockAt === 'number' && data._stockAt === data._updatedAt;
+        if(!soloStock && remoteTs >= (p._updatedAt || 0)){
           ['codigo','nombre','marca','categoria','precioCompra','precioMarca','precioVenta','precioDistribuidor','descuento','stockMin','caracteristicas'].forEach(f => {
-            if(data[f] !== undefined && String(data[f]) !== String(p[f])){
-              p[f] = typeof data[f] === 'number' ? Number(data[f]) : data[f];
+            if(data[f] === undefined) return;
+            let val = data[f];
+            // Características anteriores a la última eliminación: no vuelven.
+            if(f === 'caracteristicas' && caracteristicasObsoletas(store, data._carAt)) val = '';
+            if(String(val) !== String(p[f])){
+              p[f] = typeof val === 'number' ? Number(val) : val;
+              if(f === 'caracteristicas' && typeof data._carAt === 'number') p._carAt = data._carAt;
               touched = true;
             }
           });
@@ -2617,11 +2684,12 @@ function startStockListener(modo){
           descuento: data.descuento,
           stock: Number(data.stock) || 0,
           stockMin: Number(data.stockMin) || 0,
-          caracteristicas: data.caracteristicas || '',
+          caracteristicas: caracteristicasObsoletas(store, data._carAt) ? '' : (data.caracteristicas || ''),
           fechaCreacion: todayISO(),
           _updatedAt: typeof data._updatedAt === 'number' ? data._updatedAt : Date.now()
         };
         if(data.fechaRegistro) nuevo.fechaRegistro = data.fechaRegistro;
+        if(typeof data._carAt === 'number') nuevo._carAt = data._carAt;
         store.productos.push(nuevo);
         touched = true;
       }
@@ -2648,7 +2716,8 @@ function stopStockListeners(){
 
 // Convierte el documento de producto de la nube (delgado) a un producto local
 // completo, para agregarlo al catálogo cuando llega desde otro dispositivo.
-function cloudProductoToDB(data){
+function cloudProductoToDB(data, marker){
+  const carObsoleta = Number(marker) > 0 && (Number(data._carAt) || 0) < Number(marker);
   const r = {
     id: data.id,
     codigo: data.codigo || '',
@@ -2663,11 +2732,12 @@ function cloudProductoToDB(data){
     descuento: data.descuento,
     stock: Number(data.stock) || 0,
     stockMin: Number(data.stockMin) || 0,
-    caracteristicas: data.caracteristicas || '',
+    caracteristicas: carObsoleta ? '' : (data.caracteristicas || ''),
     fechaCreacion: todayISO(),
     _updatedAt: typeof data._updatedAt === 'number' ? data._updatedAt : Date.now()
   };
   if(data.fechaRegistro) r.fechaRegistro = data.fechaRegistro;
+  if(typeof data._carAt === 'number') r._carAt = data._carAt;
   return r;
 }
 
@@ -2711,18 +2781,19 @@ async function assimilateCatalogFromCloud(modo){
         // las de la nube sin pisar las que ya estén.
         const localCar = String(existing.caracteristicas || '');
         const cloudCar = String(data.caracteristicas || '');
-        if(cloudCar && !localCar){
+        if(cloudCar && !localCar && !caracteristicasObsoletas(store, data._carAt)){
           existing.caracteristicas = cloudCar;
+          if(typeof data._carAt === 'number') existing._carAt = data._carAt;
           refilled = true;
         }
         return;
       }
-      add.push(cloudProductoToDB(data));
+      add.push(cloudProductoToDB(data, store.sinCaracteristicasAt));
     });
     if(add.length || refilled){
       if(add.length) store.productos = store.productos.concat(add);
       // Si la nube tenía DOS documentos del mismo código, se deja solo uno.
-      dedupeProductosByCode(store.productos);
+      dedupeProductosByCode(store.productos, store.sinCaracteristicasAt);
       if(modo === currentModo){
         persistLocalCache();
         rerenderCurrentView();
@@ -3173,7 +3244,65 @@ function removeImageLocal(productId){
   })).catch(err=>{ console.error('Error borrando imagen', err); return false; });
 }
 
-// Borra TODAS las imágenes de ambos modos (se usa en "Borrar todos los datos").
+// Pasa las fotos de un producto descartado por DUPLICADO (mismo código) al producto
+// que se queda. Solo COPIA (nunca borra la foto original) y nunca pisa una foto
+// que el producto ganador ya tenga. Los ids son únicos, así que se busca en las
+// dos tiendas de fotos (Manuales y Eléctricas) sin mezclar nada.
+function migrarFotosDeDuplicados(pares){
+  Promise.resolve().then(async ()=>{
+    let movido = false;
+    const idb = await openImgDB();
+    for(const par of pares){
+      const from = par[0], to = par[1];
+      for(const store of ['imgs_manual', 'imgs_electrico']){
+        if(!idb.objectStoreNames.contains(store)) continue;
+        const r = await new Promise(resolve => {
+          try{
+            const tx = idb.transaction(store, 'readwrite');
+            const os = tx.objectStore(store);
+            const gSrc = os.get(from);
+            gSrc.onsuccess = ()=>{
+              const src = gSrc.result;
+              const sd = src && Array.isArray(src.data) ? src.data.slice() : (src && src.data ? [src.data] : []);
+              if(!sd.length){ resolve(null); return; }
+              const gDst = os.get(to);
+              gDst.onsuccess = ()=>{
+                const dst = gDst.result;
+                const dd = dst && Array.isArray(dst.data) ? dst.data : (dst && dst.data ? [dst.data] : []);
+                if(dd.length){ resolve(null); return; } // el que se queda ya tiene foto
+                const su = src && Array.isArray(src.url) ? src.url.slice(0, sd.length) : (src && src.url ? [src.url] : []);
+                os.put({ id: to, data: sd, url: su }, to);
+                tx.oncomplete = ()=> resolve({ data: sd, url: su, store });
+              };
+              gDst.onerror = ()=> resolve(null);
+            };
+            gSrc.onerror = ()=> resolve(null);
+            tx.onerror = ()=> resolve(null);
+          }catch(e){ resolve(null); }
+        });
+        if(r && (r.store === 'imgs_' + currentModo || currentModo === 'invitado')){
+          imgCache[to] = r.data; imgUrlCache[to] = r.url; movido = true;
+        }
+      }
+    }
+    if(movido){ try{ rerenderCurrentView(); }catch(e){} }
+  }).catch(err => console.warn('No se pudieron migrar fotos de duplicados', err));
+}
+
+// Borra las fotos locales de UN solo modo (Manuales o Eléctricas).
+function clearImagesForModo(modo){
+  if(modo !== 'manual' && modo !== 'electrico') return Promise.resolve(true);
+  return openImgDB().then(idb => new Promise(resolve => {
+    const store = 'imgs_' + modo;
+    if(!idb.objectStoreNames.contains(store)){ resolve(true); return; }
+    const tx = idb.transaction(store, 'readwrite');
+    tx.objectStore(store).clear();
+    tx.oncomplete = ()=> resolve(true);
+    tx.onerror = ()=> resolve(false);
+  })).catch(err => { console.error('Error limpiando imágenes del modo ' + modo, err); return false; });
+}
+
+// Borra TODAS las imágenes de ambos modos (ya no lo usa ningún botón; se conserva por compatibilidad).
 function clearAllImages(){
   return openImgDB().then(db => new Promise(resolve=>{
     const tx = db.transaction(['imgs_manual','imgs_electrico'], 'readwrite');
@@ -9462,10 +9591,78 @@ function saveDetCaracteristicas(){
   if(!p){ toast('No se pudo guardar', 'error'); return; }
   p.caracteristicas = document.getElementById('detCaracteristicas').value;
   touchProducto(p);
+  p._carAt = Date.now(); // edición explícita: sobrevive a una "Eliminar características" anterior
   saveDB();
   syncProductoDoc(p); // mantiene el documento del producto en la nube al día
   renderProductos();
   toast('Características guardadas', 'success');
+}
+
+// Botón "Eliminar características" (Configuración de Manuales). Vacía SOLO el
+// campo `caracteristicas` de los productos de Manuales: en este dispositivo, en el
+// catálogo de la nube y en los documentos por producto. No toca códigos, marcas,
+// descripciones, precios, stock, fotos ni Eléctricas. Es idempotente.
+async function eliminarCaracteristicas(){
+  if(currentRole === 'guest' || currentModo !== 'manual'){
+    toast('Esta opción solo está en la configuración de Manuales', 'error');
+    return;
+  }
+  if(!subidaCatalogoPermitida()){
+    toast('Esta PC todavía no está alineada con la nube. Conecta Firebase, espera a que sincronice y vuelve a intentarlo.', 'warning');
+    return;
+  }
+  const conCar = (db.productos || []).filter(p => p && String(p.caracteristicas || '').length > 0).length;
+  confirmDialog('Eliminar características',
+    '¿Eliminar el contenido de "Características" de TODOS los productos de Manuales?\n\n' +
+    '• En este dispositivo y en la nube (catálogo y documentos por producto).\n' +
+    '• No se tocan códigos, descripciones, marcas, precios, cantidades ni fotos.\n' +
+    '• Eléctricas y otros dueños no se afectan.\n' +
+    '• Productos con características en este dispositivo: ' + conCar + '.\n\n' +
+    'No se puede deshacer.',
+    async ()=>{
+      const modo = 'manual';
+      const ahora = Date.now();
+      let locales = 0;
+      (db.productos || []).forEach(p => {
+        if(p && String(p.caracteristicas || '').length > 0){
+          p.caracteristicas = '';
+          p._updatedAt = ahora; // la copia limpia gana a cualquier copia vieja
+          locales++;
+        }
+      });
+      // La marca viaja con el catálogo: cualquier dispositivo que todavía tenga
+      // características viejas las descarta al recibirla.
+      db.sinCaracteristicasAt = ahora;
+      saveDB();
+      let nube = 0, nubeOk = true, conNube = false;
+      const col = fbProductsCol(modo);
+      if(col){
+        conNube = true;
+        try{
+          const snap = await col.get();
+          const docs = snap.docs.filter(d => String((d.data() || {}).caracteristicas || '').length > 0);
+          const fs = col.firestore;
+          for(let i = 0; i < docs.length; i += 450){
+            const batch = fs.batch();
+            docs.slice(i, i + 450).forEach(d => batch.update(d.ref, { caracteristicas: '', _updatedAt: ahora }));
+            await batch.commit();
+          }
+          nube = docs.length;
+        }catch(e){
+          nubeOk = false;
+          console.error('Error eliminando características en la nube', e);
+        }
+      }
+      try{ renderProductos(); }catch(e){}
+      try{ if(detTargetId) document.getElementById('detCaracteristicas').value = ''; }catch(e){}
+      if(!conNube){
+        toast('Características eliminadas en este dispositivo (' + locales + '). La sincronización está apagada: la nube no se tocó.', 'warning');
+      }else if(!nubeOk){
+        toast('Se limpiaron ' + locales + ' productos aquí, pero la nube falló. Vuelve a pulsar el botón con buena conexión.', 'error');
+      }else{
+        toast('Características eliminadas: ' + locales + ' aquí y ' + nube + ' documentos en la nube.', 'success');
+      }
+    });
 }
 
 function openImageModal(productId){
@@ -10312,7 +10509,7 @@ function importProductsCSV(file){
           if(pDist !== undefined){ existing.precioDistribuidor = pDist; existing.descuento = pDesc; existing.precioMarca = 0; }
           if(stockVal !== null) existing.stock = stockVal;
           if(stockMinVal !== null) existing.stockMin = stockMinVal;
-          if(caracteristicas) existing.caracteristicas = caracteristicas;
+          if(caracteristicas){ existing.caracteristicas = caracteristicas; existing._carAt = Date.now(); }
           touchProducto(existing);
           productoId = existing.id;
           importadosList.push(existing);
@@ -10329,6 +10526,7 @@ function importProductsCSV(file){
             fechaCreacion: todayISO(),
             _updatedAt: Date.now()
           };
+          if(caracteristicas) p._carAt = Date.now();
           db.productos.push(p);
           productoId = p.id;
           importadosList.push(p);
@@ -10720,61 +10918,68 @@ function vaciarCatalogo(){
     });
 }
 
-// Borra de la nube los documentos de producto del modo actual (en lotes).
+// Borra de la nube los documentos de producto de ESTE modo (dueño + categoría),
+// en lotes. Incluye los documentos "fantasma" que la nube tenga de este mismo modo
+// (otro id, import repetido): si quedaran, volverían al catálogo con la asimilación.
+// Nunca toca la colección de otro modo (cada modo tiene la suya).
 async function vaciarProductosNube(ids){
-  const col = fbProductsCol(currentModo);
-  if(!col || !fbConfigOk() || !ids || !ids.length) return;
+  const modo = currentModo;
+  const col = fbProductsCol(modo);
+  if(!col || !fbConfigOk(modo)) return;
   try{
     const fs = col.firestore;
-    for(let i = 0; i < ids.length; i += 450){
+    const todos = new Set((ids || []).map(id => String(id)));
+    try{ const snap = await col.get(); snap.docs.forEach(d => todos.add(String(d.id))); }catch(e){ /* se borran al menos los conocidos */ }
+    if(currentModo === modo){
+      const tb = (db.tombstones && db.tombstones.productos) || {};
+      let nuevas = 0;
+      todos.forEach(id => { if(!tb[id]){ marcarBorrado('productos', id); nuevas++; } });
+      if(nuevas) saveDB();
+    }
+    const lista = Array.from(todos);
+    for(let i = 0; i < lista.length; i += 450){
       const batch = fs.batch();
-      ids.slice(i, i + 450).forEach(id => { batch.delete(col.doc(id)); });
+      lista.slice(i, i + 450).forEach(id => { batch.delete(col.doc(id)); });
       await batch.commit();
     }
   }catch(e){ console.error('Error vaciando productos de la nube', e); }
 }
 
 /* -------------------------------------------------------------------------
-   PONER TODO DESDE CERO — borrado TOTAL (nube + todos los dispositivos)
+   PONER TODO DESDE CERO / BORRAR DATOS DE ESTE DISPOSITIVO — POR DUEÑO Y CATEGORÍA
    -------------------------------------------------------------------------
-   Botón de "Zona de riesgo" en Configuración. Hace DOS cosas:
+   Cada modo (🛠️ Manuales, ⚡ Eléctricas) es un dueño + categoría con SUS datos:
+     • NUBE: colecciones "stockferre_<tipo>_<modo>" y el documento
+       "stockferre/inventario_<modo>" (en el proyecto de Firebase de ESE modo).
+       Manuales vive en app-perez-2; Eléctricas y el Invitado en
+       app-ferreteria-bd73f (por eso NUNCA se borra "todo el proyecto").
+     • LOCAL (este navegador): claves "..._<modo>", su base ampliada (IndexedDB)
+       y su tienda de fotos "imgs_<modo>".
 
-   1) NUBE: vacía por completo AMBOS proyectos de Firebase (catálogos,
-      ventas, ingresos, gastos, deudas, ajustes...). Se hace una sola vez
-      desde un dispositivo y listo.
-
-   2) TODOS LOS DEMÁS DISPOSITIVOS: no basta con vaciar la nube, porque un
-      celular apagado que tenga datos viejos en su navegador los volvería a
-      subir al encenderse ("resucitaría" lo borrado). Por eso, ANTES de borrar
-      se escribe una marca de generación (_meta.resetGen) en los proyectos y
-      cada dispositivo, al abrir la app, compara: si la nube dice que hay una
-      generación más nueva que la suya, se limpia SOLO (localStorage,
-      IndexedDB y cachés) y arranca en blanco. Nadie tiene que tocar nada.
+   "Poner todo desde cero" → reinicia SOLO el modo desde el que se pulsa:
+     nube de ESE modo + marca de generación PROPIA de ese modo (los dispositivos
+     limpian solo los datos locales de ese modo al abrir la app).
+   "Borrar todos los datos de este dispositivo" → solo LOCAL, solo ese modo;
+     no escribe NADA en Firebase.
    ------------------------------------------------------------------------- */
 
-// Colecciones que existen (o pueden existir) en cada proyecto de Firebase.
-const FB_SWEEP_COLLECTIONS = [
-  'stockferre',
-  'stockferre_productos_manual',
-  'stockferre_productos_electrico',
-  'stockferre_ventas_manual',
-  'stockferre_ventas_electrico',
-  'stockferre_ventas_invitado',
-  'stockferre_ajustes_manual',
-  'stockferre_ajustes_electrico',
-  'stockferre_ajustes_invitado',
-  'stockferre_gastosprestamos_manual',
-  'stockferre_gastosprestamos_electrico',
-  'stockferre_gastosprestamos_invitado'
-];
+// Colecciones de la nube que pertenecen a UN modo.
+function coleccionesDelModo(modo){
+  return ['stockferre_productos_', 'stockferre_ventas_', 'stockferre_ajustes_',
+          'stockferre_gastosprestamos_', 'stockferre_compras_'].map(n => n + modo);
+}
+
+// Marca de generación POR MODO (antes era una sola para todo).
+function resetGenKeyFor(modo){ return RESET_GEN_KEY + '_' + modo; }
+function resetGenFieldFor(modo){ return 'resetGen_' + modo; }
 
 // Última comprobación de la generación remota hecha en esta sesión
 // (para no quemar lecturas del cupo gratis con el vigía de 12 segundos).
 let resetGenSessionChecked = false;
 
-// Comprueba si la nube fue reiniciada desde OTRO dispositivo. Si es así,
-// limpia este navegador entero y recarga la página en blanco. Devuelve true
-// cuando mandó a recargar (el llamador debe dejar de conectar).
+// Comprueba si la nube de algún modo fue reiniciada desde OTRO dispositivo. Si
+// es así, limpia SOLO los datos locales de ESE modo y recarga la página.
+// Devuelve true cuando mandó a recargar (el llamador debe dejar de conectar).
 async function checkRemoteResetGen(){
   try{
     if(!firebaseToggleOn() || typeof firebase === 'undefined') return false;
@@ -10788,125 +10993,140 @@ async function checkRemoteResetGen(){
     }
     resetGenSessionChecked = true;
     try{ localStorage.setItem('stockferre_reset_gen_checked_v1', String(now)); }catch(e){}
-    let maxGen = 0;
-    const proyectos = ['manual','electrico'];
-    for(let i = 0; i < proyectos.length; i++){
-      const fs = fsFor(proyectos[i]);
+    const limpiados = [];
+    // El proyecto 'manual' guarda solo el modo manual y el 'electrico' solo el modo
+    // eléctrico (+ invitado): cada modo lee la marca de SU proyecto.
+    const modos = ['manual', 'electrico'];
+    for(let i = 0; i < modos.length; i++){
+      const modo = modos[i];
+      const fs = fsFor(modo);
       if(!fs) continue;
       try{
         const snap = await withTimeout(fs.collection('stockferre').doc('_meta').get(), 8000);
-        if(snap && snap.exists){
-          const g = Number((snap.data() || {}).resetGen) || 0;
-          if(g > maxGen) maxGen = g;
-        }
+        if(!snap || !snap.exists) continue;
+        const g = Number((snap.data() || {})[resetGenFieldFor(modo)]) || 0;
+        if(!g) continue;
+        let local = 0;
+        try{ local = Number(localStorage.getItem(resetGenKeyFor(modo))) || 0; }catch(e){}
+        if(g <= local) continue;
+        // La nube de ESTE modo se reinició DESPUÉS de que este navegador guardó
+        // sus datos: se limpian solo los datos locales de este modo.
+        try{ localStorage.setItem(resetGenKeyFor(modo), String(g)); }catch(e){}
+        await wipeLocalModo(modo);
+        limpiados.push(modo);
       }catch(e){ /* ese proyecto no está disponible */ }
     }
-    if(!maxGen) return false;
-    let local = 0;
-    try{ local = Number(localStorage.getItem(RESET_GEN_KEY)) || 0; }catch(e){}
-    if(maxGen <= local) return false;
-    // La nube se reinició DESPUÉS de que este navegador guardó sus datos:
-    // se limpia solo y se recarga en blanco.
-    try{ localStorage.setItem(RESET_GEN_KEY, String(maxGen)); }catch(e){}
-    wipeLocalAll();
-    try{ toast('Este dispositivo se limpió para iniciar desde cero', 'success'); }catch(e){}
+    if(!limpiados.length) return false;
+    try{ toast('Se limpiaron los datos de ' + limpiados.map(m => MODO_LABELS[m] || m).join(' y ') + ' en este dispositivo para iniciar desde cero', 'success'); }catch(e){}
     setTimeout(()=>{ location.reload(); }, 800);
     return true;
   }catch(e){ return false; }
 }
 
-// Vacía TODOS los documentos de UN proyecto de Firebase (en lotes de 500),
-// descubriendo además las colecciones que existan y no estén en la lista.
-// El documento _meta (marca de generación) NO se toca.
-async function wipeCloudProject(projectKey, onProgress){
-  const fs = fsFor(projectKey);
-  if(!fs) throw new Error('El proyecto de ' + projectKey + ' no está configurado');
-  let names = FB_SWEEP_COLLECTIONS.slice();
-  try{
-    const cols = await withTimeout(fs.listCollections(), 15000);
-    (cols || []).forEach(c => { if(c && names.indexOf(c.id) === -1) names.push(c.id); });
-  }catch(e){ /* sin permiso para listar: se usa la lista conocida */ }
+// Borra de la nube SOLO los datos de UN modo: sus colecciones y su documento de
+// catálogo (conservando la contraseña de ese dueño). No toca otros modos, ni el
+// Invitado, ni la marca de generación.
+async function wipeCloudModo(modo, onProgress){
+  const fs = fsFor(modo);
+  if(!fs) throw new Error('El proyecto de ' + (MODO_LABELS[modo] || modo) + ' no está configurado');
+  const nombres = coleccionesDelModo(modo);
   let total = 0;
-  for(let n = 0; n < names.length; n++){
-    const name = names[n];
+  for(let n = 0; n < nombres.length; n++){
+    const name = nombres[n];
     const col = fs.collection(name);
     for(;;){
       const snap = await withTimeout(col.limit(500).get(), 20000);
       if(!snap || !snap.docs || !snap.docs.length) break;
-      const borrar = snap.docs.filter(d => !(name === 'stockferre' && d.id === '_meta'));
-      if(borrar.length){
-        const batch = fs.batch();
-        borrar.forEach(d => batch.delete(d.ref));
-        await withTimeout(batch.commit(), 20000);
-        total += borrar.length;
-      }
+      const batch = fs.batch();
+      snap.docs.forEach(d => batch.delete(d.ref));
+      await withTimeout(batch.commit(), 20000);
+      total += snap.docs.length;
       if(onProgress) onProgress(name, total);
       if(snap.docs.length < 500) break;
-      if(!borrar.length) break; // solo quedaba _meta: evitar bucle infinito
     }
   }
+  // Documento de catálogo del modo: se vacía, pero se conserva la contraseña.
+  const ref = fs.collection('stockferre').doc('inventario_' + modo);
+  let passEnc = null;
+  try{
+    const s = await withTimeout(ref.get(), 15000);
+    if(s && s.exists) passEnc = (s.data() || {})._passEnc || null;
+  }catch(e){ /* sin lectura: se reinicia sin contraseña guardada en la nube */ }
+  if(passEnc) await withTimeout(ref.set({ _passEnc: passEnc }), 15000);
+  else await withTimeout(ref.delete(), 15000);
   return total;
 }
 
-// Borra TODO lo que la app guardó en ESTE navegador: localStorage y
-// sessionStorage (prefijo stockferre_), el almacén ampliado de catálogo
-// (IndexedDB), las fotos (IndexedDB), la caché del Service Worker y la
-// conexión con Firebase. Conserva SOLO la marca de generación del reinicio
-// para no entrar en un bucle de auto-limpieza.
-function wipeLocalAll(){
-  // Claves de la app: todo lo que empiece por stockferre_ (catálogos,
-  // ventas, contraseñas, marcas...) y las marcas fs_laststock_* que usa el
-  // listener incremental de stock.
-  const esClaveNuestra = k => !!k && (k.indexOf('stockferre_') === 0 || k.indexOf('fs_') === 0);
+// Borra los datos LOCALES de UN solo modo en ESTE navegador: sus claves de
+// localStorage/sessionStorage, su copia ampliada (IndexedDB) y su tienda de fotos.
+// Conserva: contraseña del modo, marcas de generación, sesión, interruptor de
+// Firebase, caché del Service Worker y todo lo de los otros modos.
+async function wipeLocalModo(modo){
+  const clavePass = passKeyFor(modo);
+  const esDelModo = k => {
+    if(!k || k === clavePass) return false;
+    if(k.indexOf(RESET_GEN_KEY) === 0) return false;
+    if(k.indexOf('stockferre_') !== 0 && k.indexOf('fs_') !== 0) return false;
+    return k.slice(-(modo.length + 1)) === '_' + modo || k.indexOf('_' + modo + '_') !== -1;
+  };
+  const legacy = (modo === 'manual') ? [LEGACY_STORAGE_KEY, LEGACY_INV_UPDATES_KEY] : [];
+  const borrar = k => esDelModo(k) || legacy.indexOf(k) !== -1;
   try{
-    const gen = localStorage.getItem(RESET_GEN_KEY);
     for(let i = localStorage.length - 1; i >= 0; i--){
       const k = localStorage.key(i);
-      if(esClaveNuestra(k)) localStorage.removeItem(k);
+      if(borrar(k)) localStorage.removeItem(k);
     }
-    if(gen !== null) localStorage.setItem(RESET_GEN_KEY, gen);
   }catch(e){}
   try{
     for(let i = sessionStorage.length - 1; i >= 0; i--){
       const k = sessionStorage.key(i);
-      if(esClaveNuestra(k)) sessionStorage.removeItem(k);
+      if(borrar(k)) sessionStorage.removeItem(k);
     }
   }catch(e){}
-  try{ Object.keys(blobCache).forEach(k => { delete blobCache[k]; }); }catch(e){}
-  try{ kvDbPromise = null; indexedDB.deleteDatabase(KV_DB); }catch(e){}
-  try{ indexedDB.deleteDatabase(IMG_DB_NAME); }catch(e){}
+  try{ Object.keys(blobCache).forEach(k => { if(borrar(k)) delete blobCache[k]; }); }catch(e){}
+  // Almacén ampliado (IndexedDB "kv"): solo las claves de este modo.
   try{
-    disconnectFirebase();
-    disconnectGuestFirebase();
+    const d = await openKV();
+    await new Promise(resolve => {
+      try{
+        const tx = d.transaction(KV_STORE, 'readwrite');
+        const os = tx.objectStore(KV_STORE);
+        const req = os.openCursor();
+        req.onsuccess = ()=>{
+          const cur = req.result;
+          if(cur){ if(borrar(String(cur.key))) cur.delete(); cur.continue(); }
+        };
+        tx.oncomplete = ()=> resolve();
+        tx.onerror = ()=> resolve();
+        tx.onabort = ()=> resolve();
+      }catch(e){ resolve(); }
+    });
   }catch(e){}
-  try{ stopSyncWatchdog(); }catch(e){}
-  try{ Object.keys(fbWriteQueues).forEach(k => delete fbWriteQueues[k]); }catch(e){}
-  try{ db = defaultDB(); invUpdates = {}; }catch(e){}
-  try{
-    if(window.caches && caches.keys){
-      caches.keys().then(keys => { keys.forEach(k => { try{ caches.delete(k); }catch(e){} }); }).catch(()=>{});
-    }
-  }catch(e){}
+  // Fotos: solo la tienda de ESTE modo.
+  try{ await clearImagesForModo(modo); }catch(e){}
+  try{ if(currentModo === modo){ db = defaultDB(); invUpdates = {}; } }catch(e){}
 }
 
-// Botón "Poner todo desde cero": primero la nube (los dos proyectos), luego
-// este navegador, y por último recarga en blanco. Los demás dispositivos se
-// auto-limpian solos al abrir la app gracias a la marca de generación.
+// Botón "Poner todo desde cero": reinicia SOLO el modo (dueño + categoría) desde
+// el que se pulsa. Primero la nube de ese modo, luego este navegador (solo ese modo).
 function globalReset(){
-  if(currentRole === 'guest'){ toast('Los invitados no pueden hacer esto', 'error'); return; }
-  confirmDialog('Poner todo desde cero',
-    'Esto borra PERMANENTEMENTE TODO:\n\n' +
-    '• Productos y categorías de Manuales y Eléctricas.\n' +
-    '• Ventas, ingresos, gastos, deudas, pagos e historial.\n' +
-    '• Se vacían los DOS proyectos de Firebase (la nube).\n' +
-    '• Todos los demás dispositivos conectados se limpian SOLOS al abrir la app.\n\n' +
-    'Después deberás importar de nuevo el Excel de Manuales y el de Eléctricas (por separado, en su modo). ¿Continuar?',
-    ()=>{ runGlobalReset(); });
+  if(currentRole === 'guest' || currentModo === 'invitado'){ toast('Los invitados no pueden hacer esto', 'error'); return; }
+  const modo = currentModo;
+  const nombre = MODO_LABELS[modo] || modo;
+  confirmDialog('Poner todo desde cero — ' + nombre,
+    'Esto borra PERMANENTEMENTE los datos de ' + nombre + ' (y SOLO de ' + nombre + '):\n\n' +
+    '• Productos y categorías de ' + nombre + '.\n' +
+    '• Ventas, ingresos, gastos, deudas, pagos e historial de ' + nombre + '.\n' +
+    '• En la nube (Firebase) de ' + nombre + ' y en los dispositivos que usan ' + nombre + ' (se limpian solos al abrir la app).\n\n' +
+    'NO se toca el otro dueño/categoría, ni el Modo Invitado. Se conserva la contraseña de ' + nombre + '.\n' +
+    'Después deberás importar de nuevo el Excel de ' + nombre + '. ¿Continuar?',
+    ()=>{ runGlobalReset(modo); });
 }
 
-async function runGlobalReset(){
+async function runGlobalReset(modo){
   const btn = document.getElementById('btnGlobalReset');
   const originalText = btn ? btn.textContent : '';
+  const nombre = MODO_LABELS[modo] || modo;
   try{
     if(btn){ btn.disabled = true; btn.textContent = '🔄 Preparando…'; }
     // 1) Corta TODO lo que podría seguir subiendo datos viejos.
@@ -10918,38 +11138,29 @@ async function runGlobalReset(){
       if(fbWriteRetryTimers[k]) clearTimeout(fbWriteRetryTimers[k]);
       delete fbWriteRetryTimers[k];
     });
-    // 2) NUBE: primero la marca de generación (para que cualquier dispositivo
-    //    que abra la app mientras borramos ya se limpie solo) y después las
-    //    colecciones de AMBOS proyectos.
+    // 2) NUBE DE ESTE MODO: primero su marca de generación (merge: no pisa la del
+    //    otro modo) y después sus colecciones. Los demás modos no se tocan.
     let total = 0;
-    let gen = Date.now();
-    const conNube = firebaseToggleOn() && typeof firebase !== 'undefined' &&
-      (fbConfigOk('manual') || fbConfigOk('electrico'));
+    const gen = Date.now();
+    const conNube = firebaseToggleOn() && typeof firebase !== 'undefined' && fbConfigOk(modo);
     if(conNube){
-      const proyectos = [];
-      if(fbConfigOk('manual')) proyectos.push('manual');
-      if(fbConfigOk('electrico')) proyectos.push('electrico');
-      for(let i = 0; i < proyectos.length; i++){
-        const fs = fsFor(proyectos[i]);
-        if(!fs) throw new Error('No se pudo conectar con el proyecto de ' + proyectos[i]);
-        if(btn) btn.textContent = '🔄 Marcando generación en ' + proyectos[i] + '…';
-        await withTimeout(fs.collection('stockferre').doc('_meta').set({ resetGen: gen, _ts: gen }), 15000);
-      }
-      for(let i = 0; i < proyectos.length; i++){
-        const k = proyectos[i];
-        const n = await wipeCloudProject(k, (colName, tot)=>{
-          if(btn) btn.textContent = '🗑️ Borrando ' + k + ' → ' + colName + ' (' + tot + ')';
-        });
-        total += n;
-      }
+      const fs = fsFor(modo);
+      if(!fs) throw new Error('No se pudo conectar con el proyecto de ' + nombre);
+      if(btn) btn.textContent = '🔄 Marcando generación de ' + nombre + '…';
+      const marca = { _ts: gen };
+      marca[resetGenFieldFor(modo)] = gen;
+      await withTimeout(fs.collection('stockferre').doc('_meta').set(marca, { merge: true }), 15000);
+      total = await wipeCloudModo(modo, (colName, tot)=>{
+        if(btn) btn.textContent = '🗑️ Borrando ' + nombre + ' → ' + colName + ' (' + tot + ')';
+      });
     }
-    // 3) ESTE NAVEGADOR: localStorage, IndexedDB, fotos y cachés.
-    try{ localStorage.setItem(RESET_GEN_KEY, String(gen)); }catch(e){}
-    if(btn) btn.textContent = '🧹 Limpiando este dispositivo…';
-    wipeLocalAll();
+    // 3) ESTE NAVEGADOR: solo los datos locales de este modo.
+    try{ localStorage.setItem(resetGenKeyFor(modo), String(gen)); }catch(e){}
+    if(btn) btn.textContent = '🧹 Limpiando ' + nombre + ' en este dispositivo…';
+    await wipeLocalModo(modo);
     toast(conNube
-      ? 'Todo borrado (' + total + ' documentos de la nube). El dispositivo arranca en blanco.'
-      : 'Datos locales borrados (la sincronización está apagada: la nube no se tocó).', 'success');
+      ? nombre + ' borrado (' + total + ' documentos de la nube). Este dispositivo arranca en blanco en ' + nombre + '.'
+      : 'Datos locales de ' + nombre + ' borrados (la sincronización está apagada: la nube no se tocó).', 'success');
     setTimeout(()=>{ location.reload(); }, 800);
   }catch(err){
     console.error('Error al poner todo desde cero', err);
@@ -10958,21 +11169,33 @@ async function runGlobalReset(){
   }
 }
 
+// Botón "Borrar todos los datos de este dispositivo": SOLO local y SOLO el modo
+// (dueño + categoría) de la sesión actual. No escribe ni borra nada en Firebase.
 function factoryReset(){
-  confirmDialog('Borrar todos los datos', 'Esto eliminará permanentemente todos los productos y categorías guardados en este dispositivo. ¿Estás seguro?', ()=>{
-    const ventasIds = (db.ventas || []).map(v => v.id);
-    deleteVentaDocs(ventasIds, currentModo); // las ventas borradas también desaparecen de la nube
-    db = defaultDB();
-    invUpdates = {};
-    saveInvUpdates();
-    saveDB();
-    clearAllImages(); // borra también las imágenes locales de ambos modos
-    renderProductos();
-    renderCategorias();
-    renderInventario();
-    document.getElementById('scanResult').innerHTML = '';
-    toast('Datos borrados', 'success');
-  });
+  const modo = currentModo;
+  const nombre = MODO_LABELS[modo] || modo;
+  confirmDialog('Borrar datos de este dispositivo — ' + nombre,
+    'Esto borra SOLO la copia local de ' + nombre + ' guardada en ESTE dispositivo (productos, categorías, ventas locales, fotos de ' + nombre + ').\n\n' +
+    '• No borra nada de Firebase.\n' +
+    '• No toca a los otros dueños/categorías ni a los otros dispositivos.\n' +
+    '• Al volver a abrir, los datos compartidos de ' + nombre + ' se descargan de nuevo de la nube.\n\n¿Continuar?',
+    async ()=>{
+      try{
+        // Corta cualquier subida pendiente: aquí NADA debe viajar a la nube.
+        disconnectFirebase();
+        disconnectGuestFirebase();
+        stopSyncWatchdog();
+        await wipeLocalModo(modo);
+        // Hasta recibir la copia de la nube, este dispositivo no sube su catálogo
+        // (vacío) encima del compartido.
+        if(modo !== 'invitado'){ try{ localStorage.setItem('fs_esperar_nube_' + modo, '1'); }catch(e){} }
+        toast('Datos locales de ' + nombre + ' borrados en este dispositivo', 'success');
+        setTimeout(()=>{ location.reload(); }, 600);
+      }catch(err){
+        console.error('Error borrando datos locales', err);
+        toast('No se pudo completar el borrado local: ' + (err && err.message ? err.message : err), 'error');
+      }
+    });
 }
 
 /* -------------------------------------------------------------------------
@@ -13319,6 +13542,8 @@ function setupEventListeners(){
   document.getElementById('btnVaciarCatalogo').addEventListener('click', vaciarCatalogo);
   document.getElementById('btnFactoryReset').addEventListener('click', factoryReset);
   document.getElementById('btnGlobalReset').addEventListener('click', globalReset);
+  const btnEliminarCaract = document.getElementById('btnEliminarCaracteristicas');
+  if(btnEliminarCaract) btnEliminarCaract.addEventListener('click', eliminarCaracteristicas);
 }
 
 /* -------------------------------------------------------------------------

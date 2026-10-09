@@ -566,6 +566,14 @@
           </div>
         </div>
 
+        <div class="panel admin-only" id="panelEliminarCaract">
+          <div class="panel-header"><h3>🧹 Eliminar características</h3></div>
+          <div class="panel-body">
+            <p class="hint">Vacía el campo <strong>Características</strong> de todos los productos de 🛠️ Manuales, en este dispositivo y en la nube, para que no vuelvan a aparecer al sincronizar o vender. <strong>No toca códigos, descripciones, marcas, precios, cantidades ni fotos, ni Eléctricas.</strong> Puedes repetirlo sin problema.</p>
+            <button class="btn btn-danger" id="btnEliminarCaracteristicas">🧹 Eliminar características</button>
+          </div>
+        </div>
+
         <div class="panel admin-only">
           <div class="panel-header"><h3>🗑️ Vaciar catálogo</h3></div>
           <div class="panel-body">
@@ -658,10 +666,10 @@
         <div class="panel admin-only">
           <div class="panel-header"><h3>⚠️ Zona de riesgo</h3></div>
           <div class="panel-body">
-            <p class="hint">Deja TODO en cero: borra productos, ventas, ingresos, gastos, deudas e historial de los <strong>DOS proyectos de Firebase</strong> y de <strong>todos los dispositivos conectados</strong> (los demás celulares/PC se limpian solos al abrir la app). Solo queda borrar este dispositivo y recargar. Después reimportas cada Excel en su modo.</p>
-            <button class="btn btn-danger" id="btnGlobalReset">🧨 Poner todo desde cero (nube + todos los dispositivos)</button>
-            <p class="hint" style="margin-top:14px;">O solo local: borra los productos y categorías guardados <strong>en este dispositivo</strong> (la nube y los demás equipos no se tocan).</p>
-            <button class="btn btn-danger" id="btnFactoryReset">🗑️ Borrar todos los datos de este dispositivo</button>
+            <p class="hint">Deja en cero SOLO el <strong>modo actual</strong> (🛠️ Manuales o ⚡ Eléctricas): borra sus productos, ventas, ingresos, gastos, deudas e historial en su Firebase y en los dispositivos que lo usan (se limpian solos al abrir la app). <strong>El otro dueño/categoría y el Modo Invitado no se tocan.</strong> Después reimportas el Excel de este modo.</p>
+            <button class="btn btn-danger" id="btnGlobalReset">🧨 Poner todo desde cero (solo este modo)</button>
+            <p class="hint" style="margin-top:14px;">O solo local: borra los datos del <strong>modo actual guardados en este dispositivo</strong>. No escribe nada en Firebase, no toca a los otros dueños ni a los otros dispositivos; los datos compartidos se vuelven a descargar al abrir.</p>
+            <button class="btn btn-danger" id="btnFactoryReset">🗑️ Borrar los datos de este modo en este dispositivo</button>
           </div>
         </div>
       </div>

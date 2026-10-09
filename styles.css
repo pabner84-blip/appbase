@@ -387,8 +387,11 @@ body.theme-blanco .stock-pill{background:#e9ebef;}
   border-bottom:1px solid var(--border); position:sticky; top:0; background:var(--surface);
 }
 .modal-header h3{margin:0; font-size:16px;}
-.modal-close{background:none; border:none; font-size:18px; cursor:pointer; color:var(--text-muted); padding:4px 8px; border-radius:6px;}
-.modal-close:hover{background:var(--bg);}
+.modal-close{background:none; border:none; font-size:18px; cursor:pointer; color:var(--text-muted); padding:10px 14px; margin:-6px -8px -6px 0; min-width:44px; min-height:44px; border-radius:6px; touch-action:manipulation; line-height:1; font-family:Arial, sans-serif;}
+@media (hover:hover){ .modal-close:hover{background:var(--bg);} }
+/* Detalle del producto: header fijo (sticky) dentro de una ventana centrada con
+   transform hacía que el toque en la X se procesara tarde en el celular. */
+#modalProductoDetalle .modal-header{position:relative; top:auto;}
 .modal-body{padding:20px;}
 
 .form-grid{display:grid; grid-template-columns:1fr 1fr; gap:14px;}

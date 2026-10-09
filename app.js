@@ -12955,16 +12955,38 @@ function setupEventListeners(){
 
   // Cerrar modales: el DUEÑO cierra ventana por ventana (la X y el fondo
   // cierran solo la ventana de arriba); el INVITADO cierra todo como antes.
+  const cerrarDesdeBoton = (btn)=>{
+    const m = btn.closest('.modal');
+    if(m){
+      stopScannerForModal(m.id);
+      closeModalById(m.id);
+    }else{
+      closeAllModals();
+    }
+  };
   document.querySelectorAll('[data-close-modal]').forEach(btn=>{
-    btn.addEventListener('click', ()=>{
-      const m = btn.closest('.modal');
-      if(m){
-        stopScannerForModal(m.id);
-        closeModalById(m.id);
-      }else{
-        closeAllModals();
-      }
-    });
+    btn.addEventListener('click', ()=> cerrarDesdeBoton(btn));
+  });
+  // La "X" de arriba (header de la ventana) cierra al instante al soltar el dedo,
+  // sin esperar al "click" del navegador (en el celular se retrasaba y parecía
+  // colgada). preventDefault evita el click fantasma sobre lo que haya debajo.
+  document.querySelectorAll('.modal-close[data-close-modal]').forEach(btn=>{
+    let t0 = null;
+    btn.addEventListener('touchstart', (e)=>{
+      const t = e.touches[0];
+      t0 = t ? { x: t.clientX, y: t.clientY } : null;
+    }, { passive: true });
+    btn.addEventListener('touchend', (e)=>{
+      if(!t0) return;
+      const t = e.changedTouches[0];
+      const movio = t && (Math.abs(t.clientX - t0.x) > 10 || Math.abs(t.clientY - t0.y) > 10);
+      t0 = null;
+      if(movio) return;           // fue un deslizamiento, no un toque
+      e.preventDefault();         // cancela el click retrasado/fantasma
+      e.stopImmediatePropagation(); // evita que el click normal cierre dos veces
+      cerrarDesdeBoton(btn);
+    }, { passive: false });
+    btn.addEventListener('touchcancel', ()=>{ t0 = null; }, { passive: true });
   });
   document.getElementById('modalBackdrop').addEventListener('click', ()=>{
     closeTopModal();

@@ -5942,7 +5942,10 @@ function openCompraHistorial(codigo){
   const compras = db.compras.filter(c => compraGrupoKey(c) === codigo);
   const p = getProductoByCodigo(codigo);
   const nombre = compras[0]?.nombre || (p ? p.nombre : codigo);
-  document.getElementById('histProdInfo').innerHTML = `📦 <strong>${escapeHtml(nombre)}</strong> · <span style="font-size:12px;">Código: ${escapeHtml(compraCodigoVisible(codigo))}</span>`;
+  // Marca: la del producto o, si no la tiene, la del ingreso más reciente que la guardó.
+  const marcaHist = (p && p.marca) || (compras.slice().sort((x,y)=> new Date(y.fecha) - new Date(x.fecha)).map(marcaDeCompra).find(Boolean)) || '';
+  document.getElementById('histProdInfo').innerHTML = `📦 <strong>${escapeHtml(nombre)}</strong> · <span style="font-size:12px;">Código: ${escapeHtml(compraCodigoVisible(codigo))}</span>` +
+    ` · <span style="font-size:12px;">Marca: <strong>${marcaHist ? escapeHtml(marcaHist) : '—'}</strong></span>`;
   const tbody = document.querySelector('#histComprasTable tbody');
   const thr = document.querySelector('#histComprasTable thead tr');
   // SOLO Manuales: el historial muestra Precio distribuidor, Descuento, Precio de

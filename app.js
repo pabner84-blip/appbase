@@ -617,6 +617,11 @@ function alinearCatalogoUnaVez(dbObj, remote){
 function applyMasterUI(){
   document.body.classList.toggle('role-noMaster', !esMaestro());
   syncMasterSwitchUI();
+  // Sin PC madre no existe el filtro "Productos sin foto": se quita y se muestra todo.
+  if(!esMaestro() && typeof prodSoloSinFoto !== 'undefined' && prodSoloSinFoto){
+    prodSoloSinFoto = false;
+    try{ renderProductos(); }catch(e){ /* la vista aún no está lista */ }
+  }
 }
 function syncMasterSwitchUI(){
   const sw = document.getElementById('masterSwitchConfig');
@@ -9284,6 +9289,33 @@ function getAllCategoryNames(){
     .sort((a,b)=> a.localeCompare(b, 'es'));
 }
 
+var prodSoloSinFoto = false; // filtro del botón "Productos sin foto"
+
+function updateProdSinFotoUI(cantidad){
+  const btn = document.getElementById('btnProdSinFoto');
+  const info = document.getElementById('prodSinFotoInfo');
+  if(btn){
+    btn.classList.toggle('btn-primary', prodSoloSinFoto);
+    btn.classList.toggle('btn-secondary', !prodSoloSinFoto);
+    btn.textContent = prodSoloSinFoto ? '✖ Ver todos los productos' : '🖼️ Productos sin foto';
+  }
+  if(info){
+    info.hidden = !prodSoloSinFoto;
+    if(prodSoloSinFoto){
+      info.textContent = cantidad === 0
+        ? '🎉 Todos los productos tienen foto.'
+        : `🖼️ ${cantidad} producto${cantidad === 1 ? '' : 's'} sin foto.`;
+    }
+  }
+}
+
+function toggleProductosSinFoto(){
+  if(!esMaestro()) return;
+  prodSoloSinFoto = !prodSoloSinFoto;
+  renderProductos();
+  if(prodSoloSinFoto) window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
 function renderProductos(){
   resetImgLazy();
   populateCategoryFilter();
@@ -9299,6 +9331,11 @@ function renderProductos(){
   if(search){
     list = list.filter(p => productMatchesSearch(p, search));
   }
+  // "Productos sin foto": solo en la PC principal (el botón y este filtro se
+  // apagan solos si el suich de PC madre se desactiva).
+  if(prodSoloSinFoto && !esMaestro()) prodSoloSinFoto = false;
+  if(prodSoloSinFoto) list = list.filter(p => !getImage(p.id));
+  updateProdSinFotoUI(list.length);
   list.sort((a,b)=> a.nombre.localeCompare(b.nombre, 'es'));
 
   const grid = document.getElementById('productsGrid');
@@ -13854,6 +13891,7 @@ function setupEventListeners(){
   document.getElementById('btnVaciarProductos').addEventListener('click', vaciarCatalogo);
   // Autollenar todos los productos
   document.getElementById('btnAutoFillAll').addEventListener('click', autoFillAllProducts);
+  document.getElementById('btnProdSinFoto').addEventListener('click', toggleProductosSinFoto);
   document.getElementById('fileImportProducts').addEventListener('change', (e)=>{
     if(e.target.files[0]) importProductsCSV(e.target.files[0]);
     e.target.value = '';

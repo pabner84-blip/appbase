@@ -7307,6 +7307,15 @@ function openCompraDetalleForm(producto, codigo, opts){
   compraFormModo = esNuevo ? 'nuevo' : 'ingreso';
   compraFormOrigen = (opts && opts.origen) || 'scan';
   compraEstadoPrecios.ultimo = 'descuento';
+  const cImg = document.getElementById('cImgWrap');
+  if(cImg){
+    const im = producto ? getImage(producto.id) : null;
+    cImg.innerHTML = !producto
+      ? ''
+      : (im
+        ? `<img src="${im}" class="sr-img" alt="" data-img-product="${producto.id}" decoding="async">${nuevoTag(producto)}`
+        : `<div class="sr-img sr-img-empty" data-img-product="${producto.id}">🖼️</div>${nuevoTag(producto)}`);
+  }
   document.getElementById('cCodigo').value = codigo || '';
   document.getElementById('cNombreInput').value = producto ? producto.nombre : '';
   document.getElementById('cNombreDisplay').textContent = producto ? producto.nombre : 'Producto nuevo (se creará al guardar)';
@@ -12212,91 +12221,188 @@ function setOcrStatus(msg){
 }
 
 let ocrStarting = false;
+let ocrGen = 0;              // sube cada vez que se cierra el escáner: invalida arranques a medias
+let ocrWorkerPromise = null; // creación del motor en curso (evita crear dos a la vez)
+let ocrIdleTimer = null;     // libera memoria si el escáner lleva rato cerrado
 
-// Precalienta Tesseract en segundo plano (poco después de cargar la app):
-// la primera vez que se usa el escáner, Tesseract tiene que descargar el
-// idioma (~10MB) y levantar el worker, y eso es lo que hace que "se quede
-// en buscando código" la primera vez. Al precargarlo, el primer escaneo
-// detecta al instante porque el motor ya está listo.
-function warmupOcrWorker(){
-  if(ocrWarmPromise || ocrWorker || ocrActive || typeof Tesseract === 'undefined') return;
-  ocrWarmPromise = (async()=>{
-    const w = await Tesseract.createWorker('eng');
-    await w.setParameters({
-      tessedit_char_whitelist: OCR_MODES[scanCodeMode].whitelist,
-      tessedit_pageseg_mode: '6',
-      preserve_interword_spaces: '1'
-    });
-    ocrWorker = w;
-  })().catch(err=>{
-    console.warn('Precálculo del OCR falló (se reintenta al abrir el escáner)', err);
-    ocrWorker = null;
-    ocrWarmPromise = null;
+// Intentos para crear el motor de lectura: primero los CDN por defecto y, si
+// alguno falla (red lenta, CDN bloqueado, idioma sin descargar), se prueba con
+// otras direcciones de respaldo.
+const OCR_WORKER_ATTEMPTS = [
+  {},
+  { langPath: 'https://cdn.jsdelivr.net/npm/@tesseract.js-data/eng/4.0.0_best_int' },
+  {
+    workerPath: 'https://unpkg.com/tesseract.js@5/dist/worker.min.js',
+    corePath: 'https://unpkg.com/tesseract.js-core@5',
+    langPath: 'https://cdn.jsdelivr.net/npm/@tesseract.js-data/eng/4.0.0_best_int'
+  }
+];
+
+async function createOcrWorkerRobust(){
+  let lastErr = null;
+  for(const extra of OCR_WORKER_ATTEMPTS){
+    let w = null;
+    try{
+      w = await Tesseract.createWorker('eng', 1, Object.assign({
+        errorHandler: err => console.warn('Tesseract:', err)
+      }, extra));
+      if(w) return w;
+    }catch(err){
+      lastErr = err;
+      console.warn('No se pudo crear el motor OCR, probando otra ruta...', err);
+      try{ if(w) await w.terminate(); }catch(e){ /* ignorar */ }
+    }
+  }
+  throw lastErr || new Error('No se pudo crear el motor OCR');
+}
+
+// Devuelve el motor OCR (lo reutiliza si ya existe; si se está creando, espera
+// a esa misma creación en vez de lanzar otra).
+function getOcrWorker(){
+  if(ocrWorker) return Promise.resolve(ocrWorker);
+  if(!ocrWorkerPromise){
+    ocrWorkerPromise = (async()=>{
+      if(typeof Tesseract === 'undefined'){
+        if(!window.__LAZY_LIBS__ || !window.__LAZY_LIBS__.tesseract) throw new Error('Tesseract no disponible');
+        await window.__LAZY_LIBS__.tesseract();
+      }
+      const w = await createOcrWorkerRobust();
+      ocrWorker = w;
+      return w;
+    })();
+    const p = ocrWorkerPromise;
+    p.then(()=>{ if(ocrWorkerPromise === p) ocrWorkerPromise = null; },
+           ()=>{ if(ocrWorkerPromise === p) ocrWorkerPromise = null; });
+  }
+  return ocrWorkerPromise;
+}
+
+async function ocrApplyParams(w){
+  await w.setParameters({
+    tessedit_char_whitelist: OCR_MODES[scanCodeMode].whitelist,
+    tessedit_pageseg_mode: '6',
+    preserve_interword_spaces: '1'
   });
+}
+
+// Descarta el motor actual (queda en null ANTES de terminarlo, así ninguna otra
+// parte del código puede volver a usarlo ya cerrado).
+function dropOcrWorker(){
+  const w = ocrWorker;
+  ocrWorker = null;
+  if(w){ try{ Promise.resolve(w.terminate()).catch(()=>{}); }catch(e){ /* ignorar */ } }
+}
+
+// Lee un canvas con el motor OCR. Nunca toca un motor ya cerrado.
+async function ocrRecognize(canvas){
+  const w = ocrWorker;
+  if(!w) throw new Error('ocr-worker-null');
+  try{
+    const r = await w.recognize(canvas);
+    return (r && r.data && r.data.text) || '';
+  }catch(err){
+    const msg = String((err && err.message) || err);
+    // Motor roto/cerrado: se descarta para que se cree uno nuevo
+    if(w === ocrWorker && /postMessage|terminat|null/i.test(msg)) dropOcrWorker();
+    throw err;
+  }
+}
+
+// Precalienta el motor en segundo plano (opcional).
+function warmupOcrWorker(){
+  if(ocrWorker || ocrWorkerPromise) return;
+  getOcrWorker().catch(err=> console.warn('Precálculo del OCR falló (se reintenta al abrir el escáner)', err));
 }
 
 async function startOcrScanner(){
   if(ocrActive || ocrStarting) return;
   ensureAudioCtx(); // desbloquea el audio dentro del gesto que abrió la cámara
   ocrStarting = true;
+  const myGen = ++ocrGen;
+  const cancelled = ()=> myGen !== ocrGen;
+  if(ocrIdleTimer){ clearTimeout(ocrIdleTimer); ocrIdleTimer = null; }
   setOcrStatus('Cargando lector de texto (una sola vez)...');
 
-  if(typeof window.__LAZY_LIBS__ === 'undefined' || !window.__LAZY_LIBS__.tesseract){
-    setOcrStatus('No se pudo cargar Tesseract.js. Verifica tu conexión a internet o usa la búsqueda manual.');
-    ocrStarting = false;
-    return;
-  }
-  try{ await window.__LAZY_LIBS__.tesseract(); }catch(err){
-    setOcrStatus('No se pudo cargar el lector de texto. Verifica tu conexión a internet o usa la búsqueda manual.');
-    ocrStarting = false;
-    return;
-  }
-
+  // Cámara y motor se preparan EN PARALELO: así no se espera dos veces.
   const videoEl = document.getElementById('ocrVideo');
+  const workerPromise = getOcrWorker();
+  workerPromise.catch(()=>{}); // el error se maneja más abajo
 
   try{
     setOcrStatus('Iniciando cámara...');
-    ocrStream = await navigator.mediaDevices.getUserMedia({
-      video: {
-        facingMode: { ideal: 'environment' },
-        width: { ideal: 1280 },
-        height: { ideal: 720 }
-      },
-      audio: false
-    });
+    const stream = await getCameraStream();
+    if(cancelled()){ stream.getTracks().forEach(t=>t.stop()); return; }
+    ocrStream = stream;
     videoEl.srcObject = ocrStream;
+    videoEl.muted = true;
+    videoEl.setAttribute('playsinline', '');
     await videoEl.play();
+    tryContinuousFocus(ocrStream);
   }catch(err){
     console.warn(err);
-    setOcrStatus('No se pudo acceder a la cámara. Verifica los permisos del navegador o usa la búsqueda manual.');
+    if(cancelled()) return;
+    setOcrStatus(cameraErrorMessage(err));
     ocrStarting = false;
     return;
   }
+  if(cancelled()) return;
 
   try{
     setOcrStatus('Preparando el lector de texto...');
-    if(!ocrWorker){
-      // Si el precálculo ya estaba en marcha, espera a que termine en vez
-      // de descargar el idioma dos veces a la vez.
-      if(ocrWarmPromise){ try{ await ocrWarmPromise; }catch(e){ /* se reintenta abajo */ } }
-      if(!ocrWorker){ ocrWorker = await Tesseract.createWorker('eng'); }
-    }
-    await ocrWorker.setParameters({
-      tessedit_char_whitelist: OCR_MODES[scanCodeMode].whitelist,
-      tessedit_pageseg_mode: '6',
-      preserve_interword_spaces: '1'
-    });
+    const w = await workerPromise;
+    if(cancelled()) return;
+    await ocrApplyParams(w);
   }catch(err){
     console.warn(err);
-    setOcrStatus('No se pudo iniciar el motor de lectura de texto. Verifica tu conexión a internet.');
+    if(cancelled()) return;
+    // Si el motor quedó roto, se descarta para que el próximo intento parta limpio
+    dropOcrWorker();
+    setOcrStatus('No se pudo iniciar el motor de lectura de texto. Verifica tu conexión a internet y vuelve a abrir el escáner (la primera vez descarga ~10 MB).');
     ocrStarting = false;
     return;
   }
 
+  if(cancelled()) return;
   ocrActive = true;
   ocrStarting = false;
   setOcrStatus('🔎 Buscando código...');
   scheduleNextOcrCapture();
+}
+
+// ---- Cámara compartida por los 3 escáneres --------------------------------
+async function getCameraStream(){
+  if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
+    throw Object.assign(new Error('Cámara no disponible'), { name: 'NotSupportedError' });
+  }
+  try{
+    return await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
+      audio: false
+    });
+  }catch(err){
+    if(err && (err.name === 'NotAllowedError' || err.name === 'SecurityError')) throw err;
+    // Segundo intento con restricciones mínimas (algunas cámaras no aceptan las anteriores)
+    return await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+  }
+}
+
+function tryContinuousFocus(stream){
+  try{
+    const track = stream.getVideoTracks()[0];
+    const caps = track && track.getCapabilities ? track.getCapabilities() : null;
+    if(caps && caps.focusMode && caps.focusMode.indexOf('continuous') >= 0){
+      track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] }).catch(()=>{});
+    }
+  }catch(e){ /* el enfoque automático es opcional */ }
+}
+
+function cameraErrorMessage(err){
+  const n = err && err.name;
+  if(n === 'NotAllowedError' || n === 'SecurityError') return 'No hay permiso para usar la cámara. Actívalo en el navegador y vuelve a intentar.';
+  if(n === 'NotFoundError' || n === 'OverconstrainedError') return 'No se encontró ninguna cámara en este equipo.';
+  if(n === 'NotReadableError') return 'La cámara está siendo usada por otra aplicación. Ciérrala e intenta de nuevo.';
+  if(n === 'NotSupportedError') return 'Este navegador no permite usar la cámara aquí. Abre la app con el acceso directo o desde https.';
+  return 'No se pudo acceder a la cámara. Verifica los permisos del navegador o usa la búsqueda manual.';
 }
 
 function scheduleNextOcrCapture(){
@@ -12357,7 +12463,7 @@ async function runOcrCapture(){
     preprocessCanvas(canvasEl);
 
     setOcrStatus('🔎 Analizando etiqueta...');
-    const { data: { text } } = await ocrWorker.recognize(canvasEl);
+    const text = await ocrRecognize(canvasEl);
     if(ocrPaused) return; // se tomó una foto manual mientras se analizaba este fotograma: descartar
     const best = resolveScannedText(text);
 
@@ -12382,6 +12488,17 @@ async function runOcrCapture(){
     }
   }catch(err){
     console.warn('Error de OCR', err);
+    // Si el motor se cayó, se vuelve a crear en silencio y el escaneo continúa
+    if(ocrActive && !ocrWorker){
+      try{
+        setOcrStatus('Reiniciando lector de texto...');
+        const w = await getOcrWorker();
+        await ocrApplyParams(w);
+        if(ocrActive) setOcrStatus('🔎 Buscando código...');
+      }catch(e2){
+        if(ocrActive) setOcrStatus('El lector de texto se detuvo. Cierra y vuelve a abrir el escáner.');
+      }
+    }
   }finally{
     ocrBusy = false;
     scheduleNextOcrCapture();
@@ -12427,7 +12544,7 @@ async function captureShot(){
     preprocessCanvas(canvasEl);
     // recognize() se encola automáticamente si el motor todavía estaba
     // procesando un fotograma del escaneo continuo; no hace falta esperar aquí.
-    const { data: { text } } = await ocrWorker.recognize(canvasEl);
+    const text = await ocrRecognize(canvasEl);
     const best = resolveScannedText(text);
 
     if(best){
@@ -12462,6 +12579,7 @@ function resumeLiveScan(){
 }
 
 function stopOcrScanner(){
+  ocrGen++; // cancela cualquier arranque que siga a medias
   ocrActive = false;
   ocrStarting = false;
   ocrPaused = false;
@@ -12472,10 +12590,11 @@ function stopOcrScanner(){
   }
   const videoEl = document.getElementById('ocrVideo');
   if(videoEl) videoEl.srcObject = null;
-  if(ocrWorker){
-    const w = ocrWorker;
-    ocrWorker = null;
-    w.terminate().catch(()=>{});
+  // El motor NO se cierra al instante: se reutiliza si el escáner se vuelve a
+  // abrir pronto (evita el error "postMessage of null" y la espera de recarga).
+  // Si pasan 2 minutos sin usarse, se libera la memoria.
+  if(ocrWorker && !ocrIdleTimer){
+    ocrIdleTimer = setTimeout(()=>{ ocrIdleTimer = null; if(!ocrActive && !ocrStarting) dropOcrWorker(); }, 120000);
   }
   const frozenImg = document.getElementById('ocrFrozenImg');
   if(frozenImg){ frozenImg.classList.remove('visible'); frozenImg.removeAttribute('src'); }
@@ -12491,38 +12610,96 @@ function stopOcrScanner(){
 // (Tesseract). Es el tercer modo del escáner principal, y como el bloque
 // del escáner se comparte entre la pestaña "Escanear" y el registro de
 // cantidad de inventario, funciona igual en los dos lugares.
-let zxingLiveReader = null;
+let zxingLiveEngine = null;
 let zxingLiveActive = false;
+let zxingGen = 0;
+
+const BARCODE_FORMATS_NATIVE = ['ean_13','ean_8','upc_a','upc_e','code_128','code_39','code_93','itf','codabar','qr_code'];
+
+// Motor de lectura de códigos de barras usado por los dos lectores de la app.
+// Usa el detector NATIVO del navegador cuando existe (mucho más rápido y
+// preciso en celulares Android) y, si no, ZXing con modo "esforzado" y cámara
+// en alta resolución. Devuelve { stop }.
+async function startBarcodeEngine(videoEl, onCode){
+  let stopped = false, stream = null, timer = null, zReader = null;
+  const stop = ()=>{
+    stopped = true;
+    if(timer){ clearTimeout(timer); timer = null; }
+    if(zReader){ try{ zReader.reset(); }catch(e){} zReader = null; }
+    if(stream){ stream.getTracks().forEach(t=>t.stop()); stream = null; }
+    try{ videoEl.srcObject = null; }catch(e){}
+  };
+  try{
+    stream = await getCameraStream();
+    if(stopped){ stop(); return { stop }; }
+    videoEl.srcObject = stream;
+    videoEl.muted = true;
+    videoEl.setAttribute('playsinline', '');
+    await videoEl.play();
+    tryContinuousFocus(stream);
+
+    let detector = null;
+    if(window.BarcodeDetector){
+      try{
+        let f = BARCODE_FORMATS_NATIVE;
+        if(window.BarcodeDetector.getSupportedFormats){
+          const sup = await window.BarcodeDetector.getSupportedFormats();
+          f = f.filter(x => sup.indexOf(x) >= 0);
+        }
+        if(f.length) detector = new window.BarcodeDetector({ formats: f });
+      }catch(e){ detector = null; }
+    }
+
+    if(detector){
+      const tick = async()=>{
+        if(stopped) return;
+        try{
+          if(videoEl.readyState >= 2){
+            const codes = await detector.detect(videoEl);
+            if(!stopped && codes && codes.length && codes[0].rawValue) onCode(codes[0].rawValue);
+          }
+        }catch(e){ /* frame sin código: normal */ }
+        if(!stopped) timer = setTimeout(tick, 150);
+      };
+      tick();
+    }else{
+      await window.__LAZY_LIBS__.zxing();
+      if(typeof ZXing === 'undefined') throw new Error('No se pudo cargar ZXing');
+      if(stopped){ stop(); return { stop }; }
+      const hints = new Map();
+      hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
+      const BF = ZXing.BarcodeFormat;
+      hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS,
+        [BF.EAN_13, BF.EAN_8, BF.UPC_A, BF.UPC_E, BF.CODE_128, BF.CODE_39, BF.CODE_93, BF.ITF, BF.CODABAR, BF.QR_CODE]);
+      zReader = new ZXing.BrowserMultiFormatReader(hints, 200);
+      Promise.resolve(zReader.decodeFromStream(stream, videoEl, (result)=>{
+        if(stopped || !result) return;
+        onCode(result.getText());
+      })).catch(err=> console.warn('ZXing:', err));
+    }
+  }catch(err){
+    stop();
+    throw err;
+  }
+  return { stop };
+}
+
+function barcodeErrorMessage(err){
+  const n = err && err.name;
+  if(n) return cameraErrorMessage(err);
+  return 'No se pudo cargar el lector de códigos de barras (revisa tu conexión a internet).';
+}
 
 async function startZxingLiveScanner(){
   if(zxingLiveActive) return;
   ensureAudioCtx(); // desbloquea el audio dentro del gesto que abrió la cámara
-  if(typeof window.__LAZY_LIBS__ === 'undefined' || !window.__LAZY_LIBS__.zxing){
-    setOcrStatus('No se pudo cargar el lector de códigos de barras (revisa tu conexión a internet).');
-    return;
-  }
-  try{ await window.__LAZY_LIBS__.zxing(); }catch(err){
-    setOcrStatus('No se pudo cargar el lector de códigos de barras (revisa tu conexión a internet).');
-    return;
-  }
-  if(typeof ZXing === 'undefined'){
-    setOcrStatus('No se pudo cargar el lector de códigos de barras (revisa tu conexión a internet).');
-    return;
-  }
   zxingLiveActive = true;
+  const myGen = ++zxingGen;
   setOcrStatus('Iniciando cámara...');
   try{
-    zxingLiveReader = new ZXing.BrowserMultiFormatReader();
-    let deviceId;
-    try{
-      const devices = await ZXing.BrowserCodeReader.listVideoInputDevices();
-      const back = devices.find(d => /back|rear|trasera|environment/i.test(d.label));
-      deviceId = (back || devices[devices.length - 1] || {}).deviceId;
-    }catch(e){ /* si falla la lista, ZXing usa la cámara por defecto */ }
-
-    await zxingLiveReader.decodeFromVideoDevice(deviceId, 'ocrVideo', (result, err)=>{
-      if(!zxingLiveActive || !result) return;
-      const code = result.getText();
+    const videoEl = document.getElementById('ocrVideo');
+    const eng = await startBarcodeEngine(videoEl, (code)=>{
+      if(!zxingLiveActive || myGen !== zxingGen) return;
       const now = Date.now();
       if(!(window.__lastOcrCode === code && now - (window.__lastOcrTime||0) < 3000)){
         window.__lastOcrCode = code;
@@ -12530,24 +12707,27 @@ async function startZxingLiveScanner(){
         playBarcodeBeep();
         handleScannedCode(code, true);
       }
-      if(zxingLiveActive) setOcrStatus('✅ Código de barras detectado: ' + code);
+      setOcrStatus('✅ Código de barras detectado: ' + code);
     });
+    if(myGen !== zxingGen){ eng.stop(); return; } // se cerró mientras arrancaba
+    zxingLiveEngine = eng;
     setOcrStatus('🔎 Buscando código de barras...');
   }catch(err){
     console.warn('Error al iniciar el escáner de código de barras', err);
-    setOcrStatus('No se pudo acceder a la cámara. Verifica los permisos del navegador o usa la búsqueda manual.');
-    zxingLiveActive = false;
+    if(myGen === zxingGen){
+      setOcrStatus(barcodeErrorMessage(err));
+      zxingLiveActive = false;
+    }
   }
 }
 
 function stopZxingLiveScanner(){
+  zxingGen++;
   zxingLiveActive = false;
-  if(zxingLiveReader){
-    try{ zxingLiveReader.reset(); }catch(e){ /* ignorar */ }
-    zxingLiveReader = null;
+  if(zxingLiveEngine){
+    try{ zxingLiveEngine.stop(); }catch(e){ /* ignorar */ }
+    zxingLiveEngine = null;
   }
-  const videoEl = document.getElementById('ocrVideo');
-  if(videoEl) videoEl.srcObject = null;
 }
 
 // Envoltorios: arrancan/paran el mecanismo de cámara correcto según el modo
@@ -12588,7 +12768,8 @@ async function setScanCodeMode(mode){
     // Si el lector Tesseract ya está activo, actualiza el whitelist de
     // caracteres sin reiniciar la cámara
     try{
-      await ocrWorker.setParameters({ tessedit_char_whitelist: OCR_MODES[mode].whitelist });
+      const w = ocrWorker;
+      if(w) await w.setParameters({ tessedit_char_whitelist: OCR_MODES[mode].whitelist });
     }catch(err){ console.warn(err); }
   }
 }
@@ -12599,8 +12780,9 @@ async function setScanCodeMode(mode){
    comparte nada con el escáner OCR de texto (Tesseract).
    ------------------------------------------------------------------------- */
 
-let bcReader = null;
+let bcEngine = null;
 let bcActive = false;
+let bcGen = 0;
 
 function setBcStatus(msg){
   const el = document.getElementById('bcStatus');
@@ -12609,58 +12791,42 @@ function setBcStatus(msg){
 
 async function startBarcodeScanner(){
   ensureAudioCtx(); // desbloquea el audio dentro del gesto que abrió la cámara
-  if(typeof window.__LAZY_LIBS__ === 'undefined' || !window.__LAZY_LIBS__.zxing){
-    setBcStatus('No se pudo cargar el lector de códigos de barras (revisa tu conexión a internet).');
-    return;
-  }
-  try{ await window.__LAZY_LIBS__.zxing(); }catch(err){
-    setBcStatus('No se pudo cargar el lector de códigos de barras (revisa tu conexión a internet).');
-    return;
-  }
-  if(typeof ZXing === 'undefined'){
-    setBcStatus('No se pudo cargar el lector de códigos de barras (revisa tu conexión a internet).');
-    return;
-  }
+  if(bcActive) return;
+  bcActive = true;
+  const myGen = ++bcGen;
+  setBcStatus('Iniciando cámara...');
   try{
-    bcActive = true;
-    setBcStatus('Iniciando cámara...');
-    bcReader = new ZXing.BrowserMultiFormatReader();
-    let deviceId;
-    try{
-      const devices = await ZXing.BrowserCodeReader.listVideoInputDevices();
-      const back = devices.find(d => /back|rear|trasera|environment/i.test(d.label));
-      deviceId = (back || devices[devices.length - 1] || {}).deviceId;
-    }catch(e){ /* si falla la lista, ZXing usa la cámara por defecto */ }
-
-    await bcReader.decodeFromVideoDevice(deviceId, 'bcVideo', (result, err)=>{
-      if(!bcActive) return;
-      if(result){
-        const code = result.getText();
-        playBarcodeBeep();
-        stopBarcodeScanner();
-        // Solo cierra el recuadro de la cámara de código de barras: el recuadro
-        // de "Registrar inventario" (cantidad / código de barras) debe seguir
-        // abierto detrás, con el campo ya lleno, listo para tocar "Registrar".
-        closeModalById('modalBarcodeScan');
-        const input = document.getElementById('invCodigoBarras');
-        if(input) input.value = code;
-        toast('Código de barras detectado: ' + code, 'success');
-      }
-      // Los errores de "no se encontró código en este frame" son normales
-      // mientras se busca, así que se ignoran.
+    const videoEl = document.getElementById('bcVideo');
+    const eng = await startBarcodeEngine(videoEl, (code)=>{
+      if(!bcActive || myGen !== bcGen) return;
+      playBarcodeBeep();
+      stopBarcodeScanner();
+      // Solo cierra el recuadro de la cámara de código de barras: el recuadro
+      // de "Registrar inventario" (cantidad / código de barras) debe seguir
+      // abierto detrás, con el campo ya lleno, listo para tocar "Registrar".
+      closeModalById('modalBarcodeScan');
+      const input = document.getElementById('invCodigoBarras');
+      if(input) input.value = code;
+      toast('Código de barras detectado: ' + code, 'success');
     });
+    if(myGen !== bcGen){ eng.stop(); return; }
+    bcEngine = eng;
     setBcStatus('🔎 Buscando código de barras...');
   }catch(err){
     console.error('Error al iniciar el escáner de código de barras', err);
-    setBcStatus('No se pudo acceder a la cámara.');
+    if(myGen === bcGen){
+      setBcStatus(barcodeErrorMessage(err));
+      bcActive = false;
+    }
   }
 }
 
 function stopBarcodeScanner(){
+  bcGen++;
   bcActive = false;
-  if(bcReader){
-    try{ bcReader.reset(); }catch(e){ /* ignorar */ }
-    bcReader = null;
+  if(bcEngine){
+    try{ bcEngine.stop(); }catch(e){ /* ignorar */ }
+    bcEngine = null;
   }
   const videoEl = document.getElementById('bcVideo');
   if(videoEl) videoEl.srcObject = null;

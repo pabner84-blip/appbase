@@ -1046,6 +1046,7 @@
     <form id="formCompra" class="form-grid">
       <input type="hidden" id="cMetodoPago" value="efectivo">
       <div class="product-info-box visible" style="grid-column:1/-1;">
+        <div class="sr-head" id="cImgWrap" style="margin-bottom:10px;"></div>
         📦 <strong id="cNombreDisplay"></strong>
       </div>
       <label style="grid-column:1/-1;">Código *<input type="text" id="cCodigo" class="input" required autocomplete="off"></label>
@@ -1441,11 +1442,40 @@
 /* Cargadores "perezosos": las librerías grandes (OCR, PDF, código de barras)
    se descargan recién cuando hacen falta. Así la app abre al instante y no
    congela las computadoras viejas. */
-window.__LAZY_LIBS__ = {
-  tesseract: function(){ return new Promise(function(ok, no){ if(window.Tesseract) return ok(); var s=document.createElement('script'); s.crossOrigin='anonymous'; s.src='https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js'; s.onload=ok; s.onerror=function(){no()}; document.head.appendChild(s); }); },
-  pdf: function(){ return new Promise(function(ok, no){ if(window.pdfjsLib) return ok(); var s=document.createElement('script'); s.crossOrigin='anonymous'; s.src='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js'; s.onload=function(){ window.pdfjsLib && (window.pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js'); ok(); }; s.onerror=function(){no()}; document.head.appendChild(s); }); },
-  zxing: function(){ return new Promise(function(ok, no){ if(window.ZXing) return ok(); var s=document.createElement('script'); s.crossOrigin='anonymous'; s.src='https://unpkg.com/@zxing/library@0.20.0'; s.onload=ok; s.onerror=function(){no()}; document.head.appendChild(s); }); }
-};
+window.__LAZY_LIBS__ = (function(){
+  // Prueba cada URL en orden hasta que una cargue y la librería exista.
+  function loadFirst(urls, check, after){
+    return new Promise(function(ok, no){
+      if(check()) return ok();
+      var i = 0;
+      (function next(){
+        if(i >= urls.length) return no(new Error('No se pudo cargar la librería'));
+        var s = document.createElement('script');
+        s.crossOrigin = 'anonymous';
+        s.src = urls[i++];
+        s.onload = function(){ if(check()){ if(after) after(); ok(); } else { s.remove(); next(); } };
+        s.onerror = function(){ s.remove(); next(); };
+        document.head.appendChild(s);
+      })();
+    });
+  }
+  return {
+    tesseract: function(){ return loadFirst([
+      'https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js',
+      'https://unpkg.com/tesseract.js@5/dist/tesseract.min.js',
+      'https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/5.1.0/tesseract.min.js'
+    ], function(){ return !!window.Tesseract; }); },
+    pdf: function(){ return loadFirst([
+      'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js'
+    ], function(){ return !!window.pdfjsLib; }, function(){
+      window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+    }); },
+    zxing: function(){ return loadFirst([
+      'https://unpkg.com/@zxing/library@0.20.0',
+      'https://cdn.jsdelivr.net/npm/@zxing/library@0.20.0/umd/index.min.js'
+    ], function(){ return !!window.ZXing; }); }
+  };
+})();
 </script>
 <!-- Firebase (opcional): si firebase-config.js está vacío, la app funciona 100% local.
      Se cargan con defer: descargan en paralelo SIN bloquear la app. Así, sin

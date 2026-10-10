@@ -1046,7 +1046,7 @@ body.theme-amarillo .btn-primary{color:#403000;}
 
 
 /* ---------- Distintivo NUEVO (producto registrado hace menos de 1 mes) ---------- */
-.guest-card-img, .sr-img-wrap, #invImgWrap, .venta-img-cell, .venta-search-item{position:relative;}
+.guest-card-img, .sr-img-wrap, #invImgWrap, #cImgWrap, .venta-img-cell, .venta-search-item{position:relative;}
 .tag-nuevo{
   position:absolute; top:2px; left:2px; z-index:3;
   background:#e11d48; color:#fff; font-size:9px; font-weight:800; letter-spacing:.4px;
@@ -1054,7 +1054,7 @@ body.theme-amarillo .btn-primary{color:#403000;}
   box-shadow:0 1px 3px rgba(0,0,0,.45);
 }
 .guest-card-img .tag-nuevo{top:6px; left:6px; font-size:11px; padding:3px 8px; border-radius:5px;}
-.sr-img-wrap .tag-nuevo, #invImgWrap .tag-nuevo{top:4px; left:4px; font-size:11px; padding:3px 7px;}
+.sr-img-wrap .tag-nuevo, #invImgWrap .tag-nuevo, #cImgWrap .tag-nuevo{top:4px; left:4px; font-size:11px; padding:3px 7px;}
 .venta-search-item .tag-nuevo{top:4px; left:4px;}
 
 /* Panel "Eliminar características": solo en el dueño de Manuales */

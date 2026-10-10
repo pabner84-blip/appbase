@@ -1996,6 +1996,7 @@ function compraDocData(c){
     productoId: c.productoId || null,
     _ts: Date.now()
   };
+  if(c.marca) d.marca = String(c.marca); // marca del producto en ese ingreso
   // Precio del distribuidor y descuento (%): solo si el ingreso los tiene
   // (los ingresos viejos no los tenían y no se inventan).
   if(c.precioDistribuidor !== undefined && c.precioDistribuidor !== null && !isNaN(Number(c.precioDistribuidor))){
@@ -6134,6 +6135,15 @@ function maybeShowCompraReminder(){
   `;
 }
 
+// Marca de un ingreso: la que se guardó en ese ingreso o, si es un ingreso
+// antiguo (anterior a esta columna), la marca actual de su producto.
+function marcaDeCompra(c){
+  if(c && c.marca) return String(c.marca);
+  const p = (c && c.productoId && db.productos.find(x => x.id === c.productoId)) ||
+            (c && c.codigo ? getProductoByCodigo(c.codigo) : null);
+  return (p && p.marca) ? String(p.marca) : '';
+}
+
 function exportComprasCSV(){
   if(db.compras.length === 0){
     toast('No hay ingresos para exportar', 'error');
@@ -6142,16 +6152,16 @@ function exportComprasCSV(){
   const esManual = currentModo === 'manual';
   const tieneNum = v => v !== undefined && v !== null && v !== '' && !isNaN(Number(v));
   // Manuales: el Excel lleva también PRECIO DE VENTA (justo después del precio de compra).
-  const header = ['FECHA','CODIGO','PRODUCTO','PROVEEDOR','CANTIDAD','PRECIO DISTRIBUIDOR','DESCUENTO (%)','PRECIO DE COMPRA']
+  const header = ['FECHA','CODIGO','PRODUCTO','MARCA','PROVEEDOR','CANTIDAD','PRECIO DISTRIBUIDOR','DESCUENTO (%)','PRECIO DE COMPRA']
     .concat(esManual ? ['PRECIO DE VENTA'] : [])
     .concat(['TOTAL','METODO DE PAGO','OBSERVACIONES','MODO']);
-  const types = ['text','text','text','text','number','number','number','number']
+  const types = ['text','text','text','text','text','number','number','number','number']
     .concat(esManual ? ['number'] : [])
     .concat(['number','text','text','text']);
   const modoTxt = MODO_LABELS[currentModo] || currentModo;
   const rows = db.compras.map(c => {
     const fila = [
-      ventaFechaKey(c.fecha), c.codigo, c.nombre, c.proveedor || '', Number(c.cantidad)||0,
+      ventaFechaKey(c.fecha), c.codigo, c.nombre, marcaDeCompra(c), c.proveedor || '', Number(c.cantidad)||0,
       // Los ingresos viejos (antes del descuento) no tienen estos dos datos: se dejan en blanco.
       tieneNum(c.precioDistribuidor) ? Number(c.precioDistribuidor) : '',
       tieneNum(c.descuento) ? Number(c.descuento) : '',
@@ -6400,6 +6410,7 @@ function importComprasCSV(file){
         codigo = p ? p.codigo : (codigo || 'OTRO');
         const proveedor = idx.proveedor > -1 ? String(r[idx.proveedor] || '').trim() : '';
         const observaciones = idx.observaciones > -1 ? String(r[idx.observaciones] || '').trim() : '';
+        const marcaFila = idx.marca > -1 ? String(r[idx.marca] === undefined || r[idx.marca] === null ? '' : r[idx.marca]).trim() : '';
         const compraNueva = {
           id: uid('compra'),
           codigo,
@@ -6416,6 +6427,9 @@ function importComprasCSV(file){
         // PRECIO DISTRIBUIDOR y DESCUENTO (%) solo se guardan si el Excel realmente los traía
         // en esa fila. Un ingreso antiguo (celdas vacías) queda sin ellos y el historial
         // muestra "—": no se inventa "distribuidor = compra, 0 %".
+        // MARCA del Excel: se guarda en el ingreso (o, si la fila no la trae, la del producto).
+        const marcaIngreso = marcaFila || (p && p.marca) || '';
+        if(marcaIngreso) compraNueva.marca = marcaIngreso;
         if(!vacia(celDist) || !vacia(celDesc)){
           compraNueva.precioDistribuidor = dist;
           compraNueva.descuento = desc;
@@ -6432,8 +6446,16 @@ function importComprasCSV(file){
         if(sumarStock && p){
           // Suma al stock (producto nuevo o existente). El distintivo NUEVO solo lo
           // lleva el producto recién creado; un existente nunca se vuelve a marcar.
+          // Producto que YA existía: si el Excel trae MARCA, se completa si estaba
+          // vacía (o se cambia solo desde la PC principal, igual que en el formulario).
+          let marcaCambio = false;
+          if(!esProductoNuevo && marcaFila && marcaFila !== (p.marca || '') && (!p.marca || esMaestro())){
+            p.marca = marcaFila;
+            marcaCambio = true;
+          }
           p.stock = (Number(p.stock) || 0) + cantidad;
           touchProducto(p);
+          if(marcaCambio) syncProductoDoc(p);
           logInventarioHistorial(p, cantidad, 'compra');
           const e = stockPorProducto.get(p.id) || { p, delta: 0, nuevo: false };
           e.delta += cantidad;
@@ -7568,6 +7590,7 @@ function handleCompraSubmit(e){
     observaciones,
     productoId: p.id
   };
+  if(p.marca) nuevaCompra.marca = p.marca; // el ingreso guarda la marca del producto
   // Manuales: el ingreso también guarda el precio de venta que tenía el producto
   // en ese momento (ya con el valor del formulario aplicado arriba).
   if(currentModo === 'manual' && !isNaN(Number(p.precioVenta))) nuevaCompra.precioVenta = Number(p.precioVenta);

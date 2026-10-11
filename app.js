@@ -3458,6 +3458,14 @@ function getProductoByCodigo(codigo){
   return db.productos.find(p => normalize(p.codigo) === c || (p.codigoBarras && normalize(p.codigoBarras) === c)) || null;
 }
 
+// Busca un producto SOLO por su código (no por código de barras ni por nombre).
+// Los ingresos usan esta búsqueda para saber a qué producto sumar el stock.
+function getProductoPorCodigo(codigo){
+  const c = normalize(codigo);
+  if(!c) return null;
+  return db.productos.find(p => normalize(p.codigo) === c) || null;
+}
+
 function getProductoById(id){
   return db.productos.find(p => p.id === id) || null;
 }
@@ -6038,7 +6046,9 @@ function openQrHistorial(persona){
 function openProductIngresos(productId){
   const p = getProductoById(productId);
   if(!p) return;
-  closeModalById('modalProductoDetalle');
+  // Características queda DEBAJO (oculta): al cerrar el historial, o con "atrás",
+  // se vuelve a Características en vez de salirse de todo.
+  ocultarModalDebajo('modalProductoDetalle');
   openCompraHistorial(p.codigo);
 }
 
@@ -6068,7 +6078,7 @@ function deleteCompra(id, mantenerInventario){
   const histModal = document.getElementById('modalCompraHistorial');
   if(histModal && histModal.classList.contains('open')){
     if(db.compras.some(c => compraGrupoKey(c) === compraGrupoKey(compra))) openCompraHistorial(compraGrupoKey(compra));
-    else closeAllModals();
+    else closeModalById('modalCompraHistorial');
   }
   toast('Ingreso eliminado', 'success');
 }
@@ -6381,11 +6391,8 @@ function importComprasCSV(file){
         if(desc > 100) desc = 100;
 
         let codigo = String(r[idx.codigo] || '').trim();
-        let p = codigo ? getProductoByCodigo(codigo) : null;
-        // Sin código: solo se enlaza si el NOMBRE coincide exacto con un producto de este dueño.
-        if(!codigo){
-          p = db.productos.find(x => normalize(x.nombre) === normalize(nombre)) || null;
-        }
+        // El producto se identifica ÚNICAMENTE por su código.
+        let p = codigo ? getProductoPorCodigo(codigo) : null;
         let esProductoNuevo = false;
         if(!p && sumarStock){
           // Producto que no existe en ESTE dueño (Manuales o Eléctricas): se crea
@@ -7333,6 +7340,7 @@ function applyCompraFormModo(){
 }
 
 function openCompraDetalleForm(producto, codigo, opts){
+  if(producto && producto.codigo) codigo = producto.codigo; // se identifica por el código del producto
   const esNuevo = !producto;
   compraFormModo = esNuevo ? 'nuevo' : 'ingreso';
   compraFormOrigen = (opts && opts.origen) || 'scan';
@@ -7540,7 +7548,7 @@ function handleCompraSubmit(e){
   // Cualquier dueño (cualquier dispositivo) puede registrar ingresos de
   // productos existentes o NUEVOS. Si el código no existe en ESTE modo
   // (Manuales o Eléctricas), el producto se crea solo, con su fecha de primer registro.
-  let p = getProductoByCodigo(codigo);
+  let p = getProductoPorCodigo(codigo); // solo por código
   const esNuevo = !p;
   if(esNuevo){
     p = {
@@ -7566,16 +7574,17 @@ function handleCompraSubmit(e){
 
   p.stock = (p.stock || 0) + cantidad;
 
-  // Los datos del formulario se aplican al producto: marca (solo la PC principal en
-  // uno existente), precio distribuidor, descuento, precio de compra y precio de
-  // venta (si lo escribiste). Las ventas ya registradas guardan su propio precio.
-  if(marca && (esNuevo || esMaestro())) p.marca = marca;
-  p.precioDistribuidor = precioDistribuidor;
-  p.descuento = descuento;
-  p.precioCompra = precioCompra;
-  if(!esProductoElectrico(p)) p.precioMarca = 0; // Manuales ya no usan "precio de marca"
-  if(!isNaN(precioVenta) && precioVenta >= 0) p.precioVenta = precioVenta;
-  if(!esNuevo) syncProductoDoc(p); // datos actualizados también en la nube
+  // Producto que YA existía: el ingreso NO toca su precio distribuidor, descuento
+  // ni precio de compra (los de la pestaña Productos se quedan como están; este
+  // ingreso guarda los suyos en el historial). Solo se actualiza lo demás si
+  // realmente cambió: la marca (solo la PC principal) y el precio de venta.
+  // El producto NUEVO sí nace con los precios del formulario.
+  let datosCambiaron = false;
+  if(!esNuevo){
+    if(marca && esMaestro() && marca !== (p.marca || '')){ p.marca = marca; datosCambiaron = true; }
+    if(!isNaN(precioVenta) && precioVenta >= 0 && precioVenta !== Number(p.precioVenta || 0)){ p.precioVenta = precioVenta; datosCambiaron = true; }
+  }
+  if(!esNuevo && datosCambiaron) syncProductoDoc(p); // solo si algo cambió
   touchProducto(p);
 
   const fechaElegida = document.getElementById('cFecha').value;
@@ -9658,9 +9667,9 @@ function openProductDetails(productId){
   const detVender = document.getElementById('btnDetVender');
   if(detVender){
     detVender.onclick = ()=>{
-      closeModalById('modalProductoDetalle');
-      // Espera a que el navegador termine el atrás interno antes de abrir la otra ventana.
-      setTimeout(()=> openVentaModal(p), 150);
+      // La venta se abre ENCIMA de Características: al cerrarla se vuelve a ella.
+      ocultarModalDebajo('modalProductoDetalle');
+      openVentaModal(p);
     };
   }
   openModal('modalProductoDetalle');
@@ -12059,6 +12068,34 @@ window.addEventListener('popstate', ()=>{
   }
 });
 
+// Oculta (sin cerrar) la ventana que queda debajo cuando se abre otra encima.
+// Al cerrar la de arriba, la de abajo reaparece sola (ver refrescarModalesDebajo).
+function ocultarModalDebajo(id){
+  const m = document.getElementById(id);
+  if(m && m.classList.contains('open')) m.classList.add('modal-behind');
+}
+function refrescarModalesDebajo(){
+  const abiertos = Array.from(document.querySelectorAll('.modal.open'));
+  abiertos.forEach((m, i)=>{ if(i === abiertos.length - 1) m.classList.remove('modal-behind'); });
+  document.querySelectorAll('.modal:not(.open).modal-behind').forEach(m => m.classList.remove('modal-behind'));
+}
+// Cierra todo MENOS las ventanas "de consulta" que siguen siendo válidas
+// (Historial de ingresos y Características del producto): así, al confirmar
+// algo desde ellas, solo se retrocede un paso y no se sale de todo.
+function closeAllModalsKeepViewers(){
+  const keep = new Set();
+  const hist = document.getElementById('modalCompraHistorial');
+  if(hist && hist.classList.contains('open')) keep.add('modalCompraHistorial');
+  const det = document.getElementById('modalProductoDetalle');
+  if(det && det.classList.contains('open') && typeof detTargetId !== 'undefined' && getProductoById(detTargetId)) keep.add('modalProductoDetalle');
+  Array.from(document.querySelectorAll('.modal.open')).forEach(m=>{
+    if(keep.has(m.id)) return;
+    stopScannerForModal(m.id);
+    closeModalById(m.id);
+  });
+  refrescarModalesDebajo();
+}
+
 function openModal(id){
   const el = document.getElementById(id);
   const yaAbierto = !!el && el.classList.contains('open');
@@ -12084,6 +12121,7 @@ function closeModalById(id){
     if(di && di.tagName === 'DIV') di.innerHTML = '';
   }
   if(estabaAbierto && !sfClosingFromPop) consumeModalHistory(1);
+  refrescarModalesDebajo();
 }
 function closeAllModals(){
   currentModoDetalleOpen = null;
@@ -12092,6 +12130,7 @@ function closeAllModals(){
   const ventaScanWasOpen = document.getElementById('modalVentaScan').classList.contains('open');
   const compraScanWasOpen = document.getElementById('modalCompraScan').classList.contains('open');
   document.querySelectorAll('.modal.open').forEach(m => m.classList.remove('open'));
+  document.querySelectorAll('.modal-behind').forEach(m => m.classList.remove('modal-behind'));
   document.getElementById('modalBackdrop').classList.remove('open');
   if(inventarioScanWasOpen || ventaScanWasOpen || compraScanWasOpen){
     stopActiveScanner();
@@ -13261,7 +13300,7 @@ function setupEventListeners(){
   document.getElementById('confirmAcceptBtn').addEventListener('click', ()=>{
     if(confirmCallback) confirmCallback();
     confirmCallback = null;
-    closeAllModals();
+    closeAllModalsKeepViewers();
   });
 
   // Escáner
@@ -13361,6 +13400,7 @@ function setupEventListeners(){
   document.getElementById('btnVentaVerIngresos').addEventListener('click', ()=>{
     const codigo = document.getElementById('vCodigo').value;
     if(!codigo) return;
+    ocultarModalDebajo('modalVenta');
     openCompraHistorial(codigo);
   });
   document.getElementById('fileImgCamera').addEventListener('change', (e)=>{
@@ -13408,13 +13448,13 @@ function setupEventListeners(){
     const cb = ventaBorrarCallbacks;
     ventaBorrarCallbacks = null;
     if(cb && cb.onKeep) cb.onKeep();
-    closeAllModals();
+    closeAllModalsKeepViewers();
   });
   document.getElementById('ventaBorrarRestoreBtn').addEventListener('click', ()=>{
     const cb = ventaBorrarCallbacks;
     ventaBorrarCallbacks = null;
     if(cb && cb.onRestore) cb.onRestore();
-    closeAllModals();
+    closeAllModalsKeepViewers();
   });
   document.getElementById('ventasDates').addEventListener('click', (e)=>{
     const chip = e.target.closest('.venta-date-chip[data-venta-date]');

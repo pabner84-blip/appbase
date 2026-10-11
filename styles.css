@@ -1108,3 +1108,11 @@ button, a, select, input, .nav-item, .guest-card{ touch-action:manipulation; -we
   .view.active{animation:none;}
   *{transition-duration:.01ms !important;}
 }
+
+/* Ventana que queda debajo de otra (p. ej. Características bajo Historial de ingresos) */
+.modal.modal-behind{visibility:hidden;}
+
+/* Características del producto: el PRECIO DE VENTA va en verde para distinguirlo de los demás precios */
+.detail-row-venta .detail-label,
+.detail-row-venta .detail-value{color:#4ade80;}
+.detail-row-venta .detail-value{font-weight:800; font-size:15px;}

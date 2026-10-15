@@ -1150,10 +1150,24 @@
     <button class="modal-close" data-close-modal>✕</button>
   </div>
   <div class="modal-body">
-    <div class="modo-detalle-grid" id="modoDetalleGrid"></div>
-    <div id="modoDetalleGastos" style="margin-top:14px;"></div>
+    <iframe id="modoDetalleFrame" class="pdf-preview-frame" title="Vista previa del detalle"></iframe>
     <div class="form-actions" style="margin-top:14px;">
       <button type="button" class="btn btn-secondary" id="btnExportModoDetallePDF">📄 Exportar PDF</button>
+      <button type="button" class="btn btn-secondary" data-close-modal>Cerrar</button>
+    </div>
+  </div>
+</div>
+
+<!-- Modal: Vista previa de un PDF (ventas del invitado, etc.) -->
+<div class="modal modal-lg" id="modalVistaPreviaPDF">
+  <div class="modal-header">
+    <h3 id="vistaPreviaPDFTitle">Vista previa</h3>
+    <button class="modal-close" data-close-modal>✕</button>
+  </div>
+  <div class="modal-body">
+    <iframe id="vistaPreviaPDFFrame" class="pdf-preview-frame" title="Vista previa del PDF"></iframe>
+    <div class="form-actions" style="margin-top:14px;">
+      <button type="button" class="btn btn-secondary" id="btnVistaPreviaExportar">📄 Exportar PDF</button>
       <button type="button" class="btn btn-secondary" data-close-modal>Cerrar</button>
     </div>
   </div>

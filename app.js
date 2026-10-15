@@ -648,6 +648,16 @@ function saveDB(){
       // PC que no es la maestra y aún sin alinearse: no sube el catálogo
       // (evita que productos locales viejos contaminen la nube).
       if(!subidaCatalogoPermitida()) delete syncData.productos;
+      // MODO INVITADO: su documento (inventario_invitado) NO debe llevar el
+      // catálogo. buildGuestDB() lo reconstruye siempre desde los proyectos de
+      // Manuales y Eléctricas; subirlo aquí duplicaba ambos catálogos y hacía
+      // que el documento superara el límite de 1 MiB de Firestore
+      // (error invalid-argument). Las ventas, gastos y ajustes ya viajan en
+      // sus propias colecciones.
+      if(currentModo === 'invitado'){
+        delete syncData.productos;
+        delete syncData.categorias;
+      }
       scheduleFirestoreWrite(firebaseDocId(), ref, syncData);
     }catch(err){
       console.error('Error guardando en Firebase', err);
@@ -5099,90 +5109,16 @@ function guestModoTotalesHTML(list){
 function openModoDetalle(modo){
   currentModoDetalleOpen = modo;
   const esMan = modo === 'manual';
-  const dotCls = esMan ? 'man' : 'el';
-  const titulo = esMan ? '🛠️ Detalle Manuales' : '⚡ Detalle Eléctricas';
-  const dia = ventaFilterDateKey() || dateKeyOffset(0);
-  document.getElementById('modoDetalleTitle').textContent = titulo;
-  // Solo ventas del INVITADO para este modo en el día seleccionado
-  const ventasInvitado = (db.ventas || []).filter(v => v.modoOrigin === modo && ventaFechaKey(v.fecha) === dia);
-  const totalVentas = ventasInvitado.reduce((s,v)=> s + (parseFloat(v.total)||0), 0);
-  const efectivoVentas = ventasInvitado.reduce((s,v)=> s + efectivoMontoDeVenta(v), 0);
-  const qrVentas = ventasInvitado.reduce((s,v)=> s + qrMontoDeVenta(v), 0);
-  // Gastos ajustados del día para este modo
-  const gastosAjustados = dedupeGastosById(gastosPrestamosDelDia()).filter(g => g.modo === modo && g.ajustar);
-  const gastosEfectivo = gastosAjustados.filter(g=> (g.tipoPago||'efectivo')==='efectivo').reduce((s,g)=> s + (parseFloat(g.bs)||0), 0);
-  const gastosQr = gastosAjustados.filter(g=> g.tipoPago==='qr').reduce((s,g)=> s + (parseFloat(g.bs)||0), 0);
-  const gastosTotal = gastosAjustados.reduce((s,g)=> s + (parseFloat(g.bs)||0), 0);
-  const totalFinal = totalVentas - gastosTotal;
-  const efectivoFinal = efectivoVentas - gastosEfectivo;
-  const qrFinal = qrVentas - gastosQr;
-  const grid = document.getElementById('modoDetalleGrid');
-  grid.innerHTML = `
-    <div class="modo-detalle-card">
-      <div class="modo-detalle-label">Total</div>
-      <div class="modo-detalle-value">${fmtMoney(totalFinal)}</div>
-    </div>
-    <div class="modo-detalle-card">
-      <div class="modo-detalle-label">💵 Efectivo</div>
-      <div class="modo-detalle-value" style="color:#4ade80">${fmtMoney(efectivoFinal)}</div>
-    </div>
-    <div class="modo-detalle-card">
-      <div class="modo-detalle-label">📱 QR</div>
-      <div class="modo-detalle-value" style="color:#60a5fa">${fmtMoney(qrFinal)}</div>
-    </div>
-    <div class="modo-detalle-card">
-      <div class="modo-detalle-label">Gastos ajustados</div>
-      <div class="modo-detalle-value" style="color:#f87171">−${fmtMoney(gastosTotal)}</div>
-    </div>
-  `;
-  // Tabla de ventas del invitado
-  const gastosContainer = document.getElementById('modoDetalleGastos');
-  if(gastosContainer){
-    let html = '';
-    if(ventasInvitado.length){
-      html += `<div class="table-wrap"><table class="table"><thead><tr><th>#</th><th>Fecha</th><th>Código</th><th>Producto</th><th>Cant.</th><th>Total</th><th>Pago</th></tr></thead><tbody>`;
-      ventasInvitado.forEach((v, i) => {
-        html += `<tr>
-          <td>${i+1}</td>
-          <td>${fmtHistoryDate(v.fecha)}</td>
-          <td><strong>${escapeHtml(v.codigo)}</strong></td>
-          <td><span class="venta-modo-dot ${dotCls}"></span>${escapeHtml(v.nombre)}</td>
-          <td>${v.cantidad}</td>
-          <td><strong>${fmtMoney(v.total)}</strong></td>
-          <td>${pagoLabel(v)}</td>
-        </tr>`;
-      });
-      html += `</tbody></table></div>`;
-    }
-    // Gastos del modo
-    const allGastos = dedupeGastosById(gastosPrestamosDelDia()).filter(g => g.modo === modo);
-    if(allGastos.length){
-      html += '<div style="margin-top:14px;"><strong>Gastos/préstamos:</strong></div>';
-      html += allGastos.map(g => {
-        const tp = g.tipoPago || 'efectivo';
-        const badge = tp === 'qr' ? '<span class="gp-tipo-badge gp-tipo-qr" style="cursor:default">📱 QR</span>' : '<span class="gp-tipo-badge gp-tipo-efectivo" style="cursor:default">💵 Efectivo</span>';
-        return `
-        <div class="gp-row">
-          <strong>${fmtMoney(g.bs)}</strong>
-          <span class="gp-obs">${g.observacion ? escapeHtml(g.observacion) : '-'}</span>
-          ${badge}
-          ${g.ajustar ? '<span class="gp-tag" style="color:var(--text-muted)">✓ Ajustar</span>' : ''}
-        </div>`;
-      }).join('');
-      const totalG = allGastos.reduce((s,g)=> s + (parseFloat(g.bs)||0), 0);
-      html += `<div class="gp-total">Total gastos <strong>${fmtMoney(totalG)}</strong></div>`;
-    }
-    if(!ventasInvitado.length && !allGastos.length){
-      html = `<p class="hint" style="text-align:center;">No hay ventas ni gastos para ${esMan ? 'Manuales' : 'Eléctricas'} en ${dia}.</p>`;
-    }
-    gastosContainer.innerHTML = html;
-  }
+  document.getElementById('modoDetalleTitle').textContent = esMan ? '🛠️ Detalle Manuales' : '⚡ Detalle Eléctricas';
+  // Vista previa: es EXACTAMENTE el mismo documento que se imprime al
+  // exportar el PDF (detalle de ventas, gastos/préstamos y resumen), mostrado
+  // dentro de la app antes de abrir la otra ventana.
+  const frame = document.getElementById('modoDetalleFrame');
+  if(frame) frame.srcdoc = buildModoDetalleHtml(modo, true);
   openModal('modalModoDetalle');
 }
 
-function exportModoDetallePDF(){
-  if(!currentModoDetalleOpen) return;
-  const modo = currentModoDetalleOpen;
+function buildModoDetalleHtml(modo, preview){
   const esMan = modo === 'manual';
   const dia = ventaFilterDateKey() || dateKeyOffset(0);
   const ventasInvitado = (db.ventas || []).filter(v => v.modoOrigin === modo && ventaFechaKey(v.fecha) === dia);
@@ -5271,7 +5207,7 @@ function exportModoDetallePDF(){
     body { padding: 0; min-height: auto; }
     .no-print { display: none; }
   }
-</style></head><body>
+${preview ? '  body { padding: 12px !important; min-height: auto !important; }\n' : ''}</style></head><body>
   <h1>${esMan ? '🛠️ Detalle Manuales' : '⚡ Detalle Eléctricas'}</h1>
   <div class="meta">Fecha: <strong>${diaFmt}</strong> &nbsp;|&nbsp; Modo: <strong>Invitado</strong></div>
   <div class="ventas-section">
@@ -5294,16 +5230,37 @@ function exportModoDetallePDF(){
     </div>
     <div class="footer">StockFerre — ${dotLabel} — ${dia}</div>
   </div>
-  <div class="no-print" style="text-align:center; margin-top:20px;">
+${preview ? '' : `  <div class="no-print" style="text-align:center; margin-top:20px;">
     <button onclick="window.print(); window.close();" style="padding:10px 24px; font-size:14px; background:${dotColor}; color:#fff; border:none; border-radius:6px; cursor:pointer;">🖨️ Imprimir / Guardar como PDF</button>
   </div>
+`}
 </body></html>`;
 
+  return html;
+}
+
+// Abre la ventana de impresión / PDF con el HTML ya armado.
+function abrirVentanaPDF(html){
   const win = window.open('', '_blank');
   if(!win){ toast('No se pudo abrir la ventana. Permití pop-ups para esta página.', 'error'); return; }
   win.document.write(html);
   win.document.close();
 }
+
+function exportModoDetallePDF(){
+  if(!currentModoDetalleOpen) return;
+  abrirVentanaPDF(buildModoDetalleHtml(currentModoDetalleOpen, false));
+}
+
+// Vista previa genérica (modal con el documento tal como saldrá en el PDF).
+let vistaPreviaPDFExport = null;
+function abrirVistaPreviaPDF(titulo, html, onExport){
+  document.getElementById('vistaPreviaPDFTitle').textContent = titulo;
+  document.getElementById('vistaPreviaPDFFrame').srcdoc = html;
+  vistaPreviaPDFExport = onExport;
+  openModal('modalVistaPreviaPDF');
+}
+
 
 // Detecta ventas repetidas: "repetido" = mismo código aparece 2+ veces;
 // "duplicada" = mismo código y mismo precio total.
@@ -9102,8 +9059,19 @@ function exportVentasPDF(){
   }
 
   // -------------------- INVITADO: PDF de su propio día (modo único) --------
+  // Primero se muestra la vista previa dentro de la app; desde ahí se exporta.
+  const prevHtml = buildInvitadoVentasHtml(true);
+  if(!prevHtml){ toast('No hay ventas para exportar', 'error'); return; }
+  abrirVistaPreviaPDF('🧾 Ventas del Invitado', prevHtml, ()=> abrirVentanaPDF(buildInvitadoVentasHtml(false)));
+}
+
+// Arma el documento del PDF general del invitado (preview=true: versión para
+// mostrar dentro de la app, sin el botón de imprimir).
+function buildInvitadoVentasHtml(preview){
+  const dia = ventaFilterDateKey() || 'todas';
+  const diaFmt = dia === 'todas' ? 'Todas las fechas' : dia;
   const list = ventasFiltradas();
-  if(!list.length){ toast('No hay ventas para exportar', 'error'); return; }
+  if(!list.length) return '';
   const esMan = currentModo !== 'invitado' && currentModo === 'manual';
   const dotColor = currentModo === 'invitado' ? '#22c55e' : (esMan ? '#f26522' : '#f6c000');
   const dotLabel = currentModo === 'invitado' ? 'Ventas' : (esMan ? 'Manuales' : 'Eléctricas');
@@ -9142,7 +9110,7 @@ function exportVentasPDF(){
   .resumen-items-inline .resumen-label { font-size: 11.5px; }
   .footer { margin-top: 12px; font-size: 9px; color: #999; text-align: center; border-top: 1px solid #ddd; padding-top: 6px; }
   @media print { body { padding: 0; min-height: auto; } .no-print { display: none; } }
-</style></head><body>
+${preview ? '  body { padding: 12px !important; min-height: auto !important; }\n' : ''}</style></head><body>
   <h1>${currentModo === 'invitado' ? '🧾 Ventas del Invitado' : (esMan ? '🛠️ Ventas Manuales' : '⚡ Ventas Eléctricas')}</h1>
   <div class="meta">Fecha: <strong>${diaFmt}</strong> &nbsp;|&nbsp; Total: <strong>${list.length} venta(s)</strong></div>
   <div class="ventas-section">
@@ -9163,15 +9131,13 @@ function exportVentasPDF(){
     </div>
     <div class="footer">StockFerre — ${dotLabel} — ${diaFmt}</div>
   </div>
-  <div class="no-print" style="text-align:center; margin-top:20px;">
+${preview ? '' : `  <div class="no-print" style="text-align:center; margin-top:20px;">
     <button onclick="window.print(); window.close();" style="padding:10px 24px; font-size:14px; background:${dotColor}; color:#fff; border:none; border-radius:6px; cursor:pointer;">🖨️ Imprimir / Guardar como PDF</button>
   </div>
+`}
 </body></html>`;
 
-  const win = window.open('', '_blank');
-  if(!win){ toast('No se pudo abrir la ventana. Permití pop-ups para esta página.', 'error'); return; }
-  win.document.write(html);
-  win.document.close();
+  return html;
 }
 
 // Importa ventas desde un archivo Excel/CSV (por ejemplo, un backup exportado
@@ -13487,6 +13453,7 @@ function setupEventListeners(){
     if(modoBtn){ openModoDetalle(modoBtn.dataset.modoDetalle); return; }
   });
   document.getElementById('btnExportModoDetallePDF').addEventListener('click', exportModoDetallePDF);
+  document.getElementById('btnVistaPreviaExportar').addEventListener('click', ()=>{ if(vistaPreviaPDFExport) vistaPreviaPDFExport(); });
   document.getElementById('ajusteQrDetalle').addEventListener('click', (e)=>{
     const chip = e.target.closest('[data-qr-persona]');
     if(!chip) return;

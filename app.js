@@ -1116,7 +1116,7 @@ function fsFor(modo){
     const fsInst = app.firestore();
     // Debe llamarse ANTES de cualquier otra operación de esa instancia: ignora
     // los campos con valor undefined en vez de lanzar "invalid-argument".
-    if(esNueva){ try{ fsInst.settings({ ignoreUndefinedProperties: true, merge: true }); }catch(e){ /* ya configurada */ } }
+    if(esNueva){ try{ fsInst.settings({ ignoreUndefinedProperties: true, merge: true, experimentalAutoDetectLongPolling: true }); }catch(e){ /* ya configurada */ } }
     return fsInst;
   }catch(e){
     console.error('Error preparando Firestore del proyecto ' + p.cfg.projectId, e);
@@ -1469,6 +1469,15 @@ async function connectFirebase(){
     // La conexión quedó activa: el estado ya no debe quedarse en "conectando".
     setSyncStatus('synced');
 
+    // VELOCIDAD: ventas, ingresos, ajustes y gastos NO dependen del catálogo, así
+    // que sus listeners se abren AHORA MISMO (antes esperaban a la lectura inicial
+    // y a una cadena de respaldos de hasta 1-2 minutos: por eso Manuales tardaba
+    // en recibir lo de otros dispositivos). Los respaldos pasan a segundo plano.
+    startVentasListener(currentModo);
+    startComprasListener(currentModo);
+    startAjustesListener(currentModo);
+    startGastosPrestamosListener(currentModo);
+
     // Lectura inicial: fusiona lo que haya en la nube con lo local (o sube la
     // semilla la primera vez). Con límite de tiempo: si la red tarda, el
     // listener de arriba sigue activo recibiendo los cambios igual.
@@ -1485,18 +1494,13 @@ async function connectFirebase(){
 
     // Mantiene también en caché el OTRO modo (Manuales ↔ Eléctricas). Así la
     // contraseña y los datos de ambos quedan listos en este dispositivo aunque
-    // todavía no hayas entrado en ese modo (clave para pedir la contraseña
-    // desde la pantalla de Inicio en un celular recién configurado).
+    // todavía no hayas entrado en ese modo. El listener entrega el estado
+    // inicial por sí solo: ya no se espera una lectura aparte (8 s de espera).
     const otherModo = currentModo === 'manual' ? 'electrico' : 'manual';
     try{
-      // El OTRO modo vive en el OTRO proyecto de Firebase: se lee con su
-      // propia instancia (la contraseña/datos de ese modo quedan en caché).
       const otherFs = fsFor(otherModo);
       const otherRef = otherFs ? otherFs.collection('stockferre').doc('inventario_' + otherModo) : null;
       if(otherRef){
-        const otherSnap = await withTimeout(otherRef.get(), 8000);
-        if(token !== modeToken) return; // cambió de modo: no se subscribe nada viejo
-        if(otherSnap && otherSnap.exists) cacheRemoteModo(otherSnap.data(), otherModo);
         fbOtherUnsub = otherRef.onSnapshot(snap=>{
           if(token !== modeToken) return;
           if(snap.metadata.hasPendingWrites) return;
@@ -1505,38 +1509,31 @@ async function connectFirebase(){
       }
     }catch(err){ /* la caché del otro modo es opcional */ }
 
-    // Stock atómico: crea los documentos de producto que falten (los que ya
-    // existían antes de este arreglo) y escucha la colección para mantener el
-    // stock local al día con el valor EXACTO de la nube.
-    try{ await withTimeout(backfillProductos(currentModo), 15000); }catch(e){ /* no bloquea */ }
-    try{ await withTimeout(backfillProductos(otherModo), 15000); }catch(e){ /* no bloquea */ }
-    try{ await withTimeout(syncCaracteristicasCloud(currentModo), 15000); }catch(e){ /* no bloquea */ }
-    try{ await withTimeout(syncCaracteristicasCloud(otherModo), 15000); }catch(e){ /* no bloquea */ }
+    // Stock atómico: se escucha YA (sin esperar a ningún respaldo) para recibir
+    // el valor EXACTO de la nube apenas otro dispositivo registra algo.
     startStockListener(currentModo);
     startStockListener(otherModo);
-    // Sin esperar: adopta en este dispositivo los productos que le falten de la
-    // colección (una sola vez por modo). Así el catálogo completo llega aunque la
-    // base local esté llena o el documento consolidado pese demasiado.
-    assimilateCatalogFromCloud(currentModo);
-    assimilateCatalogFromCloud(otherModo);
-    // VENTAS COMPARTIDAS del dueño: cada modo (manual/electrico) tiene su
-    // PROPIA colección y sus propios dispositivos. Solo se escucha el dominio
-    // del modo actual; al cambiar de modo se re-conecta con su colección.
-    try{ await withTimeout(backfillVentas(currentModo), 15000); }catch(e){ /* no bloquea */ }
-    startVentasListener(currentModo);
-    // INGRESOS del dueño: CADA INGRESO es su propio documento en la colección
-    // "stockferre_compras_<modo>" (igual que productos/ventas). Antes viajaban
-    // DENTRO del documento grande con escritura completa: un dispositivo que
-    // escribía con la lista vacía (antes de recibir la copia ajena) los borraba
-    // de la nube para todos. El backfill sube los que falten y el listener los
-    // recibe al instante desde cualquier otro dispositivo.
-    try{ await withTimeout(backfillCompras(currentModo), 15000); }catch(e){ /* no bloquea */ }
-    startComprasListener(currentModo);
-    // AJUSTE DE CUENTAS y GASTOS/PRÉSTAMOS del dueño (mismo modelo por dominio).
-    try{ await withTimeout(backfillAjustes(currentModo), 15000); }catch(e){ /* no bloquea */ }
-    try{ await withTimeout(backfillGastosPrestamos(currentModo), 15000); }catch(e){ /* no bloquea */ }
-    startAjustesListener(currentModo);
-    startGastosPrestamosListener(currentModo);
+
+    // RESPALDOS EN SEGUNDO PLANO (uno tras otro, sin bloquear nada): crean los
+    // documentos que falten en la nube. Antes se esperaban ANTES de abrir los
+    // listeners; ahora los listeners ya están activos y esto corre aparte.
+    (async () => {
+      const pasos = [
+        () => backfillProductos(currentModo),
+        () => backfillProductos(otherModo),
+        () => syncCaracteristicasCloud(currentModo),
+        () => syncCaracteristicasCloud(otherModo),
+        () => { assimilateCatalogFromCloud(currentModo); assimilateCatalogFromCloud(otherModo); },
+        () => backfillVentas(currentModo),
+        () => backfillCompras(currentModo),
+        () => backfillAjustes(currentModo),
+        () => backfillGastosPrestamos(currentModo)
+      ];
+      for(const paso of pasos){
+        if(token !== modeToken) return; // cambió de modo: se abandona la cadena
+        try{ await withTimeout(paso(), 15000); }catch(e){ /* no bloquea */ }
+      }
+    })().catch(()=>{ /* los respaldos nunca rompen la conexión */ });
   }catch(err){
     console.error('No se pudo conectar a Firebase', err);
     fbLastErrorCode = (err && err.code) || 'error';

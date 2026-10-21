@@ -952,8 +952,15 @@ async function connectGuestFirebase(){
     // 'electrico' (app-ferreteria-bd73f). El catálogo se lee de AMBOS abajo.
     const fsOwn = fsFor('invitado');
     if(!fsOwn) return;
-    enableOfflinePersistence(fsOwn, fbProjectKeyFor('invitado'));
     setSyncStatus('connecting');
+    // La persistencia de AMBOS proyectos debe estar lista antes de abrir
+    // cualquier lectura o listener (si no, Firestore puede quedar en un estado
+    // inconsistente: "INTERNAL ASSERTION FAILED").
+    await withTimeout(Promise.all(['invitado', 'manual', 'electrico'].map(m => {
+      const f = fsFor(m);
+      return f ? enableOfflinePersistence(f, fbProjectKeyFor(m)) : null;
+    })), 5000);
+    if(token !== modeToken) return; // cambió de modo durante la espera
     // 1) Escucha documentos de Manuales y Eléctricas (solo para catálogo/productos).
     //    Cada catálogo viene de SU PROPIO proyecto: Manuales de app-perez-2 y
     //    Eléctricas de app-ferreteria-bd73f; aquí se juntan en pantalla.
@@ -1040,6 +1047,7 @@ async function connectGuestFirebase(){
     // y eléctricas. Así el invitado no se mezcla con el dueño, pero dos
     // invitados se ven al instante. Primero sube las ventas locales que no
     // tengan documento y luego escucha la colección.
+    if(token !== modeToken) return; // si cambió de modo, NO abrir los listeners del invitado
     try{ backfillVentas('invitado'); }catch(e){ /* no bloquea */ }
     startVentasListener('invitado');
     // AJUSTE DE CUENTAS y GASTOS/PRÉSTAMOS del invitado (mismo modelo): lo
@@ -1141,6 +1149,49 @@ let fbLastErrorMessage = null;
 // Instante del último intento de reconexión del vigía (para espaciarlos).
 let fbLastAttempt = 0;
 
+// --- RECUPERACIÓN AUTOMÁTICA DEL ERROR INTERNO DE FIRESTORE -------------------
+// "FIRESTORE (x.y.z) INTERNAL ASSERTION FAILED: Unexpected state" significa que
+// el SDK de Firestore quedó con su estado interno desordenado en ESTE navegador
+// (conexión en tiempo real muerta: ventas que no llegan ni salen). Reintentar
+// sobre la misma instancia no lo arregla, así que: 1) se cierra Firestore y se
+// recarga la app (sin borrar nada: las escrituras pendientes quedan guardadas);
+// 2) si vuelve a fallar enseguida, se entra en "modo seguro" 24 h (sin caché
+// IndexedDB de Firestore; la app sigue guardando todo en su almacén local y
+// re-subiendo lo que falte). Máximo 2 recargas por minuto: nunca hay bucle.
+const FS_SEGURO_KEY = 'sf_modo_seguro_fs';
+function fsEsAssertion(m){ return /INTERNAL ASSERTION FAILED/i.test(String(m || '')); }
+function fsRecuperarAssertion(m){
+  try{
+    const ahora = Date.now();
+    let reg = [];
+    try{ reg = JSON.parse(sessionStorage.getItem('sf_assert_reg') || '[]').filter(t => ahora - t < 60000); }catch(e){ reg = []; }
+    if(window.__fsRecuperando) return;
+    if(reg.length >= 2){
+      // Ya se recargó 2 veces en el último minuto: no se insiste.
+      showDiagnostic('Firestore sigue fallando tras reiniciar la conexión.\n' +
+        'Mensaje: ' + String(m || '').slice(0, 300) +
+        '\nCierra las demás ventanas/pestañas de la app y vuelve a abrirla.');
+      return;
+    }
+    window.__fsRecuperando = true;
+    reg.push(ahora);
+    try{ sessionStorage.setItem('sf_assert_reg', JSON.stringify(reg)); }catch(e){}
+    if(reg.length >= 2){ try{ localStorage.setItem(FS_SEGURO_KEY, String(ahora)); }catch(e){} }
+    showDiagnostic('Firestore se desordenó en este navegador (' + String(m || '').slice(0, 120) + ').\n' +
+      (reg.length >= 2 ? 'Entrando en MODO SEGURO (sin caché offline de Firestore) y reiniciando…'
+                       : 'Reiniciando la conexión automáticamente…') +
+      '\nTus ventas locales no se pierden: se vuelven a subir solas.');
+    const cerrar = [];
+    try{
+      (typeof firebase !== 'undefined' && firebase.apps ? firebase.apps : []).forEach(a => {
+        try{ cerrar.push(Promise.resolve(a.firestore().terminate()).catch(()=>{})); }catch(e){}
+      });
+    }catch(e){}
+    Promise.race([Promise.all(cerrar), new Promise(r => setTimeout(r, 1500))])
+      .then(() => setTimeout(() => { try{ location.reload(); }catch(e){} }, 300));
+  }catch(e){ /* la recuperación nunca debe romper la app */ }
+}
+
 // --- DIAGNÓSTICO EN PANTALLA -------------------------------------------------
 // Muestra el error real (código y mensaje) en un recuadro fijo abajo, para poder
 // leerlo desde el celular sin abrir la consola. Se toca para cerrarlo.
@@ -1175,6 +1226,7 @@ window.addEventListener('error', function(ev){
       console.warn('Script error (detalle oculto por el navegador: script de otro dominio)');
       return; // no se muestra: no dice nada útil y asusta
     }
+    if(fsEsAssertion(m)){ fsRecuperarAssertion(m); return; }
     showDiagnostic('ERROR JS: ' + m + (ev.filename ? '\n' + ev.filename + ':' + ev.lineno : ''));
   }catch(e){}
 });
@@ -1182,6 +1234,7 @@ window.addEventListener('unhandledrejection', function(ev){
   try{
     const r = ev && ev.reason;
     const m = r ? ((r.code ? r.code + ': ' : '') + (r.message || String(r))) : 'promesa rechazada';
+    if(fsEsAssertion(m)){ fsRecuperarAssertion(m); return; }
     showDiagnostic('PROMESA RECHAZADA: ' + m);
   }catch(e){}
 });
@@ -1242,6 +1295,7 @@ function setSyncStatus(status){
   // En caso de error, deja en pantalla los datos exactos para poder diagnosticar
   // desde el celular (código, mensaje, proyecto y si el SDK llegó a cargar).
   if(status === 'error'){
+    if(fsEsAssertion(fbLastErrorMessage)){ fsRecuperarAssertion(fbLastErrorMessage); return; }
     showDiagnostic('Firebase falló al conectar.\nCódigo: ' + (fbLastErrorCode || 'desconocido') +
       '\nCausa probable: ' + fbExplicarError(fbLastErrorCode) +
       (fbLastErrorMessage ? '\nMensaje: ' + fbLastErrorMessage : '') +
@@ -1522,6 +1576,7 @@ function startSyncWatchdog(){
       const noSeArreglaReintentando = fbLastErrorCode === 'resource-exhausted' ||
                                       fbLastErrorCode === 'permission-denied';
       if(noSeArreglaReintentando && (Date.now() - fbLastAttempt) < 600000) return;
+      if(fsEsAssertion(fbLastErrorMessage)) return; // Firestore roto: lo maneja fsRecuperarAssertion
       fbLastAttempt = Date.now();
       fbReconnecting = true;
       setTimeout(()=>{ fbReconnecting = false; }, 8000);
@@ -1914,13 +1969,18 @@ const ventasStoreCache = {}; // copia de la lista mientras se actualiza
 let fbVentasUnsub = null;
 
 function startVentasListener(modo){
+  if(modo && modo !== currentModo) return; // listener de OTRO dominio: jamás mezclar ventas
   const col = fbVentasCol(modo);
   if(!col) return;
   if(fbVentasUnsub){ try{ fbVentasUnsub(); }catch(e){ /* ignorar */ } }
   ventasStoreCache.list = null;
   let timer = null, changed = false;
+  const tokenListener = modeToken;
+  const modoListener = modo || currentModo;
+  const vigente = () => tokenListener === modeToken && currentModo === modoListener;
 
   const flush = () => {
+    if(!vigente()){ changed = false; ventasStoreCache.list = null; return; }
     if(!changed) return;
     changed = false;
     const store = ventasStoreCache.list;
@@ -1936,6 +1996,7 @@ function startVentasListener(modo){
   };
 
   fbVentasUnsub = col.onSnapshot(snap => {
+    if(!vigente()) return; // snapshot de un dominio que ya no está activo
     snap.docChanges().forEach(ch => {
       if(ch.doc.metadata.hasPendingWrites) return; // espera a que la nube confirme lo propio
       if(ch.type === 'removed'){
@@ -2232,12 +2293,17 @@ async function backfillAjustes(modo){
 }
 
 function startAjustesListener(modo){
+  if(modo && modo !== currentModo) return; // listener de OTRO dominio: jamás mezclar
   const col = fbAjustesCol(modo);
   if(!col) return;
   if(fbAjustesUnsub){ try{ fbAjustesUnsub(); }catch(e){ /* ignorar */ } }
   let timer = null;
   const dirty = {};
+  const tokenListener = modeToken;
+  const modoListener = modo || currentModo;
+  const vigente = () => tokenListener === modeToken && currentModo === modoListener;
   const flush = () => {
+    if(!vigente()){ Object.keys(dirty).forEach(k => { delete dirty[k]; }); return; }
     const keys = Object.keys(dirty);
     if(!keys.length) return;
     keys.forEach(k => { delete dirty[k]; });
@@ -2246,6 +2312,7 @@ function startAjustesListener(modo){
     if(typeof refreshModoDetalleIfOpen === 'function') refreshModoDetalleIfOpen();
   };
   fbAjustesUnsub = col.onSnapshot(snap => {
+    if(!vigente()) return;
     let changed = false;
     snap.docChanges().forEach(ch => {
       if(ch.doc.metadata.hasPendingWrites) return;
@@ -2387,6 +2454,7 @@ async function backfillGastosPrestamos(modo){
 }
 
 function startGastosPrestamosListener(modo){
+  if(modo && modo !== currentModo) return; // listener de OTRO dominio: jamás mezclar
   const col = fbGpCol(modo);
   if(!col) return;
   // En el dominio del invitado también se aceptan los "sin color" (los
@@ -2394,7 +2462,11 @@ function startGastosPrestamosListener(modo){
   const acceptNeutral = (modo === 'invitado');
   if(fbGpUnsub){ try{ fbGpUnsub(); }catch(e){ /* ignorar */ } }
   let timer = null, changed = false;
+  const tokenListener = modeToken;
+  const modoListener = modo || currentModo;
+  const vigente = () => tokenListener === modeToken && currentModo === modoListener;
   const flush = () => {
+    if(!vigente()){ changed = false; return; }
     if(!changed) return;
     changed = false;
     try{ persistLocalCache(); }catch(e){ /* ignorar */ }
@@ -2402,6 +2474,7 @@ function startGastosPrestamosListener(modo){
     if(typeof refreshModoDetalleIfOpen === 'function') refreshModoDetalleIfOpen();
   };
   fbGpUnsub = col.onSnapshot(snap => {
+    if(!vigente()) return;
     snap.docChanges().forEach(ch => {
       if(ch.doc.metadata.hasPendingWrites) return;
       const id = String(ch.doc.id);
@@ -2827,19 +2900,36 @@ async function assimilateCatalogFromCloud(modo){
 // escrituras que no puedan llegar a Firestore se guardan localmente y se
 // reenvían solas cuando vuelva la conexión (evita perder un registro por un
 // cortón de red). Como ahora hay DOS proyectos, la marca es por proyecto.
-const persistenceEnabledByProject = {};
-async function enableOfflinePersistence(fs, projectKey){
-  if(!fs) return;
-  const key = projectKey || 'default';
-  if(persistenceEnabledByProject[key]) return;
-  persistenceEnabledByProject[key] = true;
+const persistenceByProject = {}; // clave de proyecto -> Promise (la MISMA para todos los que la pidan)
+function persistenciaModoSeguro(){
   try{
-    await fs.enablePersistence({ synchronizeTabs: true });
-  }catch(err){
-    if(err && err.code !== 'failed-precondition' && err.code !== 'unimplemented'){
-      console.warn('Persistencia offline no disponible', err);
+    const t = Number(localStorage.getItem(FS_SEGURO_KEY) || 0);
+    if(t && (Date.now() - t) < 86400000) return true;
+    if(t) localStorage.removeItem(FS_SEGURO_KEY); // el modo seguro caduca a las 24 h
+  }catch(e){}
+  return false;
+}
+// IMPORTANTE: enablePersistence() se invoca de forma SÍNCRONA al primer pedido
+// (antes de cualquier otra operación sobre esa instancia) y todos los demás
+// reciben la misma promesa, de modo que pueden ESPERARLA antes de abrir
+// listeners. Ya NO se usa synchronizeTabs: la elección de "pestaña líder" entre
+// varias ventanas era la causa típica de "INTERNAL ASSERTION FAILED". Una
+// segunda ventana simplemente trabaja sin caché offline de Firestore.
+function enableOfflinePersistence(fs, projectKey){
+  if(!fs) return Promise.resolve();
+  const key = projectKey || 'default';
+  if(persistenceByProject[key]) return persistenceByProject[key];
+  if(persistenciaModoSeguro()){ persistenceByProject[key] = Promise.resolve(); return persistenceByProject[key]; }
+  persistenceByProject[key] = (async () => {
+    try{
+      await fs.enablePersistence();
+    }catch(err){
+      if(err && err.code !== 'failed-precondition' && err.code !== 'unimplemented'){
+        console.warn('Persistencia offline no disponible', err);
+      }
     }
-  }
+  })();
+  return persistenceByProject[key];
 }
 
 

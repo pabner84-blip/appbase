@@ -1122,3 +1122,18 @@ button, a, select, input, .nav-item, .guest-card{ touch-action:manipulation; -we
   width:100%; height:62vh; min-height:300px; flex:1;
   border:1px solid var(--border); border-radius:8px; background:#fff;
 }
+
+
+/* ---------- REGISTRO RÁPIDO DE VENTAS ---------- */
+.rr-display{font-size:38px; font-weight:800; text-align:center; padding:12px 8px; margin-bottom:6px; background:var(--bg); border:1px solid var(--border); border-radius:10px; letter-spacing:1px;}
+.rr-next{text-align:center; font-weight:700;}
+.rr-status{text-align:center; min-height:18px; margin:0 0 10px;}
+.rr-pad{display:grid; grid-template-columns:repeat(3,1fr); gap:8px; margin-bottom:12px;}
+.rr-key{font-size:26px; font-weight:700; padding:14px 0; min-height:58px; border-radius:10px; border:1px solid var(--border); background:var(--surface); color:var(--text); cursor:pointer; touch-action:manipulation; font-family:inherit;}
+.rr-key:active{background:var(--primary); color:#fff; border-color:var(--primary);}
+.rr-key-0{grid-column:span 2;}
+.rr-actions{display:grid; grid-template-columns:1fr 1fr; gap:10px;}
+.rr-actions .btn{min-height:50px; font-size:16px;}
+.rr-modo{display:flex; justify-content:center; gap:18px; margin-bottom:10px; font-weight:600;}
+.rr-modo label{display:flex; align-items:center; gap:6px; cursor:pointer; font-size:15px;}
+.rr-modo input{width:20px; height:20px;}

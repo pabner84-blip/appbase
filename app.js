@@ -4027,6 +4027,72 @@ function openVentaModalOtro(){
   setTimeout(()=> document.getElementById('vNombreOtroInput').focus(), 50);
 }
 
+// ---------- REGISTRO RÁPIDO DE VENTAS ----------
+// Panel numérico para anotar solo precios. Cada "Siguiente" guarda una venta
+// como si fuera "OTRO" (descripción "producto N", cantidad 1, código OTRO,
+// pago en efectivo) usando saveVenta, así que sube a Firebase igual que
+// cualquier venta y después se puede editar normalmente.
+let rapidoNum = 1;
+let rapidoPrecio = '';
+function rapidoRender(){
+  const d = document.getElementById('rrDisplay');
+  const n = document.getElementById('rrNombre');
+  if(d) d.textContent = 'Bs ' + (rapidoPrecio === '' ? '0' : rapidoPrecio);
+  if(n) n.textContent = 'producto';
+}
+function rapidoResetModo(){
+  const rm = document.querySelector('#rrModoBox input[value="manual"]');
+  if(rm) rm.checked = true;
+}
+function openRegistroRapido(){
+  rapidoNum = 1;
+  rapidoPrecio = '';
+  const st = document.getElementById('rrStatus');
+  if(st) st.textContent = 'Escribe el precio y presiona Siguiente';
+  rapidoRender();
+  // Manuales / Eléctricas: solo lo usa el modo invitado (igual que "Nueva venta");
+  // siempre arranca marcado en Manuales.
+  const box = document.getElementById('rrModoBox');
+  if(box){
+    box.style.display = currentModo === 'invitado' ? '' : 'none';
+    rapidoResetModo();
+  }
+  openModal('modalRegistroRapido');
+}
+function rapidoKey(k){
+  if(k === 'del'){
+    rapidoPrecio = rapidoPrecio.slice(0, -1);
+  }else{
+    if(rapidoPrecio.length >= 7) return;
+    rapidoPrecio = (rapidoPrecio === '0') ? k : rapidoPrecio + k;
+  }
+  rapidoRender();
+}
+function rapidoSiguiente(){
+  const precio = parseFloat(rapidoPrecio);
+  const st = document.getElementById('rrStatus');
+  if(!precio || precio <= 0){
+    if(st) st.textContent = '⚠️ Escribe un precio mayor a 0';
+    return;
+  }
+  const nombre = 'producto';
+  const rSel = document.querySelector('input[name="rrModo"]:checked');
+  const modoDestino = (currentModo === 'invitado' && rSel) ? rSel.value : 'manual';
+  const venta = saveVenta({
+    codigo: 'OTRO', nombre, cantidad: 1, total: precio,
+    metodoPago: 'efectivo', modoDestino,
+    qrPersona: '', efectivoMonto: 0, qrMonto: 0
+  });
+  try{ notifySale(venta); }catch(e){}
+  try{ playCashRegisterSound(); }catch(e){}
+  renderVentas();
+  if(typeof renderFinanzas === 'function') renderFinanzas();
+  if(st) st.textContent = '✔ Guardado: ' + nombre + ' — Bs ' + precio;
+  rapidoPrecio = '';
+  rapidoRender();
+  rapidoResetModo();
+}
+
 // Pago mixto (QR + efectivo): si no hay nada escrito aún, deja por defecto
 // todo en efectivo; la otra casilla se rellena sola con el total menos lo
 // escrito (lo hace el listener de cada campo).
@@ -13603,6 +13669,12 @@ function setupEventListeners(){
     closeAllModals();
     openVentaModalOtro();
   });
+  document.getElementById('btnRegistroRapido').addEventListener('click', openRegistroRapido);
+  document.querySelectorAll('[data-rr-key]').forEach(b=>{
+    b.addEventListener('click', ()=> rapidoKey(b.dataset.rrKey));
+  });
+  document.getElementById('btnRrSiguiente').addEventListener('click', rapidoSiguiente);
+  document.getElementById('btnRrCerrar').addEventListener('click', ()=> { rapidoResetModo(); closeModalById('modalRegistroRapido'); });
   document.getElementById('formVenta').addEventListener('submit', handleVentaSubmit);
   document.getElementById('vCantidad').addEventListener('input', recalcVentaPrecioUnitario);
   document.getElementById('vPrecioTotal').addEventListener('input', ()=>{

@@ -224,6 +224,7 @@
     <section class="view" id="view-ventas">
       <div class="toolbar">
         <button class="btn btn-primary" id="btnNuevaVenta">➕ Nueva venta</button>
+        <button class="btn btn-success" id="btnRegistroRapido">⚡ Registro rápido</button>
         <input type="text" id="ventaSearch" class="input" placeholder="🔍 Buscar por código o nombre..." style="flex:1; min-width:180px;">
         <button class="btn btn-secondary" id="btnExportVentas">📤 Exportar Excel</button>
         <button class="btn btn-secondary" id="btnExportVentasPDF">📄 Exportar PDF</button>
@@ -895,6 +896,39 @@
     <input type="text" id="ventaSearchInput" class="input" placeholder="🔍 Buscar por nombre o código..." style="margin-bottom:12px; width:100%;" autocomplete="off">
     <div id="ventaSearchResults" class="venta-search-list"></div>
     <button type="button" class="btn btn-secondary" id="btnVentaOtro" style="width:100%; margin-top:12px;">➕ OTRO (producto que no está en el inventario)</button>
+  </div>
+</div>
+
+<!-- Modal: Registro rápido de ventas (solo precios, panel numérico) -->
+<div class="modal modal-sm" id="modalRegistroRapido">
+  <div class="modal-header">
+    <h3>⚡ Registro rápido</h3>
+  </div>
+  <div class="modal-body">
+    <div class="rr-modo" id="rrModoBox" style="display:none;">
+      <label><input type="radio" name="rrModo" value="manual" checked> 🛠️ Manuales</label>
+      <label><input type="radio" name="rrModo" value="electrico"> ⚡ Eléctricas</label>
+    </div>
+    <p class="hint rr-next" id="rrNombre" style="margin:0 0 4px;">producto</p>
+    <div class="rr-display" id="rrDisplay">Bs 0</div>
+    <p class="hint rr-status" id="rrStatus">Escribe el precio y presiona Siguiente</p>
+    <div class="rr-pad">
+      <button type="button" class="rr-key" data-rr-key="7">7</button>
+      <button type="button" class="rr-key" data-rr-key="8">8</button>
+      <button type="button" class="rr-key" data-rr-key="9">9</button>
+      <button type="button" class="rr-key" data-rr-key="4">4</button>
+      <button type="button" class="rr-key" data-rr-key="5">5</button>
+      <button type="button" class="rr-key" data-rr-key="6">6</button>
+      <button type="button" class="rr-key" data-rr-key="1">1</button>
+      <button type="button" class="rr-key" data-rr-key="2">2</button>
+      <button type="button" class="rr-key" data-rr-key="3">3</button>
+      <button type="button" class="rr-key rr-key-0" data-rr-key="0">0</button>
+      <button type="button" class="rr-key rr-key-del" data-rr-key="del">⌫</button>
+    </div>
+    <div class="rr-actions">
+      <button type="button" class="btn btn-secondary" id="btnRrCerrar">Cerrar panel</button>
+      <button type="button" class="btn btn-success" id="btnRrSiguiente">Siguiente ➜</button>
+    </div>
   </div>
 </div>
 

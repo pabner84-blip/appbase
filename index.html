@@ -200,7 +200,6 @@
         <button type="button" class="btn-scan-big" id="btnScanFromProducts">📷 Escanear</button>
       </div>
       <div class="toolbar">
-        <button class="btn btn-primary admin-only master-only" id="btnNewProduct">+ Nuevo producto</button>
         <button class="btn btn-secondary admin-only master-only" id="btnExportProducts">📤 Exportar Excel</button>
         <button class="btn btn-secondary admin-only master-only" id="btnImportProducts">📥 Importar Excel</button>
         <button class="btn btn-danger admin-only master-only" id="btnVaciarProductos">🗑️ Vaciar productos</button>
@@ -329,11 +328,9 @@
         <button class="btn btn-danger master-only" id="btnVaciarCompras">🧹 Vaciar historial</button>
       </div>
       <div class="ventas-dates" id="comprasDates">
-        <button class="compra-date-chip active" data-compra-date="hoy">Hoy</button>
-        <button class="compra-date-chip" data-compra-date="ayer">Ayer</button>
         <button type="button" class="compra-date-chip" id="compraDateBtn" onclick="document.getElementById('compraDateInput').showPicker()">📅 Calendario</button>
         <input type="date" id="compraDateInput" class="input venta-date-picker">
-        <button class="compra-date-chip" data-compra-date="todas">Todas</button>
+        <button class="compra-date-chip active" data-compra-date="todas">Todas</button>
       </div>
       <div style="margin:10px 0;">
         <input type="text" id="compraSearch" class="input" placeholder="🔍 Buscar por código o descripción...">

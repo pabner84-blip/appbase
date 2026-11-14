@@ -1519,6 +1519,8 @@ async function connectFirebase(){
     // listeners; ahora los listeners ya están activos y esto corre aparte.
     (async () => {
       const pasos = [
+        () => reintentarProductosPendientes(currentModo),
+        () => reintentarProductosPendientes(currentModo === 'manual' ? 'electrico' : 'manual'),
         () => backfillProductos(currentModo),
         () => backfillProductos(otherModo),
         () => syncCaracteristicasCloud(currentModo),
@@ -1812,22 +1814,81 @@ async function applyStockAbsolute(p, value, modo){
   }catch(e){ console.error('Error guardando stock exacto en la nube', e); }
 }
 
-// Guarda (crea o actualiza) el documento completo de un producto.
-async function syncProductoDoc(p, modo, opts){
-  // opts.crear = producto NUEVO registrado desde Ingresos: cualquier dueño puede
-  // crearlo en la nube (con su código y marca). Editar productos que ya existen
-  // sigue siendo solo de la PC madre.
-  const crear = !!(opts && opts.crear);
-  if(!subidaCatalogoPermitida() && !crear) return;
+// PRODUCTOS NUEVOS PENDIENTES DE SUBIR: si un producto nuevo (creado desde Ingresos)
+// no pudo subirse a la nube (sincronización apagada, SDK sin cargar, error o falta
+// de internet), su id queda anotado aquí y se reintenta solo en la próxima conexión.
+// Antes el fallo solo salía en la consola y el producto quedaba únicamente en el
+// dispositivo que lo registró.
+const PEND_PROD_KEY = 'fs_pend_prod_';
+function pendProdLeer(modo){
+  try{ return JSON.parse(localStorage.getItem(PEND_PROD_KEY + modo) || '[]') || []; }catch(e){ return []; }
+}
+function pendProdGuardar(modo, arr){
+  try{
+    if(arr.length) localStorage.setItem(PEND_PROD_KEY + modo, JSON.stringify(arr));
+    else localStorage.removeItem(PEND_PROD_KEY + modo);
+  }catch(e){ /* ignorar */ }
+}
+function pendProdAgregar(modo, id){
+  const arr = pendProdLeer(modo);
+  if(arr.indexOf(id) === -1){ arr.push(id); pendProdGuardar(modo, arr); }
+}
+function pendProdQuitar(modo, id){
+  const arr = pendProdLeer(modo);
+  const i = arr.indexOf(id);
+  if(i > -1){ arr.splice(i, 1); pendProdGuardar(modo, arr); }
+}
+
+// Reintenta subir los productos nuevos que quedaron pendientes. Si el documento ya
+// existe en la nube NO se toca (así no pisa el stock que otros dispositivos hayan
+// sumado); si no existe, se crea con los datos y el stock locales.
+async function reintentarProductosPendientes(modo){
+  const arr = pendProdLeer(modo);
+  if(!arr.length) return;
   const col = fbProductsCol(modo);
-  if(!col || !p || !p.id) return;
+  if(!col) return;
+  const local = modo === currentModo ? db : loadModoDB(modo);
+  for(const id of arr.slice()){
+    const p = (local.productos || []).find(x => x && x.id === id);
+    if(!p){ pendProdQuitar(modo, id); continue; } // ya no existe en este dispositivo
+    try{
+      const ref = col.doc(id);
+      const snap = await ref.get();
+      if(!snap.exists) await ref.set(productoDocData(p), { merge: true });
+      pendProdQuitar(modo, id);
+    }catch(e){ /* se reintenta en la próxima conexión */ }
+  }
+}
+
+// Guarda (crea o actualiza) el documento completo de un producto.
+// Devuelve true si se envió bien. Los productos NUEVOS (crear) que no se puedan
+// subir quedan anotados como pendientes y se reintentan solos.
+async function syncProductoDoc(p, modo, opts){
+  // opts.crear = producto NUEVO registrado desde Ingresos: cualquier dueño (PC madre
+  // o no) puede crearlo en la nube (con su código y marca). Editar productos que ya
+  // existen sigue siendo solo de la PC madre.
+  const crear = !!(opts && opts.crear);
+  if(!subidaCatalogoPermitida() && !crear) return false;
+  const m = modo || currentModo;
+  const col = fbProductsCol(modo);
+  if(!col || !p || !p.id){
+    if(crear && p && p.id) pendProdAgregar(m, p.id); // sin sincronización por ahora: se reintenta luego
+    return false;
+  }
   const data = productoDocData(p);
   // Un dispositivo que no es la maestra nunca pisa código/marca en la nube
   // (merge: true deja esos campos intactos si no se mandan).
   if(!esMaestro() && !crear){ delete data.codigo; delete data.marca; }
+  if(crear) pendProdAgregar(m, p.id); // se quita al confirmarse la subida
   try{
     await col.doc(p.id).set(data, { merge: true });
-  }catch(e){ console.error('Error sincronizando producto en la nube', e); }
+    if(crear) pendProdQuitar(m, p.id);
+    return true;
+  }catch(e){
+    console.error('Error sincronizando producto en la nube', e);
+    if(crear) toast('El producto nuevo se guardó aquí pero aún no subió a la nube; se reintentará solo.', 'warning');
+    return false;
+  }
 }
 
 async function deleteProductoDoc(p, modo){
@@ -2795,12 +2856,12 @@ function startStockListener(modo){
   };
   const unsubA = query.onSnapshot(onSnap, onErr);
   // SEGUNDA consulta, a prueba de relojes: los productos registrados en los
-  // últimos 3 días (por su fecha de primer registro) llegan SIEMPRE, aunque el
+  // últimos 30 días (por su fecha de primer registro) llegan SIEMPRE, aunque el
   // reloj del dispositivo que los creó esté atrasado/adelantado y su
   // _updatedAt haya quedado fuera de la ventana de arriba. Son pocos documentos.
   let unsubB = null;
   try{
-    const desde = new Date(Date.now() - 3 * 24 * 3600 * 1000).toISOString();
+    const desde = new Date(Date.now() - 30 * 24 * 3600 * 1000).toISOString();
     unsubB = col.where('fechaRegistro', '>=', desde).onSnapshot(onSnap, ()=>{ /* la principal ya cubre */ });
   }catch(e){ /* ignorar */ }
   fbProductosUnsubs[modo] = () => {
@@ -3645,29 +3706,10 @@ function saveProducto(data){
       syncProductoDoc(existing);
       return existing;
     }
-    // Cualquier dispositivo (no solo la PC principal) puede crear productos nuevos:
-    // se suben a Firebase para que todos los dispositivos los vean.
-    const p = {
-      id: uid(),
-      codigo: data.codigo.trim(),
-      nombre: data.nombre.trim(),
-      marca: data.marca.trim(),
-      categoria: data.categoria.trim(),
-      codigoBarras: (data.codigoBarras||'').trim(),
-      precioCompra: 0,
-      precioMarca: 0,
-      precioVenta: 0,
-      caracteristicas: '',
-      stock: 0,
-      fechaCreacion: todayISO(),
-      fechaRegistro: todayISO(), // producto nuevo: distintivo NUEVO por 1 mes
-      _updatedAt: Date.now()
-    };
-    aplicarPreciosProductoForm(p, data);
-    db.productos.push(p);
-    saveDB();
-    syncProductoDoc(p, undefined, { crear: true }); // producto nuevo: sube a la nube con su código y marca
-    return p;
+    // Los productos NUEVOS solo se crean desde la ventana de INGRESOS (uno por
+    // uno, Excel de ingresos o PDF). Desde Productos ya no se pueden crear.
+    toast('Los productos nuevos solo se crean desde Ingresos', 'error');
+    return null;
   }
 }
 
@@ -5967,7 +6009,7 @@ function importPedidosCSV(file){
    su propio precio en cada registro).
    ------------------------------------------------------------------------- */
 
-let compraDateFilter = 'hoy';
+let compraDateFilter = 'todas';
 let compraSearch = ''; // texto del buscador de la pestaña Ingresos
 
 function comprasFiltradas(){
@@ -8072,12 +8114,14 @@ function ocrRenderTable(){
   }
   tbody.innerHTML = active.map((it, i) => {
     const cls = it.existe ? 'ocr-exists' : 'ocr-new';
-    const estado = it.existe ? '<small style="display:block; opacity:.7;">ya existe</small>' : '<small style="display:block; color:var(--primary);">producto nuevo</small>';
+    const estado = (it.marca ? '<small style="display:block; font-weight:600;">' + escapeHtml(it.marca) + '</small>' : '') +
+      (it.existe ? '<small style="display:block; opacity:.7;">ya existe</small>' : '<small style="display:block; color:var(--primary);">producto nuevo</small>');
     if(it.editando){
       return `
     <tr class="${cls}" data-ocr-id="${it.id}">
       <td>${i + 1}</td>
-      <td><input type="text" class="input" data-edit="codigo" value="${escapeHtml(it.codigo)}" style="width:100px;"></td>
+      <td><input type="text" class="input" data-edit="codigo" value="${escapeHtml(it.codigo)}" style="width:100px;">
+        <input type="text" class="input" data-edit="marca" value="${escapeHtml(it.marca || '')}" placeholder="Marca" style="width:100px; margin-top:4px;"></td>
       <td><input type="number" class="input" data-edit="cantidad" min="1" step="1" value="${it.cantidad}" style="width:70px;"></td>
       <td><input type="text" class="input" data-edit="descripcion" value="${escapeHtml(it.descripcion)}" style="min-width:200px; width:100%;"></td>
       <td><input type="number" class="input" data-edit="precio" min="0" step="0.01" value="${Number(it.precio).toFixed(2)}" style="width:90px;"></td>
@@ -8135,6 +8179,7 @@ function ocrBindTabla(){
       if(!(cantidad > 0)){ toast('La cantidad debe ser mayor a 0', 'error'); return; }
       if(isNaN(precio) || precio < 0){ toast('Escribe un precio unitario válido', 'error'); return; }
       it.codigo = codigo;
+      it.marca = val('marca').trim();
       it.cantidad = cantidad;
       it.descripcion = val('descripcion').trim() || codigo;
       it.precio = precio;
@@ -8173,6 +8218,16 @@ function truperRowsFromItems(items){
   return rows.map(r => r.cells.sort((p, q) => p.x - q.x).map(c => c.s).join(' ').replace(/\s+/g, ' ').trim());
 }
 
+// Marca según el prefijo del código de la factura:
+// TR- → Truper · VO- → Volteck · FI- → Fiero (otro prefijo → sin marca).
+function truperMarcaPorPrefijo(cod){
+  const c = String(cod || '').trim().toUpperCase();
+  if(/^TR-?(?=\d)/.test(c) || c.startsWith('TR-')) return 'Truper';
+  if(c.startsWith('VO-')) return 'Volteck';
+  if(c.startsWith('FI-')) return 'Fiero';
+  return '';
+}
+
 // Interpreta las filas de la factura. Devuelve { items, fecha, totalFactura }.
 function truperParseRows(rows){
   const items = [];
@@ -8188,7 +8243,9 @@ function truperParseRows(rows){
     const m = line.match(reFila);
     if(!m) return;
     const cantidad = num(m[2].replace(',', '.'));
-    // Código: se le quita el prefijo "TR-" (solo queda el número).
+    // Marca por prefijo (TR-/VO-/FI-). Al código de Truper se le quita el "TR-"
+    // (solo queda el número); VO- y FI- se dejan como vienen.
+    const marca = truperMarcaPorPrefijo(m[4]);
     const codigo = m[4].replace(/^TR-?/i, '').trim();
     if(!codigo || !(cantidad > 0)) return;
     // Descripción: la factura la escapa estilo CSV (8"" = 8"): se limpia.
@@ -8200,7 +8257,7 @@ function truperParseRows(rows){
     const existe = db.productos.some(p => normalize(p.codigo) === normalize(codigo));
     items.push({
       id: 'ocr_' + Date.now() + '_' + items.length + '_' + Math.random().toString(36).slice(2,5),
-      codigo, cantidad, descripcion: desc, precio, total, existe, activo: true
+      codigo, marca, cantidad, descripcion: desc, precio, total, existe, activo: true
     });
   });
   return { items, fecha, totalFactura };
@@ -8287,7 +8344,11 @@ function ocrConfirmarIngresos(){
   const nuevos = activos.filter(it => !it.existe).length;
   confirmDialog('Registrar ingresos',
     'Se van a registrar ' + activos.length + ' producto(s) por ' + fmtMoney(totalReg) +
-    (nuevos ? ' (' + nuevos + ' producto(s) nuevo(s) se crearán con marca Truper)' : '') + '. ¿Continuar?',
+    (nuevos ? ' (' + nuevos + ' producto(s) nuevo(s) se crearán: ' + (()=>{
+      const c = {};
+      activos.filter(it => !it.existe).forEach(it => { const k = it.marca || 'sin marca'; c[k] = (c[k] || 0) + 1; });
+      return Object.keys(c).map(k => k + ' ' + c[k]).join(', ');
+    })() + ')' : '') + '. ¿Continuar?',
     ()=> ocrRegistrarIngresos(activos));
 }
 
@@ -8334,7 +8395,7 @@ function ocrRegistrarIngresos(activos){
         codigo: it.codigo,
         codigoBarras: '',
         nombre: it.descripcion || it.codigo,
-        marca: 'Truper',
+        marca: it.marca || '',
         categoria: '',
         precioCompra: it.precio,
         precioDistribuidor: it.precio,
@@ -8362,6 +8423,7 @@ function ocrRegistrarIngresos(activos){
         metodoPago: 'efectivo',
         productoId: newProd.id
       };
+      if(newProd.marca) compraNuevaOcr.marca = newProd.marca;
       db.compras.push(compraNuevaOcr);
       nuevasCompras.push(compraNuevaOcr);
       touchProducto(newProd);
@@ -9771,7 +9833,7 @@ function handleProductSubmit(e){
   closeAllModals();
   renderProductos();
   renderCategorias();
-  toast('Producto guardado', 'success');
+  if(saved) toast('Producto guardado', 'success');
   // Si venimos del escáner, refresca el resultado mostrado
   if(saved) renderScanResult(saved.codigo);
 }
@@ -10753,7 +10815,7 @@ function importProductsCSV(file){
       // importación actualiza el documento existente en vez de duplicarlo.
       let cloudCodeMap = null;
       try{ if(firebaseToggleOn() && typeof firebase !== 'undefined') cloudCodeMap = await buildCloudCodeMap(currentModo); }catch(e){ cloudCodeMap = null; }
-      let creados = 0, actualizados = 0;
+      let creados = 0, actualizados = 0, sinCrear = 0;
       const importadosList = [];
       for(let i = 1; i < rows.length; i++){
         const r = rows[i];
@@ -10805,22 +10867,9 @@ function importProductsCSV(file){
           importadosList.push(existing);
           actualizados++;
         }else{
-          const p = {
-            id: (cloudCodeMap && cloudCodeMap.get(normalize(codigo))) || uid(),
-            codigo, codigoBarras, nombre, marca, categoria,
-            precioCompra, precioMarca, precioVenta,
-            precioDistribuidor: pDist, descuento: pDesc,
-            caracteristicas,
-            stock: stockVal !== null ? stockVal : 0,
-            stockMin: stockMinVal !== null ? stockMinVal : 0,
-            fechaCreacion: todayISO(),
-            _updatedAt: Date.now()
-          };
-          if(caracteristicas) p._carAt = Date.now();
-          db.productos.push(p);
-          productoId = p.id;
-          importadosList.push(p);
-          creados++;
+          // Los productos NUEVOS solo se crean desde Ingresos: aquí se omiten.
+          sinCrear++;
+          continue;
         }
         // Si el CSV trae una columna IMAGEN, se guarda la foto en este
         // dispositivo (local, no Firebase). Si el valor es un link (https),
@@ -10838,7 +10887,7 @@ function importProductsCSV(file){
       syncProductoDocs(importadosList, currentModo); // los productos importados también van a la nube
       renderProductos();
       renderCategorias();
-      toast(`Importación completa: ${creados} nuevos, ${actualizados} actualizados`, 'success');
+      toast(`Importación completa: ${actualizados} actualizados` + (sinCrear ? ` · ${sinCrear} producto(s) nuevo(s) omitido(s): los nuevos se registran desde Ingresos` : ''), sinCrear && !actualizados ? 'warning' : 'success');
     }catch(err){
       console.error(err);
       toast('No se pudo leer el archivo Excel/CSV. Verifica el formato.', 'error');
@@ -13529,7 +13578,7 @@ function setupEventListeners(){
   });
 
   // Productos
-  document.getElementById('btnNewProduct').addEventListener('click', ()=> openProductModal());
+  { const _bNP = document.getElementById('btnNewProduct'); if(_bNP) _bNP.addEventListener('click', ()=> openProductModal()); } // el botón ya no existe: los productos nuevos solo se crean desde Ingresos
   document.getElementById('btnExportProducts').addEventListener('click', exportProductosExcel);
   document.getElementById('formProducto').addEventListener('submit', handleProductSubmit);
 

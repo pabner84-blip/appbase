@@ -203,7 +203,13 @@ function primeKVCache(){
 
 function persistBlob(key, obj, quiet){
   let json;
-  try{ json = JSON.stringify(obj); }catch(e){ return false; }
+  // INGRESOS: viven SOLO en Firebase. Nunca se guardan copias en este dispositivo
+  // (ni LocalStorage ni IndexedDB): se quitan antes de escribir.
+  try{
+    json = JSON.stringify((obj && typeof obj === 'object' && Array.isArray(obj.compras))
+      ? Object.assign({}, obj, { compras: [] })
+      : obj);
+  }catch(e){ return false; }
   blobCache[key] = obj;
   let lsOk = true;
   try{ localStorage.setItem(key, json); }
@@ -399,7 +405,7 @@ function loadDB(){
     if(!raw && currentModo === 'manual'){
       raw = localStorage.getItem(LEGACY_STORAGE_KEY); // migración única
     }
-    if(raw){ db = normalizeDB(JSON.parse(raw)); persistLocalCache(); }
+    if(raw){ db = normalizeDB(JSON.parse(raw)); db.compras = []; persistLocalCache(); }
     else { db = defaultDB(); persistLocalCache(); }
   }catch(e){ console.error('Error leyendo LocalStorage', e); db = defaultDB(); persistLocalCache(); }
 
@@ -413,7 +419,9 @@ function loadDB(){
         const a = typeof parsed._savedAt === 'number' ? parsed._savedAt : 0;
         const b = db && typeof db._savedAt === 'number' ? db._savedAt : 0;
         if(a > b){
+          const comprasNube = (db && db.compras) || []; // los ingresos solo vienen de Firebase
           db = normalizeDB(parsed);
+          db.compras = comprasNube;
           persistLocalCache();
           if(typeof rerenderCurrentView === 'function') rerenderCurrentView();
         }
@@ -681,17 +689,22 @@ let guestSessionSearches = [];
 let guestSessionInventory = [];
 
 // Lee la base completa de UN modo concreto desde LocalStorage.
+// Devuelve una copia de la base SIN ingresos (los ingresos solo vienen de Firebase).
+function sinComprasLocales(obj){
+  return Object.assign({}, obj, { compras: [] });
+}
+
 function loadModoDB(modo){
   let raw = null;
   try{ raw = localStorage.getItem('stockferre_catalogo_v1_' + modo); }catch(e){}
   if(!raw && modo === 'manual'){ try{ raw = localStorage.getItem(LEGACY_STORAGE_KEY); }catch(e){} }
-  if(raw){ try{ return normalizeDB(JSON.parse(raw)); }catch(e){ return defaultDB(); } }
+  if(raw){ try{ return sinComprasLocales(normalizeDB(JSON.parse(raw))); }catch(e){ return defaultDB(); } }
   // LocalStorage lleno o vacío: la copia real puede estar en el almacén ampliado
   // (IndexedDB), precargada en memoria por primeKVCache() al arrancar.
   const cached = blobCache['stockferre_catalogo_v1_' + modo];
-  if(cached){ try{ return normalizeDB(cached); }catch(e){} }
+  if(cached){ try{ return sinComprasLocales(normalizeDB(cached)); }catch(e){} }
   if(modo === 'manual' && blobCache[LEGACY_STORAGE_KEY]){
-    try{ return normalizeDB(blobCache[LEGACY_STORAGE_KEY]); }catch(e){}
+    try{ return sinComprasLocales(normalizeDB(blobCache[LEGACY_STORAGE_KEY])); }catch(e){}
   }
   return defaultDB();
 }
@@ -892,7 +905,7 @@ function mergeRemoteIntoLocal(local, remote){
   // colección la actualiza por separado; así un dispositivo viejo no puede
   // "resucitar" una venta borrada ni dos celulares pisan ventas a la vez.
   merged.ventas = (local.ventas || []);
-  merged.compras = mergeById(local.compras, remote.compras);
+  merged.compras = local.compras || []; // los ingresos solo los trae su colección de Firebase
   merged.gastos = mergeById(local.gastos, remote.gastos);
   merged.gastosPrestamos = (local.gastosPrestamos || []); // la colección los actualiza por separado
   merged.finanzas = Object.assign({}, remote.finanzas);
@@ -920,7 +933,7 @@ function mergeRemoteIntoLocal(local, remote){
   })();
   merged.productos = applyTombstones(merged.productos, merged.tombstones.productos);
   merged.ventas = applyTombstones(merged.ventas, merged.tombstones.ventas);
-  merged.compras = applyTombstones(merged.compras, merged.tombstones.compras);
+  // (los ingresos no pasan por tumbas: Firebase manda)
   merged.gastos = applyTombstones(merged.gastos, merged.tombstones.gastos);
   merged.gastosPrestamos = applyTombstones(merged.gastosPrestamos, merged.tombstones.gastosPrestamos);
   merged.finanzas.retiros = applyTombstones(merged.finanzas.retiros, merged.tombstones.retiros);
@@ -2236,7 +2249,14 @@ function syncIngresosSwitchUI(){
 }
 // true = se puede continuar; false = avisa y bloquea.
 function exigirIngresosActivos(accion){
-  if(ingresosActivos()) return true;
+  if(ingresosActivos()){
+    // Los ingresos viven SOLO en Firebase: sin conexión a la nube no se registran.
+    if(!fbComprasCol()){
+      toast('No se puede ' + (accion || 'realizar ingresos') + ': no hay conexión con Firebase (los ingresos se guardan solo en la nube)', 'error');
+      return false;
+    }
+    return true;
+  }
   toast('No se puede ' + (accion || 'realizar ingresos') + ': el suich "Ingresos activos" está apagado en este dispositivo', 'error');
   return false;
 }
@@ -2248,6 +2268,7 @@ function fbIngresosVaciadoRef(modo){
 }
 // Deja en la nube la marca "se vació el historial de ingresos" (con la hora).
 async function marcarVaciadoIngresosNube(){
+  return; // sin copias locales de ingresos ya no hace falta
   const at = Date.now();
   try{ localStorage.setItem(ING_VACIADO_SEEN_KEY + currentModo, String(at)); }catch(e){}
   const ref = fbIngresosVaciadoRef(currentModo);
@@ -2257,6 +2278,7 @@ async function marcarVaciadoIngresosNube(){
 // Si la nube dice que el historial se vació DESPUÉS de lo que este dispositivo
 // ya conocía, quita de la copia local los ingresos que ya no existen en la nube.
 async function aplicarVaciadoIngresos(at){
+  return; // sin copias locales de ingresos ya no hace falta
   at = Number(at) || 0;
   let visto = 0;
   try{ visto = Number(localStorage.getItem(ING_VACIADO_SEEN_KEY + currentModo) || 0); }catch(e){}
@@ -2289,6 +2311,7 @@ async function revisarVaciadoIngresos(){
 }
 let fbIngVaciadoUnsub = null;
 function startVaciadoIngresosListener(modo){
+  return; // sin copias locales de ingresos ya no hace falta
   const ref = fbIngresosVaciadoRef(modo);
   if(!ref) return;
   if(fbIngVaciadoUnsub){ try{ fbIngVaciadoUnsub(); }catch(e){} }
@@ -2304,6 +2327,7 @@ function startVaciadoIngresosListener(modo){
 // sincronización apagada). Se revisa como máximo una vez por semana para no
 // quemar lecturas; lo nuevo viaja DIRECTO con syncCompraDoc().
 async function backfillCompras(modo){
+  return; // ya NO se suben copias locales de ingresos: Firebase es la única fuente
   const col = fbComprasCol(modo);
   if(!col) return;
   // Con el suich de Ingresos apagado este dispositivo NO sube sus copias locales.
@@ -2348,57 +2372,26 @@ function startComprasListener(modo){
   if(!col) return;
   if(fbComprasUnsub){ try{ fbComprasUnsub(); }catch(e){ /* ignorar */ } }
   comprasStoreCache.list = null;
-  let timer = null, changed = false;
   const tokenListener = modeToken; // si se cambia de modo, este listener ya no aplica nada
   const modoListener = modo || currentModo;
 
-  const flush = () => {
-    if(tokenListener !== modeToken || currentModo !== modoListener){ changed = false; comprasStoreCache.list = null; return; }
-    if(!changed) return;
-    changed = false;
-    const store = comprasStoreCache.list;
-    comprasStoreCache.list = null;
-    if(!store) return;
-    try{
-      // Misma orden que la pestaña Ingresos: la fecha más nueva arriba.
-      db.compras = store.sort((a,b)=> new Date(b.fecha) - new Date(a.fecha));
-      persistLocalCache();
-    }catch(e){ console.error('Error guardando ingresos local', e); }
-    rerenderCurrentView();
-  };
-
+  // FIREBASE ES LA ÚNICA FUENTE: cada vez que la colección cambia, la lista de
+  // ingresos de esta pantalla se reemplaza COMPLETA por lo que hay en la nube.
+  // No se mezcla con nada local. Se ignoran las lecturas que vienen de la caché
+  // del dispositivo (fromCache): solo cuenta lo confirmado por el servidor.
+  // La última modificación manda (cada ingreso es un documento; gana la última
+  // escritura en Firebase).
   fbComprasUnsub = col.onSnapshot(snap => {
     if(tokenListener !== modeToken || currentModo !== modoListener) return; // snapshot de otro modo: se ignora
-    const tbs = (db.tombstones || {}).compras || {};
-    snap.docChanges().forEach(ch => {
-      if(ch.doc.metadata.hasPendingWrites) return; // espera la confirmación de la nube
-      if(ch.type === 'removed'){
-        // Alguien borró el ingreso: desaparece también aquí (y no resucita).
-        if(comprasStoreCache.list === null){
-          try{ comprasStoreCache.list = (db.compras || []).slice(); }catch(e){ return; }
-        }
-        const i = comprasStoreCache.list.findIndex(c => c && String(c.id) === String(ch.doc.id));
-        if(i !== -1){ comprasStoreCache.list.splice(i, 1); changed = true; }
-        return;
-      }
-      const data = ch.doc.data();
-      if(!data || !data.id) return;
-      if(tbs[String(data.id)]) return; // borrado en este dispositivo: no vuelve
-      if(comprasStoreCache.list === null){
-        try{ comprasStoreCache.list = (db.compras || []).slice(); }catch(e){ return; }
-      }
-      const i = comprasStoreCache.list.findIndex(c => c && String(c.id) === String(data.id));
-      if(i !== -1){
-        comprasStoreCache.list[i] = Object.assign({}, comprasStoreCache.list[i], data);
-      }else{
-        comprasStoreCache.list.push(data);
-      }
-      changed = true;
+    if(snap.metadata && snap.metadata.fromCache) return;
+    const lista = [];
+    snap.docs.forEach(d => {
+      const data = d.data();
+      if(data && data.id) lista.push(data);
     });
-    if(changed){
-      if(timer) clearTimeout(timer);
-      timer = setTimeout(()=>{ timer = null; flush(); }, 60);
-    }
+    lista.sort((a,b)=> new Date(b.fecha) - new Date(a.fecha)); // la fecha más nueva arriba
+    db.compras = lista;
+    rerenderCurrentView();
   }, err => {
     console.error('Error escuchando los ingresos compartidos', err);
   });

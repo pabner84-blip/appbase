@@ -2220,23 +2220,24 @@ async function deleteCompraDocs(ids, modo){
    borrarlos/vaciar el historial y respaldar los suyos en la nube.
    Apagado: NO registra ni borra ingresos y NUNCA sube sus copias locales a la nube
    (así un dispositivo con datos viejos no puede "resucitar" ingresos ya eliminados).
-   Siempre arranca APAGADO al abrir la app y se apaga al cerrarla.
+   (Ahora es el mismo suich que "PC principal": su estado se recuerda en el dispositivo.)
    Al VACIAR el historial se deja una marca en la nube; cada dispositivo que la ve
    quita de su copia local todo ingreso que ya no exista en la nube.
    ------------------------------------------------------------------------- */
-// El estado vive SOLO en memoria: cada vez que se abre (o recarga) la app arranca
-// APAGADO, y al cerrarla se pierde. Así nadie se queda con los ingresos activos
-// por olvido. Hay que encenderlo a propósito cuando se va a registrar ingresos.
+// SUICH ÚNICO: "INGRESOS / PC principal". Un solo interruptor (en la ventana de
+// Ingresos) que reúne las dos funciones de antes:
+//   • Ingresos: registrar/borrar ingresos y respaldar los suyos en la nube.
+//   • PC principal: crear/borrar productos, definir código y marca, importar/vaciar catálogo.
+// El estado se guarda en este dispositivo (MASTER_KEY), así la PC principal no pierde su
+// función al cerrar la app.
 const INGRESOS_SW_KEY = 'stockferre_ingresos_activo_v1'; // clave vieja (ya no se usa)
 try{ localStorage.removeItem(INGRESOS_SW_KEY); }catch(e){}
-let ingresosActivoSesion = false;
 function ingresosActivos(){
   if(currentRole === 'guest') return false;
-  return ingresosActivoSesion === true;
+  return esMaestro();
 }
 function setIngresosActivos(on){
-  ingresosActivoSesion = !!on;
-  syncIngresosSwitchUI();
+  setEsMaestro(!!on); // setEsMaestro ya refresca el suich y los botones de la PC principal
 }
 function syncIngresosSwitchUI(){
   const sw = document.getElementById('ingresosSwitch');
@@ -13567,20 +13568,13 @@ function setupEventListeners(){
   if(swIng){
     syncIngresosSwitchUI();
     swIng.addEventListener('change', (e)=>{
-      setIngresosActivos(e.target.checked);
+      setIngresosActivos(e.target.checked); // Ingresos + PC principal, todo en uno
       if(e.target.checked) revisarVaciadoIngresos(); // al activarlo, primero se limpia lo que ya se vació
       toast(e.target.checked
-        ? 'Ingresos ACTIVOS en este dispositivo'
-        : 'Ingresos APAGADOS: este dispositivo no registra ni borra ingresos', 'success');
+        ? 'ACTIVADO: este dispositivo registra ingresos y es la PC principal (crea y borra productos)'
+        : 'APAGADO: sin ingresos y sin funciones de PC principal en este dispositivo', 'success');
     });
   }
-  const swMaster = document.getElementById('masterSwitchConfig');
-  if(swMaster) swMaster.addEventListener('change', (e)=>{
-    setEsMaestro(e.target.checked);
-    toast(e.target.checked
-      ? 'Esta PC ahora es la PC principal: puede crear y borrar productos'
-      : 'Modo normal: todos los dispositivos pueden crear productos nuevos', 'success');
-  });
 
   // Instalar la app (PWA): el botón de Configuración y la guía según cómo se
   // abrió el archivo (file://, localhost o ya instalada).

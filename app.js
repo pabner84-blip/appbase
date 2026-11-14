@@ -579,12 +579,16 @@ function nuevoTag(p){
   return productoEsNuevo(p) ? '<span class="tag-nuevo">NUEVO</span>' : '';
 }
 
+// El estado vive SOLO en memoria: cada vez que se abre (o recarga) la app el suich
+// arranca APAGADO y al cerrarla se pierde. Hay que encenderlo a propósito.
+try{ localStorage.removeItem(MASTER_KEY); }catch(e){} // clave vieja (ya no se guarda)
+let maestroSesion = false;
 function esMaestro(){
   if(currentRole === 'guest') return false;
-  try{ return localStorage.getItem(MASTER_KEY) === '1'; }catch(e){ return false; }
+  return maestroSesion === true;
 }
 function setEsMaestro(on){
-  try{ localStorage.setItem(MASTER_KEY, on ? '1' : '0'); }catch(e){}
+  maestroSesion = !!on;
   // Al apagar el modo maestro, la próxima conexión vuelve a alinear el catálogo.
   if(!on){ try{ localStorage.removeItem(ALIGN_KEY); }catch(e){} }
   applyMasterUI();
@@ -2220,7 +2224,7 @@ async function deleteCompraDocs(ids, modo){
    borrarlos/vaciar el historial y respaldar los suyos en la nube.
    Apagado: NO registra ni borra ingresos y NUNCA sube sus copias locales a la nube
    (así un dispositivo con datos viejos no puede "resucitar" ingresos ya eliminados).
-   (Ahora es el mismo suich que "PC principal": su estado se recuerda en el dispositivo.)
+   (Es el mismo suich que "PC principal".)
    Al VACIAR el historial se deja una marca en la nube; cada dispositivo que la ve
    quita de su copia local todo ingreso que ya no exista en la nube.
    ------------------------------------------------------------------------- */
@@ -2228,8 +2232,7 @@ async function deleteCompraDocs(ids, modo){
 // Ingresos) que reúne las dos funciones de antes:
 //   • Ingresos: registrar/borrar ingresos y respaldar los suyos en la nube.
 //   • PC principal: crear/borrar productos, definir código y marca, importar/vaciar catálogo.
-// El estado se guarda en este dispositivo (MASTER_KEY), así la PC principal no pierde su
-// función al cerrar la app.
+// Siempre arranca APAGADO al abrir la app y se apaga al cerrarla.
 const INGRESOS_SW_KEY = 'stockferre_ingresos_activo_v1'; // clave vieja (ya no se usa)
 try{ localStorage.removeItem(INGRESOS_SW_KEY); }catch(e){}
 function ingresosActivos(){

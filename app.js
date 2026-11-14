@@ -2696,7 +2696,7 @@ function startStockListener(modo){
   const fromTs = sinceTs > 0 ? Math.max(sinceTs - MARGIN, Date.now() - MAX_WINDOW) : (Date.now() - MAX_WINDOW);
   let checkpointSet = false;
   const query = col.where('_updatedAt', '>', fromTs);
-  fbProductosUnsubs[modo] = query.onSnapshot(snap => {
+  const onSnap = snap => {
     // La marca avanza SOLO cuando el snapshot llegó bien (no si falló por cuota):
     // así, si esta sesión no pudo sincronizar, la próxima vuelve a leer el tramo.
     if(!checkpointSet){ checkpointSet = true; try{ localStorage.setItem(sinceKey, String(Date.now())); }catch(e){} }
@@ -2786,12 +2786,27 @@ function startStockListener(modo){
       if(timer) clearTimeout(timer);
       timer = setTimeout(()=>{ timer = null; flush(); }, 60);
     }
-  }, err => {
+  };
+  const onErr = err => {
     console.error('Error escuchando stock de productos (' + modo + ')', err);
     // Degrada con seguridad: si la consulta incremental fallara (p.ej. sin
     // índice automático), se reintenta completo en la próxima reconexión.
     try{ localStorage.removeItem(sinceKey); }catch(e){}
-  });
+  };
+  const unsubA = query.onSnapshot(onSnap, onErr);
+  // SEGUNDA consulta, a prueba de relojes: los productos registrados en los
+  // últimos 3 días (por su fecha de primer registro) llegan SIEMPRE, aunque el
+  // reloj del dispositivo que los creó esté atrasado/adelantado y su
+  // _updatedAt haya quedado fuera de la ventana de arriba. Son pocos documentos.
+  let unsubB = null;
+  try{
+    const desde = new Date(Date.now() - 3 * 24 * 3600 * 1000).toISOString();
+    unsubB = col.where('fechaRegistro', '>=', desde).onSnapshot(onSnap, ()=>{ /* la principal ya cubre */ });
+  }catch(e){ /* ignorar */ }
+  fbProductosUnsubs[modo] = () => {
+    try{ unsubA(); }catch(e){ /* ignorar */ }
+    if(unsubB){ try{ unsubB(); }catch(e){ /* ignorar */ } }
+  };
 }
 
 function stopStockListeners(){
@@ -2832,27 +2847,28 @@ function cloudProductoToDB(data, marker){
 // agrega los que a este dispositivo le faltan (p. ej. los registrados en la compu
 // con una base que quedó grande). El marcador se guarda en IndexedDB para que
 // funcione aunque el LocalStorage esté lleno.
-async function assimilateCatalogFromCloud(modo){
+async function assimilateCatalogFromCloud(modo, force){
   const col = fbProductsCol(modo);
-  if(!col) return;
+  if(!col) return 0;
+  let agregados = 0;
   const markKey = 'fs_catalog_pull_' + modo;
   // Marca con tiempo: se re-asimila una vez por semana para que los productos
   // registrados mientras este dispositivo estuvo apagado (más de 24 h) también
   // lleguen aunque ya hayan salido de la ventana del listener.
   try{
-    const done = await kvGet(markKey);
+    const done = force ? null : await kvGet(markKey);
     if(done){
       const parts = String(done).split('@');
       if(parts[0] === '1'){
         const doneAt = Number(parts[1] || 0);
-        if(!doneAt || (Date.now() - doneAt) < 7 * 24 * 3600 * 1000) return;
+        if(!doneAt || (Date.now() - doneAt) < 7 * 24 * 3600 * 1000) return 0;
       }
     }
   }catch(e){}
   try{
     const snap = await col.get();
     const store = modo === currentModo ? db : loadModoDB(modo);
-    if(!store || !Array.isArray(store.productos)) return;
+    if(!store || !Array.isArray(store.productos)) return 0;
     const byId = new Map(store.productos.filter(p => p && p.id).map(p => [p.id, p]));
     const tbs = (store.tombstones && store.tombstones.productos) || (db.tombstones || {}).productos;
     const add = [];
@@ -2877,6 +2893,7 @@ async function assimilateCatalogFromCloud(modo){
       }
       add.push(cloudProductoToDB(data, store.sinCaracteristicasAt));
     });
+    agregados = add.length;
     if(add.length || refilled){
       if(add.length) store.productos = store.productos.concat(add);
       // Si la nube tenía DOS documentos del mismo código, se deja solo uno.
@@ -2890,7 +2907,26 @@ async function assimilateCatalogFromCloud(modo){
       }
     }
     try{ await kvSet(markKey, '1@' + Date.now()); }catch(e){}
-  }catch(e){ if(e && e.code !== 'permission-denied') console.error('Error asimilando catálogo de la nube (' + modo + ')', e); }
+  }catch(e){ if(e && e.code !== 'permission-denied') console.error('Error asimilando catálogo de la nube (' + modo + ')', e); if(force) throw e; }
+  return agregados;
+}
+
+// Reenvía a la nube los productos NUEVOS (con fecha de primer registro) de este
+// dispositivo que NO tengan documento en Firebase. No toca los que ya están.
+async function reenviarProductosNuevosANube(modo){
+  const col = fbProductsCol(modo);
+  if(!col) throw new Error('Firebase no está configurado para este modo');
+  const lista = (db.productos || []).filter(p => p && p.id && p.fechaRegistro);
+  let subidos = 0;
+  for(const p of lista){
+    const snap = await col.doc(p.id).get({ source: 'server' });
+    if(snap.exists) continue;
+    const data = productoDocData(p);
+    data._updatedAt = Date.now();
+    await col.doc(p.id).set(data, { merge: true });
+    subidos++;
+  }
+  return { revisados: lista.length, subidos };
 }
 
 // Activa la persistencia offline UNA sola vez por PROYECTO y sesión: las
@@ -6211,6 +6247,7 @@ function deleteCompra(id, mantenerInventario){
 }
 
 function vaciarHistorialCompras(){
+  if(!esMaestro()){ toast('Solo la PC principal puede vaciar el historial de ingresos', 'error'); return; }
   ventaBorrarDialog('Vaciar historial de ingresos', '¿Vaciar todo el historial de ingresos?\n\n¿Mantener el inventario?\n• Sí = el inventario NO se modifica.\n• No = las cantidades se quitan del stock.',
     ()=> vaciarComprasConStock(false),
     ()=> vaciarComprasConStock(true));
@@ -6235,6 +6272,49 @@ function vaciarComprasConStock(quitarStock){
   renderInventario();
   renderProductos();
   toast('Historial de ingresos vaciado', 'success');
+}
+
+// Borra SOLO los ingresos del día que se está viendo (Hoy, Ayer, Anteayer o la
+// fecha elegida). Solo la PC principal. Pregunta si el stock se queda igual o
+// si se quitan las cantidades de esos ingresos.
+function borrarIngresosDelDia(){
+  if(!esMaestro()){ toast('Solo la PC principal puede borrar ingresos', 'error'); return; }
+  if(compraDateFilter === 'todas'){
+    toast('Primero elige un día (Hoy, Ayer, Anteayer o una fecha) para borrar sus ingresos', 'error');
+    return;
+  }
+  const lista = comprasFiltradas();
+  if(lista.length === 0){
+    toast('No hay ingresos ' + comprasFilterLabel() + ' para borrar', 'warning');
+    return;
+  }
+  const etiqueta = comprasFilterLabel();
+  ventaBorrarDialog('Borrar ingresos ' + etiqueta,
+    '¿Borrar los ' + lista.length + ' ingreso(s) ' + etiqueta + '?\n\n¿Mantener el inventario?\n• Sí = el inventario NO se modifica.\n• No = las cantidades de estos ingresos se quitan del stock.',
+    ()=> borrarComprasDelDiaConStock(lista.map(c => c.id), false, etiqueta),
+    ()=> borrarComprasDelDiaConStock(lista.map(c => c.id), true, etiqueta));
+}
+function borrarComprasDelDiaConStock(ids, quitarStock, etiqueta){
+  const set = new Set(ids);
+  const lista = db.compras.filter(c => set.has(c.id));
+  if(quitarStock){
+    lista.forEach(c => {
+      const p = getProductoByCodigo(c.codigo);
+      if(p){
+        p.stock = (p.stock || 0) - c.cantidad;
+        touchProducto(p);
+        applyStockDelta(p, -c.cantidad); // quita la cantidad también en la nube
+      }
+    });
+  }
+  lista.forEach(c => marcarBorrado('compras', c.id));
+  db.compras = db.compras.filter(c => !set.has(c.id));
+  deleteCompraDocs(lista.map(c => c.id));
+  saveDB();
+  renderCompras();
+  renderInventario();
+  renderProductos();
+  toast(lista.length + ' ingreso(s) ' + etiqueta + ' borrado(s)', 'success');
 }
 
 // Borra ingresos de hace más de 3 meses (el stock no se modifica).
@@ -7981,270 +8061,240 @@ const csvEscapeField = v => {
    ------------------------------------------------------------------------- */
 let ocrParsedItems = [];
 
-function openFacturaOCRModal(){
-  ocrParsedItems = [];
-  document.getElementById('ocrStep1').style.display = '';
-  document.getElementById('ocrStep2').style.display = 'none';
-  document.getElementById('ocrPreview').style.display = 'none';
-  document.getElementById('ocrProgress').style.display = 'none';
-  document.getElementById('btnOCRProcesar').style.display = 'none';
-  document.getElementById('fileFacturaOCR').value = '';
-  document.getElementById('fileFacturaOCRGal').value = '';
-  document.getElementById('fileFacturaPDF').value = '';
-  openModal('modalFacturaOCR');
-}
-
-function ocrPreviewImage(file){
-  return new Promise((resolve)=>{
-    const reader = new FileReader();
-    reader.onload = (e)=>{
-      document.getElementById('ocrPreviewImg').src = e.target.result;
-      document.getElementById('ocrPreview').style.display = '';
-      document.getElementById('btnOCRProcesar').style.display = '';
-      resolve(e.target.result);
-    };
-    reader.readAsDataURL(file);
-  });
-}
-
-function ocrParseLines(text){
-  const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 5);
-  const items = [];
-
-  for(const line of lines){
-    // Buscar código: patrón alfanumérico típico de facturas
-    const codeMatch = line.match(/\b([A-Z]{2,6}\d{3,6}[A-Z0-9]*)\b/);
-    if(!codeMatch) continue;
-    const code = codeMatch[1];
-    const codeIdx = line.indexOf(code);
-
-    // Buscar separador pipe después del código
-    const afterCode = line.slice(codeIdx + code.length);
-    const pipeIdx = afterCode.indexOf('|');
-    const afterPipe = pipeIdx >= 0 ? afterCode.slice(pipeIdx + 1) : afterCode;
-
-    // Cantidad: primer número después del pipe o después del código
-    let qty = 1;
-    const qtyStr = afterPipe.trim();
-    const qtyMatch = qtyStr.match(/^(\d{1,3})\b/);
-    if(qtyMatch) qty = parseInt(qtyMatch[1]) || 1;
-
-    // Buscar todos los números con decimales (precios)
-    const allDecimals = [...line.matchAll(/\b(\d{1,5}\.\d{2})\b/g)];
-    const prices = allDecimals.map(m => parseFloat(m[1])).filter(p => p > 0 && p < 50000);
-
-    // Descripción: buscar texto largo entre pipes
-    let desc = '';
-    const allPipes = [];
-    for(let i = codeIdx + code.length; i < line.length; i++){
-      if(line[i] === '|') allPipes.push(i);
-    }
-    if(allPipes.length >= 1){
-      const descStart = allPipes[0] + 1;
-      const descEnd = allPipes.length > 1 ? allPipes[1] : line.length;
-      desc = line.slice(descStart, descEnd);
-    }else{
-      // Sin pipe: buscar después del código+cantidad hasta el primer precio
-      const firstPriceMatch = afterPipe.search(/\d{1,5}\.\d{2}/);
-      desc = firstPriceMatch >= 0 ? afterPipe.slice(0, firstPriceMatch) : afterPipe;
-    }
-    desc = desc.replace(/[|\-–—]/g, ' ').replace(/\s+/g, ' ').trim();
-    desc = desc.replace(/[^A-Za-z0-9áéíóúñÁÉÍÓÚÑ°"'"'"'/.,;:() ]/g, '').trim();
-    if(desc.length < 3) desc = code;
-
-    // Precio unitario: primer decimal razonable
-    const unitPrice = prices.find(p => p >= 0.01 && p < 50000) || 0;
-    const total = unitPrice * qty;
-
-    const exists = db.productos.some(p => normalize(p.codigo) === normalize(code));
-
-    items.push({
-      id: 'ocr_' + Date.now() + '_' + Math.random().toString(36).slice(2,6),
-      codigo: code,
-      cantidad: qty,
-      descripcion: desc,
-      precio: unitPrice,
-      total: total,
-      existe: exists,
-      activo: true
-    });
-  }
-  return items;
-}
-
 function ocrRenderTable(){
   const tbody = document.querySelector('#ocrTable tbody');
   const active = ocrParsedItems.filter(it => it.activo);
-  document.getElementById('ocrResultCount').textContent = active.length + ' producto(s) detectado(s)';
+  const sumaTotal = active.reduce((s, it) => s + (Number(it.total) || 0), 0);
+  document.getElementById('ocrResultCount').textContent = active.length + ' producto(s) por registrar · Total ' + fmtMoney(sumaTotal) + (ocrFacturaInfo ? ' · ' + ocrFacturaInfo : '');
   if(active.length === 0){
-    tbody.innerHTML = '<tr class="empty-row"><td colspan="7">No se detectaron productos. Probá con otra foto.</td></tr>';
+    tbody.innerHTML = '<tr class="empty-row"><td colspan="7">No quedan productos en la lista.</td></tr>';
     return;
   }
   tbody.innerHTML = active.map((it, i) => {
     const cls = it.existe ? 'ocr-exists' : 'ocr-new';
+    const estado = it.existe ? '<small style="display:block; opacity:.7;">ya existe</small>' : '<small style="display:block; color:var(--primary);">producto nuevo</small>';
+    if(it.editando){
+      return `
+    <tr class="${cls}" data-ocr-id="${it.id}">
+      <td>${i + 1}</td>
+      <td><input type="text" class="input" data-edit="codigo" value="${escapeHtml(it.codigo)}" style="width:100px;"></td>
+      <td><input type="number" class="input" data-edit="cantidad" min="1" step="1" value="${it.cantidad}" style="width:70px;"></td>
+      <td><input type="text" class="input" data-edit="descripcion" value="${escapeHtml(it.descripcion)}" style="min-width:200px; width:100%;"></td>
+      <td><input type="number" class="input" data-edit="precio" min="0" step="0.01" value="${Number(it.precio).toFixed(2)}" style="width:90px;"></td>
+      <td style="text-align:right; font-weight:600;">${fmtMoney(it.total)}</td>
+      <td style="white-space:nowrap;">
+        <button type="button" class="btn btn-success btn-sm" data-ocr-save="${it.id}">💾 Guardar</button>
+        <button type="button" class="btn btn-secondary btn-sm" data-ocr-cancel="${it.id}">✖</button>
+      </td>
+    </tr>`;
+    }
     return `
     <tr class="${cls}" data-ocr-id="${it.id}">
       <td>${i + 1}</td>
-      <td contenteditable="true" data-field="codigo">${escapeHtml(it.codigo)}</td>
-      <td contenteditable="true" data-field="cantidad" style="width:50px; text-align:center;">${it.cantidad}</td>
-      <td contenteditable="true" data-field="descripcion" style="min-width:180px;">${escapeHtml(it.descripcion)}</td>
-      <td contenteditable="true" data-field="precio" style="width:70px; text-align:right;">${it.precio.toFixed(2)}</td>
+      <td><strong>${escapeHtml(it.codigo)}</strong>${estado}</td>
+      <td style="text-align:center;">${it.cantidad}</td>
+      <td style="min-width:180px;">${escapeHtml(it.descripcion)}</td>
+      <td style="text-align:right;">${Number(it.precio).toFixed(2)}</td>
       <td style="text-align:right; font-weight:600;">${fmtMoney(it.total)}</td>
-      <td><span class="ocr-del-btn" data-ocr-del="${it.id}">🗑️</span></td>
+      <td style="white-space:nowrap;">
+        <button type="button" class="btn btn-secondary btn-sm" data-ocr-edit="${it.id}">✏️ Modificar</button>
+        <span class="ocr-del-btn" data-ocr-del="${it.id}" title="Quitar de la lista">🗑️</span>
+      </td>
     </tr>`;
   }).join('');
+}
 
-  // Editable: actualizar datos al cambiar
-  tbody.querySelectorAll('[contenteditable]').forEach(td=>{
-    td.addEventListener('blur', ()=>{
-      const row = td.closest('tr');
-      const id = row.dataset.ocrId;
-      const item = ocrParsedItems.find(it => it.id === id);
-      if(!item) return;
-      const field = td.dataset.field;
-      const val = td.textContent.trim();
-      if(field === 'codigo') item.codigo = val;
-      else if(field === 'cantidad') item.cantidad = Math.max(1, parseInt(val) || 1);
-      else if(field === 'descripcion') item.descripcion = val;
-      else if(field === 'precio') item.precio = parseFloat(val) || 0;
-      item.total = item.precio * item.cantidad;
-      // Actualizar columna total
-      row.children[5].textContent = fmtMoney(item.total);
-    });
-  });
-
-  // Eliminar fila
-  tbody.querySelectorAll('[data-ocr-del]').forEach(btn=>{
-    btn.addEventListener('click', ()=>{
-      const id = btn.dataset.ocrDel;
-      const item = ocrParsedItems.find(it => it.id === id);
-      if(item) item.activo = false;
+// Acciones de la lista (Modificar / Guardar / Cancelar / Quitar). Se registra
+// UNA sola vez sobre el cuerpo de la tabla.
+function ocrBindTabla(){
+  const tbody = document.querySelector('#ocrTable tbody');
+  if(!tbody || tbody.dataset.bound === '1') return;
+  tbody.dataset.bound = '1';
+  tbody.addEventListener('click', (e)=>{
+    const find = id => ocrParsedItems.find(it => it.id === id);
+    const bEdit = e.target.closest('[data-ocr-edit]');
+    const bSave = e.target.closest('[data-ocr-save]');
+    const bCancel = e.target.closest('[data-ocr-cancel]');
+    const bDel = e.target.closest('[data-ocr-del]');
+    if(bEdit){
+      const it = find(bEdit.dataset.ocrEdit);
+      if(it){ it.editando = true; ocrRenderTable(); }
+    }else if(bCancel){
+      const it = find(bCancel.dataset.ocrCancel);
+      if(it){ it.editando = false; ocrRenderTable(); }
+    }else if(bSave){
+      const it = find(bSave.dataset.ocrSave);
+      const row = bSave.closest('tr');
+      if(!it || !row) return;
+      const val = f => (row.querySelector('[data-edit="' + f + '"]') || {}).value || '';
+      // Se le quita "TR-" si lo escriben: en la app el código es solo el número.
+      const codigo = val('codigo').trim().replace(/^TR-?/i, '');
+      const cantidad = parseFloat(val('cantidad'));
+      const precio = parseFloat(val('precio'));
+      if(!codigo){ toast('El código no puede quedar vacío', 'error'); return; }
+      if(!(cantidad > 0)){ toast('La cantidad debe ser mayor a 0', 'error'); return; }
+      if(isNaN(precio) || precio < 0){ toast('Escribe un precio unitario válido', 'error'); return; }
+      it.codigo = codigo;
+      it.cantidad = cantidad;
+      it.descripcion = val('descripcion').trim() || codigo;
+      it.precio = precio;
+      it.total = Math.round(precio * cantidad * 100) / 100;
+      it.existe = db.productos.some(p => normalize(p.codigo) === normalize(codigo));
+      it.editando = false;
       ocrRenderTable();
-    });
+    }else if(bDel){
+      const it = find(bDel.dataset.ocrDel);
+      if(it){ it.activo = false; ocrRenderTable(); }
+    }
   });
 }
 
-async function ocrProcessImage(imgSrc){
-  document.getElementById('ocrStep1').style.display = 'none';
-  document.getElementById('ocrStep2').style.display = '';
-  const progress = document.getElementById('ocrProgressBar');
-  const status = document.getElementById('ocrStatus');
-  progress.style.width = '10%';
-  status.textContent = 'Cargando Tesseract.js...';
+// ---------- PDF TRUPER ----------
+// Lee la factura PDF de Truper (Salcedo Importaciones): por cada fila saca
+// cantidad, código (sin el prefijo "TR-": en la app los códigos de la marca
+// Truper son solo el número), descripción y precio unitario; y la fecha de la
+// factura (los ingresos se guardan con ESA fecha, no con la de hoy).
+let ocrFacturaFecha = '';   // ISO de la fecha de la factura (vacío = hoy)
+let ocrFacturaInfo = '';    // texto informativo para la vista previa
+let ocrFacturaHora = '';    // hora de la factura (HH:MM) para conservarla al cambiar el día
 
-  try{
-    if(typeof window.__LAZY_LIBS__ !== 'undefined' && window.__LAZY_LIBS__.tesseract){
-      await window.__LAZY_LIBS__.tesseract();
-    }
-    if(typeof Tesseract === 'undefined') throw new Error('No se pudo cargar Tesseract.js');
-    const result = await Tesseract.recognize(imgSrc, 'spa+eng', {
-      logger: m => {
-        if(m.status === 'recognizing text'){
-          const pct = Math.round(m.progress * 100);
-          progress.style.width = (10 + pct * 0.85) + '%';
-          status.textContent = 'Leyendo factura... ' + pct + '%';
-        }
-      }
-    });
-    progress.style.width = '100%';
-    status.textContent = 'Parseando productos...';
-
-    const text = result.data.text;
-    ocrParsedItems = ocrParseLines(text);
-
-    if(ocrParsedItems.length === 0){
-      toast('No se detectaron productos. Probá con otra foto o mejor calidad.', 'error');
-      document.getElementById('ocrStep1').style.display = '';
-      document.getElementById('ocrStep2').style.display = 'none';
-      return;
-    }
-
-    ocrRenderTable();
-    toast(ocrParsedItems.length + ' producto(s) detectado(s)', 'success');
-  }catch(err){
-    console.error('OCR error:', err);
-    toast('Error al procesar la imagen: ' + err.message, 'error');
-    document.getElementById('ocrStep1').style.display = '';
-    document.getElementById('ocrStep2').style.display = 'none';
-  }
+// Convierte los items de texto de una página de pdf.js en filas de texto:
+// agrupa por altura (y) y ordena por posición horizontal (x).
+function truperRowsFromItems(items){
+  const its = (items || []).filter(it => it && typeof it.str === 'string' && it.str.trim() && it.transform)
+    .map(it => ({ s: it.str.trim(), x: it.transform[4], y: it.transform[5] }));
+  its.sort((p, q) => (q.y - p.y) || (p.x - q.x));
+  const rows = [];
+  its.forEach(it => {
+    const last = rows[rows.length - 1];
+    if(last && Math.abs(last.y - it.y) <= 3) last.cells.push(it);
+    else rows.push({ y: it.y, cells: [it] });
+  });
+  return rows.map(r => r.cells.sort((p, q) => p.x - q.x).map(c => c.s).join(' ').replace(/\s+/g, ' ').trim());
 }
 
-async function ocrProcessPDF(file){
-  document.getElementById('ocrStep1').style.display = 'none';
-  document.getElementById('ocrStep2').style.display = '';
-  const progress = document.getElementById('ocrProgressBar');
-  const status = document.getElementById('ocrStatus');
-  progress.style.width = '5%';
-  status.textContent = 'Cargando PDF...';
+// Interpreta las filas de la factura. Devuelve { items, fecha, totalFactura }.
+function truperParseRows(rows){
+  const items = [];
+  let fecha = '';
+  let totalFactura = 0;
+  const num = s => parseFloat(String(s).replace(/,/g, ''));
+  const reFila = /^(\d{1,3})\s+(\d+(?:[.,]\d+)?)\s+([A-Za-zÁÉÍÓÚÑ.]+)\s+(\S+)\s+(.+?)\s+(\d[\d,]*\.\d{2})\s+(\d[\d,]*\.\d{2})$/;
+  rows.forEach(line => {
+    const mf = line.match(/FECHA:?\s*(\d{2})\/(\d{2})\/(\d{4})(?:\s+(\d{2}):(\d{2}))?/i);
+    if(mf && !fecha) fecha = { d: mf[1], m: mf[2], y: mf[3], hh: mf[4] || '12', mi: mf[5] || '00' };
+    const mt = line.match(/TOTAL\s*Bs\.?:?\s*(\d[\d,]*\.\d{2})/i);
+    if(mt) totalFactura = num(mt[1]);
+    const m = line.match(reFila);
+    if(!m) return;
+    const cantidad = num(m[2].replace(',', '.'));
+    // Código: se le quita el prefijo "TR-" (solo queda el número).
+    const codigo = m[4].replace(/^TR-?/i, '').trim();
+    if(!codigo || !(cantidad > 0)) return;
+    // Descripción: la factura la escapa estilo CSV (8"" = 8"): se limpia.
+    let desc = m[5].trim();
+    if(desc.length > 1 && desc.startsWith('"') && desc.endsWith('"')) desc = desc.slice(1, -1);
+    desc = desc.replace(/""/g, '"').replace(/\s+/g, ' ').trim();
+    const precio = num(m[6]);
+    const total = num(m[7]);
+    const existe = db.productos.some(p => normalize(p.codigo) === normalize(codigo));
+    items.push({
+      id: 'ocr_' + Date.now() + '_' + items.length + '_' + Math.random().toString(36).slice(2,5),
+      codigo, cantidad, descripcion: desc, precio, total, existe, activo: true
+    });
+  });
+  return { items, fecha, totalFactura };
+}
 
+function openPdfTruper(){
+  const inp = document.getElementById('filePdfTruper');
+  if(!inp) return;
+  inp.value = '';
+  inp.click();
+}
+
+async function procesarPdfTruper(file){
+  ocrParsedItems = [];
+  ocrFacturaFecha = '';
+  ocrFacturaInfo = '';
+  ocrFacturaHora = '';
+  ocrBindTabla();
+  const status = document.getElementById('ocrStatus');
+  const prog = document.getElementById('ocrProgress');
+  const step2 = document.getElementById('ocrStep2');
+  document.getElementById('ocrProgressBar').style.width = '10%';
+  if(status) status.textContent = 'Leyendo el PDF de Truper...';
+  if(prog) prog.style.display = '';
+  if(step2) step2.style.display = 'none';
+  openModal('modalFacturaOCR');
   try{
     if(typeof window.__LAZY_LIBS__ !== 'undefined' && window.__LAZY_LIBS__.pdf){
       await window.__LAZY_LIBS__.pdf();
     }
-    if(typeof pdfjsLib === 'undefined') throw new Error('No se pudo cargar el lector de PDF');
-    const arrayBuffer = await file.arrayBuffer();
-    const pdf = await pdfjsLib.getDocument({data: arrayBuffer}).promise;
-    const numPages = pdf.numPages;
-    let allText = '';
-
-    for(let i = 1; i <= numPages; i++){
-      status.textContent = 'Leyendo página ' + i + '/' + numPages + '...';
-      progress.style.width = (5 + (i / numPages) * 30) + '%';
-
+    if(typeof pdfjsLib === 'undefined') throw new Error('No se pudo cargar el lector de PDF (revisa tu internet)');
+    const buf = await file.arrayBuffer();
+    const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+    let rows = [];
+    for(let i = 1; i <= pdf.numPages; i++){
       const page = await pdf.getPage(i);
-      const viewport = page.getViewport({scale: 2.0});
-      const canvas = document.createElement('canvas');
-      canvas.width = viewport.width;
-      canvas.height = viewport.height;
-      const ctx = canvas.getContext('2d');
-      await page.render({canvasContext: ctx, viewport}).promise;
-
-      // Intentar extraer texto del PDF directamente (si tiene texto seleccionable)
-      const textContent = await page.getTextContent();
-      const pageText = textContent.items.map(item => item.str).join(' ');
-      if(pageText.trim().length > 20){
-        allText += pageText + '\n';
-      }else{
-        // PDF escaneado: usar OCR en el canvas
-        status.textContent = 'OCR página ' + i + '/' + numPages + '...';
-        progress.style.width = (35 + (i / numPages) * 60) + '%';
-        if(typeof window.__LAZY_LIBS__ !== 'undefined' && window.__LAZY_LIBS__.tesseract){
-          await window.__LAZY_LIBS__.tesseract();
-        }
-        if(typeof Tesseract === 'undefined') throw new Error('No se pudo cargar Tesseract.js');
-        const result = await Tesseract.recognize(canvas.toDataURL('image/png'), 'spa+eng');
-        allText += result.data.text + '\n';
-      }
+      const tc = await page.getTextContent();
+      rows = rows.concat(truperRowsFromItems(tc.items));
+      document.getElementById('ocrProgressBar').style.width = (10 + (i / pdf.numPages) * 80) + '%';
     }
-
-    progress.style.width = '100%';
-    status.textContent = 'Parseando productos...';
-
-    ocrParsedItems = ocrParseLines(allText);
-    if(ocrParsedItems.length === 0){
-      toast('No se detectaron productos en el PDF. Probá con otro archivo.', 'error');
-      document.getElementById('ocrStep1').style.display = '';
-      document.getElementById('ocrStep2').style.display = 'none';
+    const r = truperParseRows(rows);
+    if(!r.items.length){
+      closeModalById('modalFacturaOCR');
+      toast('No encontré productos en este PDF. ¿Es la factura de Truper en PDF original (no una foto)?', 'error');
       return;
     }
+    ocrParsedItems = r.items;
+    ocrFacturaHora = r.fecha ? (r.fecha.hh + ':' + r.fecha.mi) : '';
+    if(r.fecha){
+      ocrFacturaFecha = boliviaStamp(r.fecha.y + '-' + r.fecha.m + '-' + r.fecha.d, ocrFacturaHora);
+    }
+    const inpFecha = document.getElementById('ocrFechaFactura');
+    if(inpFecha) inpFecha.value = r.fecha ? (r.fecha.y + '-' + r.fecha.m + '-' + r.fecha.d) : boliviaDateKey(new Date());
+    const suma = r.items.reduce((s, it) => s + it.total, 0);
+    const partes = [];
+    if(!r.fecha) partes.push('⚠️ No encontré la fecha en el PDF: elígela arriba');
+    if(r.totalFactura){
+      partes.push(Math.abs(suma - r.totalFactura) < 0.05
+        ? '✔ La suma (' + fmtMoney(suma) + ') coincide con el total de la factura'
+        : '⚠️ La suma (' + fmtMoney(suma) + ') NO coincide con el total de la factura (' + fmtMoney(r.totalFactura) + '): revisa que no falte ninguna fila');
+    }
+    ocrFacturaInfo = partes.join(' · ');
+    if(prog) prog.style.display = 'none';
+    if(step2) step2.style.display = '';
     ocrRenderTable();
-    toast(ocrParsedItems.length + ' producto(s) detectado(s) en el PDF', 'success');
   }catch(err){
-    console.error('PDF error:', err);
-    toast('Error al procesar el PDF: ' + err.message, 'error');
-    document.getElementById('ocrStep1').style.display = '';
-    document.getElementById('ocrStep2').style.display = 'none';
+    console.error('PDF Truper error:', err);
+    closeModalById('modalFacturaOCR');
+    toast('Error al leer el PDF: ' + ((err && err.message) || err), 'error');
   }
 }
 
 function ocrConfirmarIngresos(){
+  if(ocrParsedItems.some(it => it.activo && it.editando)){
+    toast('Guarda o cancela la fila que estás modificando antes de registrar', 'error');
+    return;
+  }
   const activos = ocrParsedItems.filter(it => it.activo && it.codigo && it.precio > 0);
   if(activos.length === 0){
     toast('No hay productos válidos para registrar', 'error');
     return;
   }
+  const totalReg = activos.reduce((s, it) => s + (Number(it.total) || 0), 0);
+  const nuevos = activos.filter(it => !it.existe).length;
+  confirmDialog('Registrar ingresos',
+    'Se van a registrar ' + activos.length + ' producto(s) por ' + fmtMoney(totalReg) +
+    (nuevos ? ' (' + nuevos + ' producto(s) nuevo(s) se crearán con marca Truper)' : '') + '. ¿Continuar?',
+    ()=> ocrRegistrarIngresos(activos));
+}
 
-  const fecha = new Date().toISOString();
+function ocrRegistrarIngresos(activos){
+
+  const inpF = document.getElementById('ocrFechaFactura');
+  const fecha = (inpF && inpF.value) ? boliviaStamp(inpF.value, ocrFacturaHora || '12:00') : (ocrFacturaFecha || new Date().toISOString()); // fecha de la factura
   let added = 0;
   let omitidos = 0;
   const codigosOmitidos = [];
@@ -8269,10 +8319,12 @@ function ocrConfirmarIngresos(){
       };
       db.compras.push(compraNueva);
       nuevasCompras.push(compraNueva);
+      if(prod.marca) compraNueva.marca = prod.marca;
+      // El ingreso guarda SU precio en el historial; el precio de la pestaña
+      // Productos no se toca (igual que en "Nuevo ingreso").
       prod.stock = (parseFloat(prod.stock) || 0) + it.cantidad;
-      prod.precioCompra = it.precio;
       touchProducto(prod);
-      syncProductoDoc(prod);
+      applyStockDelta(prod, it.cantidad); // suma el stock también en la nube, de forma atómica
       added++;
     }else{
       // Producto nuevo: solo la PC principal puede crearlo. Los demás
@@ -8282,7 +8334,7 @@ function ocrConfirmarIngresos(){
         codigo: it.codigo,
         codigoBarras: '',
         nombre: it.descripcion || it.codigo,
-        marca: '',
+        marca: 'Truper',
         categoria: '',
         precioCompra: it.precio,
         precioDistribuidor: it.precio,
@@ -13317,6 +13369,29 @@ function setupEventListeners(){
   // "PC principal (maestra)": solo se enciende EN la PC principal del dueño.
   // Con el interruptor apagado este dispositivo no crea ni borra productos
   // (los productos nuevos los crea la PC principal).
+  const btnPull = document.getElementById('btnSyncPullProductos');
+  if(btnPull) btnPull.addEventListener('click', async ()=>{
+    btnPull.disabled = true;
+    try{
+      const modos = currentModo === 'invitado' ? ['manual','electrico'] : [currentModo];
+      let n = 0;
+      for(const m of modos){ n += await assimilateCatalogFromCloud(m, true); }
+      toast(n ? n + ' producto(s) nuevo(s) traído(s) de la nube' : 'No faltaba ningún producto: ya tienes todo lo de la nube', n ? 'success' : 'info');
+    }catch(e){
+      toast('No se pudo leer la nube: ' + ((e && e.message) || e), 'error');
+    }finally{ btnPull.disabled = false; }
+  });
+  const btnPush = document.getElementById('btnSyncPushProductos');
+  if(btnPush) btnPush.addEventListener('click', async ()=>{
+    if(currentModo === 'invitado'){ toast('Hazlo desde Manuales o Eléctricas', 'error'); return; }
+    btnPush.disabled = true;
+    try{
+      const r = await reenviarProductosNuevosANube(currentModo);
+      toast(r.subidos ? r.subidos + ' producto(s) nuevo(s) enviado(s) a la nube' : 'Todos tus productos nuevos ya estaban en la nube (' + r.revisados + ' revisados)', r.subidos ? 'success' : 'info');
+    }catch(e){
+      toast('No se pudo enviar (¿sin internet?): ' + ((e && e.message) || e), 'error');
+    }finally{ btnPush.disabled = false; }
+  });
   const swMaster = document.getElementById('masterSwitchConfig');
   if(swMaster) swMaster.addEventListener('change', (e)=>{
     setEsMaestro(e.target.checked);
@@ -13763,35 +13838,12 @@ function setupEventListeners(){
     openCompraScan();
   });
 
-  // OCR Factura
-  document.getElementById('btnFacturaOCR').addEventListener('click', openFacturaOCRModal);
-  document.getElementById('btnOCRCamara').addEventListener('click', ()=>{
-    document.getElementById('fileFacturaOCR').click();
+  // PDF Truper
+  document.getElementById('btnPdfTruper').addEventListener('click', openPdfTruper);
+  document.getElementById('filePdfTruper').addEventListener('change', (e)=>{
+    if(e.target.files[0]) procesarPdfTruper(e.target.files[0]);
   });
-  document.getElementById('btnOCRGaleria').addEventListener('click', ()=>{
-    document.getElementById('fileFacturaOCRGal').click();
-  });
-  document.getElementById('btnOCRPDF').addEventListener('click', ()=>{
-    document.getElementById('fileFacturaPDF').click();
-  });
-  document.getElementById('fileFacturaOCR').addEventListener('change', (e)=>{
-    if(e.target.files[0]) ocrPreviewImage(e.target.files[0]);
-  });
-  document.getElementById('fileFacturaOCRGal').addEventListener('change', (e)=>{
-    if(e.target.files[0]) ocrPreviewImage(e.target.files[0]);
-  });
-  document.getElementById('fileFacturaPDF').addEventListener('change', (e)=>{
-    if(e.target.files[0]) ocrProcessPDF(e.target.files[0]);
-  });
-  document.getElementById('btnOCRProcesar').addEventListener('click', ()=>{
-    const img = document.getElementById('ocrPreviewImg').src;
-    if(img) ocrProcessImage(img);
-  });
-  document.getElementById('btnOCRBack').addEventListener('click', ()=>{
-    document.getElementById('ocrStep1').style.display = '';
-    document.getElementById('ocrStep2').style.display = 'none';
-  });
-  document.getElementById('btnOCRRefrescar').addEventListener('click', ocrRenderTable);
+  document.getElementById('btnOCRBack').addEventListener('click', ()=> closeModalById('modalFacturaOCR'));
   document.getElementById('btnOCRConfirmar').addEventListener('click', ocrConfirmarIngresos);
   let _compraSearchTimer = null;
   document.getElementById('compraSearchInput').addEventListener('input', ()=>{
@@ -13818,6 +13870,7 @@ function setupEventListeners(){
     });
   });
   document.getElementById('btnVaciarCompras').addEventListener('click', vaciarHistorialCompras);
+  document.getElementById('btnBorrarDiaCompras').addEventListener('click', borrarIngresosDelDia);
   document.getElementById('comprasDates').addEventListener('click', (e)=>{
     const chip = e.target.closest('.compra-date-chip[data-compra-date]');
     if(!chip) return;

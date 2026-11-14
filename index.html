@@ -321,11 +321,12 @@
     <section class="view" id="view-compras">
       <div class="toolbar">
         <button class="btn btn-primary" id="btnNuevaCompra">➕ Nuevo ingreso</button>
-        <button class="btn btn-secondary" id="btnFacturaOCR">📷 Subir factura</button>
+        <button class="btn btn-secondary" id="btnPdfTruper">📄 PDF Truper</button>
         <button class="btn btn-secondary" id="btnExportCompras">📤 Exportar Excel</button>
         <button class="btn btn-secondary" id="btnImportCompras">📥 Importar Excel</button>
         <button class="btn btn-secondary" id="btnPurgeCompras">🧹 Borrar antiguas</button>
-        <button class="btn btn-danger" id="btnVaciarCompras">🧹 Vaciar historial</button>
+        <button class="btn btn-danger master-only" id="btnBorrarDiaCompras">🗑️ Borrar este día</button>
+        <button class="btn btn-danger master-only" id="btnVaciarCompras">🧹 Vaciar historial</button>
       </div>
       <div class="ventas-dates" id="comprasDates">
         <button class="compra-date-chip active" data-compra-date="hoy">Hoy</button>
@@ -692,6 +693,17 @@
         </div>
 
         <div class="panel admin-only">
+          <div class="panel-header"><h3>🔄 Productos nuevos entre dispositivos</h3></div>
+          <div class="panel-body">
+            <p class="hint">Si un producto nuevo no aparece en otro dispositivo: en el <strong>dispositivo que lo registró</strong> pulsa <strong>Enviar a la nube</strong>; en el dispositivo que <strong>no lo ve</strong> pulsa <strong>Traer de la nube</strong>. Necesitan internet. Se hace sobre el modo actual (Manuales o Eléctricas).</p>
+            <div style="display:flex; gap:8px; flex-wrap:wrap;">
+              <button class="btn btn-secondary" id="btnSyncPushProductos">📤 Enviar mis productos nuevos a la nube</button>
+              <button class="btn btn-primary" id="btnSyncPullProductos">📥 Traer productos faltantes de la nube</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel admin-only">
           <div class="panel-header"><h3>⚠️ Zona de riesgo</h3></div>
           <div class="panel-body">
             <p class="hint">Deja en cero SOLO el <strong>modo actual</strong> (🛠️ Manuales o ⚡ Eléctricas): borra sus productos, ventas, ingresos, gastos, deudas e historial en su Firebase y en los dispositivos que lo usan (se limpian solos al abrir la app). <strong>El otro dueño/categoría y el Modo Invitado no se tocan.</strong> Después reimportas el Excel de este modo.</p>
@@ -954,48 +966,36 @@
 <!-- Modal: Escáner de Ventas (reutiliza el mismo bloque de escáner) -->
 <div class="modal modal-lg" id="modalFacturaOCR">
   <div class="modal-header">
-    <h3>📷 Subir factura — OCR</h3>
+    <h3>📄 PDF Truper — revisar y registrar</h3>
     <button class="modal-close" data-close-modal>✕</button>
   </div>
   <div class="modal-body">
-      <div id="ocrStep1">
-      <p class="hint">Subí una foto de la factura o un PDF para leer los productos automáticamente.</p>
-      <div style="display:flex; gap:8px; margin:12px 0;">
-        <button class="btn btn-primary" id="btnOCRCamara" style="flex:1;">📷 Tomar foto</button>
-        <button class="btn btn-secondary" id="btnOCRGaleria" style="flex:1;">🖼️ Galería</button>
-        <button class="btn btn-secondary" id="btnOCRPDF" style="flex:1;">📄 PDF</button>
-      </div>
-      <input type="file" id="fileFacturaOCR" accept="image/*" capture="environment" hidden>
-      <input type="file" id="fileFacturaOCRGal" accept="image/*" hidden>
-      <input type="file" id="fileFacturaPDF" accept=".pdf,application/pdf" hidden>
-      <div id="ocrPreview" style="display:none; text-align:center; margin:12px 0;">
-        <img id="ocrPreviewImg" style="max-width:100%; max-height:300px; border-radius:8px; border:1px solid var(--border);">
-      </div>
+      <input type="file" id="filePdfTruper" accept=".pdf,application/pdf" hidden>
       <div id="ocrProgress" style="display:none; margin:12px 0;">
         <div style="background:var(--border); border-radius:8px; height:8px; overflow:hidden;">
           <div id="ocrProgressBar" style="width:0%; height:100%; background:var(--primary); transition:width .3s;"></div>
         </div>
-        <p class="hint" id="ocrStatus" style="margin:8px 0 0; text-align:center;">Procesando OCR...</p>
+        <p class="hint" id="ocrStatus" style="margin:8px 0 0; text-align:center;">Leyendo el PDF...</p>
       </div>
-      <button class="btn btn-primary" id="btnOCRProcesar" style="width:100%; display:none;">🔍 Procesar factura</button>
-    </div>
     <div id="ocrStep2" style="display:none;">
-      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
-        <p class="hint" id="ocrResultCount" style="margin:0;"></p>
-        <button class="btn btn-sm btn-secondary" id="btnOCRRefrescar">🔄 Recalcular</button>
+      <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:8px;">
+        <label style="font-weight:600; display:flex; align-items:center; gap:6px;">📅 Fecha de la factura
+          <input type="date" id="ocrFechaFactura" class="input" style="width:auto;">
+        </label>
       </div>
+      <p class="hint" id="ocrResultCount" style="margin:0 0 8px;"></p>
       <div class="table-wrap" style="max-height:400px; overflow-y:auto;">
         <table class="table" id="ocrTable">
           <thead>
             <tr>
-              <th>#</th><th>Código</th><th>Cant.</th><th>Descripción</th><th>Precio</th><th>Total</th><th></th>
+              <th>#</th><th>Código</th><th>Cant.</th><th>Descripción</th><th>Precio unit.</th><th>Total</th><th>Acción</th>
             </tr>
           </thead>
           <tbody></tbody>
         </table>
       </div>
       <div style="display:flex; gap:8px; margin-top:12px;">
-        <button class="btn btn-secondary" id="btnOCRBack" style="flex:1;">⬅️ Volver</button>
+        <button class="btn btn-secondary" id="btnOCRBack" style="flex:1;">Cancelar</button>
         <button class="btn btn-primary" id="btnOCRConfirmar" style="flex:2;">✅ Registrar ingresos</button>
       </div>
     </div>

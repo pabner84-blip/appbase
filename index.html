@@ -321,6 +321,7 @@
       <div class="toolbar">
         <button class="btn btn-primary" id="btnNuevaCompra">➕ Nuevo ingreso</button>
         <button class="btn btn-secondary" id="btnPdfTruper">📄 PDF Truper</button>
+        <button class="btn btn-secondary" id="btnPdfIngco">📄 Factura INGCO</button>
         <button class="btn btn-secondary" id="btnExportCompras">📤 Exportar Excel</button>
         <button class="btn btn-secondary" id="btnImportCompras">📥 Importar Excel</button>
         <button class="btn btn-secondary" id="btnPurgeCompras">🧹 Borrar antiguas</button>
@@ -956,11 +957,12 @@
 <!-- Modal: Escáner de Ventas (reutiliza el mismo bloque de escáner) -->
 <div class="modal modal-lg" id="modalFacturaOCR">
   <div class="modal-header">
-    <h3>📄 PDF Truper — revisar y registrar</h3>
+    <h3 id="ocrModalTitulo">📄 PDF Truper — revisar y registrar</h3>
     <button class="modal-close" data-close-modal>✕</button>
   </div>
   <div class="modal-body">
       <input type="file" id="filePdfTruper" accept=".pdf,application/pdf" hidden>
+      <input type="file" id="filePdfIngco" accept=".pdf,application/pdf" hidden>
       <div id="ocrProgress" style="display:none; margin:12px 0;">
         <div style="background:var(--border); border-radius:8px; height:8px; overflow:hidden;">
           <div id="ocrProgressBar" style="width:0%; height:100%; background:var(--primary); transition:width .3s;"></div>

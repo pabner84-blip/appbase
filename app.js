@@ -8228,11 +8228,19 @@ let ocrParsedItems = [];
 
 function ocrRenderTable(){
   const tbody = document.querySelector('#ocrTable tbody');
+  const esIngco = ocrFormato === 'ingco';
+  const thr = document.querySelector('#ocrTable thead tr');
+  if(thr){
+    thr.innerHTML = esIngco
+      ? '<th>#</th><th>Código</th><th>Cant.</th><th>Descripción</th><th>P. Unit.</th><th>% Desc.</th><th>P. U. Desc.</th><th>Imp. Neto</th><th>Acción</th>'
+      : '<th>#</th><th>Código</th><th>Cant.</th><th>Descripción</th><th>Precio unit.</th><th>Total</th><th>Acción</th>';
+  }
+  const NC = esIngco ? 9 : 7;
   const active = ocrParsedItems.filter(it => it.activo);
   const sumaTotal = active.reduce((s, it) => s + (Number(it.total) || 0), 0);
   document.getElementById('ocrResultCount').textContent = active.length + ' producto(s) por registrar · Total ' + fmtMoney(sumaTotal) + (ocrFacturaInfo ? ' · ' + ocrFacturaInfo : '');
   if(active.length === 0){
-    tbody.innerHTML = '<tr class="empty-row"><td colspan="7">No quedan productos en la lista.</td></tr>';
+    tbody.innerHTML = '<tr class="empty-row"><td colspan="' + NC + '">No quedan productos en la lista.</td></tr>';
     return;
   }
   tbody.innerHTML = active.map((it, i) => {
@@ -8247,6 +8255,7 @@ function ocrRenderTable(){
         <input type="text" class="input" data-edit="marca" value="${escapeHtml(it.marca || '')}" placeholder="Marca" style="width:100px; margin-top:4px;"></td>
       <td><input type="number" class="input" data-edit="cantidad" min="1" step="1" value="${it.cantidad}" style="width:70px;"></td>
       <td><input type="text" class="input" data-edit="descripcion" value="${escapeHtml(it.descripcion)}" style="min-width:200px; width:100%;"></td>
+      ${esIngco ? `<td style="text-align:right;">${Number(it.precioDist || 0).toFixed(2)}</td><td style="text-align:center;">${Number(it.descuento || 0)}%</td>` : ''}
       <td><input type="number" class="input" data-edit="precio" min="0" step="0.01" value="${Number(it.precio).toFixed(2)}" style="width:90px;"></td>
       <td style="text-align:right; font-weight:600;">${fmtMoney(it.total)}</td>
       <td style="white-space:nowrap;">
@@ -8261,6 +8270,7 @@ function ocrRenderTable(){
       <td><strong>${escapeHtml(it.codigo)}</strong>${estado}</td>
       <td style="text-align:center;">${it.cantidad}</td>
       <td style="min-width:180px;">${escapeHtml(it.descripcion)}</td>
+      ${esIngco ? `<td style="text-align:right;">${Number(it.precioDist || 0).toFixed(2)}</td><td style="text-align:center;">${Number(it.descuento || 0)}%</td>` : ''}
       <td style="text-align:right;">${Number(it.precio).toFixed(2)}</td>
       <td style="text-align:right; font-weight:600;">${fmtMoney(it.total)}</td>
       <td style="white-space:nowrap;">
@@ -8305,6 +8315,9 @@ function ocrBindTabla(){
       it.marca = val('marca').trim();
       it.cantidad = cantidad;
       it.descripcion = val('descripcion').trim() || codigo;
+      if(ocrFormato === 'ingco' && it.precioDist > 0 && Math.abs(precio - it.precio) > 0.0001){
+        it.descuento = Math.round((1 - precio / it.precioDist) * 10000) / 100; // el descuento sigue al precio
+      }
       it.precio = precio;
       it.total = Math.round(precio * cantidad * 100) / 100;
       it.existe = db.productos.some(p => normalize(p.codigo) === normalize(codigo));
@@ -8325,6 +8338,7 @@ function ocrBindTabla(){
 let ocrFacturaFecha = '';   // ISO de la fecha de la factura (vacío = hoy)
 let ocrFacturaInfo = '';    // texto informativo para la vista previa
 let ocrFacturaHora = '';    // hora de la factura (HH:MM) para conservarla al cambiar el día
+let ocrFormato = 'truper';  // 'truper' | 'ingco' (INGCO muestra también P. Unit y % Desc.)
 
 // Convierte los items de texto de una página de pdf.js en filas de texto:
 // agrupa por altura (y) y ordena por posición horizontal (x).
@@ -8395,6 +8409,8 @@ function openPdfTruper(){
 }
 
 async function procesarPdfTruper(file){
+  ocrFormato = 'truper';
+  const tt = document.getElementById('ocrModalTitulo'); if(tt) tt.textContent = '📄 PDF Truper — revisar y registrar';
   ocrParsedItems = [];
   ocrFacturaFecha = '';
   ocrFacturaInfo = '';
@@ -8454,6 +8470,146 @@ async function procesarPdfTruper(file){
   }
 }
 
+
+// ---------- FACTURA INGCO (Nota de entrega DAJERS S.R.L.) ----------
+// Lee el PDF por COLUMNAS (posición horizontal de cada texto): Código, Cant.,
+// Descripción (puede ocupar 2 líneas), P. Unit., % Desc., P. U. Desc. e Imp. Neto.
+// La fecha que se usa es la "Fecha de Venta" (no la de vencimiento).
+function ingcoParseItems(pages){
+  const items = [];
+  const num = s => parseFloat(String(s).replace(/,/g, ''));
+  const esNum = s => /^\d[\d,]*\.\d{2}$/.test(String(s).trim());
+  let fecha = '', hora = '', totalFactura = 0, marcaFactura = '';
+  pages.forEach(pg => {
+    // celdas con posición; agrupadas por altura (y) igual que en Truper
+    const its = (pg || []).filter(it => it && typeof it.str === 'string' && it.str.trim() && it.transform)
+      .map(it => ({ s: it.str.trim(), x: it.transform[4], y: it.transform[5] }));
+    its.sort((p, q) => (q.y - p.y) || (p.x - q.x));
+    const rows = [];
+    its.forEach(it => {
+      const last = rows[rows.length - 1];
+      if(last && Math.abs(last.y - it.y) <= 3) last.cells.push(it);
+      else rows.push({ y: it.y, cells: [it] });
+    });
+    rows.forEach(r => r.cells.sort((p, q) => p.x - q.x));
+    const textoDe = r => r.cells.map(c => c.s).join(' ').replace(/\s+/g, ' ').trim();
+
+    let actual = null; // fila de producto abierta (para sumarle la 2ª línea de descripción)
+    rows.forEach(r => {
+      const t = textoDe(r);
+      // Cabecera
+      let m = t.match(/Venta\.?\s*(\d{2})\/(\d{2})\/(\d{4})/i);
+      if(m && !fecha) fecha = { d: m[1], m: m[2], y: m[3] };
+      m = t.match(/Hora:?\s*(\d{2}):(\d{2})/i);
+      if(m && !hora) hora = m[1] + ':' + m[2];
+      m = t.match(/MARCA:?\s*([A-Za-z0-9ÁÉÍÓÚÑ]+)/i);
+      if(m && !marcaFactura) marcaFactura = m[1];
+      m = t.match(/Importe\s*Total:?\s*(\d[\d,]*\.\d{2})/i);
+      if(m) totalFactura = num(m[1]);
+
+      // ¿Fila de producto? = número de fila + código + cantidad + 3-4 importes
+      const col = (x0, x1) => r.cells.filter(c => c.x >= x0 && c.x < x1);
+      const cNro = col(0, 44), cCod = col(44, 125), cCant = col(125, 150);
+      const cDesc = col(150, 395), cUnit = col(395, 455), cPct = col(455, 482);
+      const cUdesc = col(482, 520), cNeto = col(520, 700);
+      const esFila = cNro.length && /^\d{1,3}$/.test(cNro[0].s) && cCod.length && cCant.length &&
+        /^\d+(?:[.,]\d+)?$/.test(cCant[0].s) && cUnit.length && esNum(cUnit[0].s) && cNeto.length && esNum(cNeto[0].s);
+      if(esFila){
+        const cantidad = num(cCant[0].s.replace(',', '.'));
+        const codigo = cCod.map(c => c.s).join('').trim();
+        const precioDist = num(cUnit[0].s);
+        const descuento = cPct.length ? num(cPct[0].s) : 0;
+        const precio = cUdesc.length && esNum(cUdesc[0].s) ? num(cUdesc[0].s) : precioDist;
+        const total = num(cNeto[0].s);
+        const desc = cDesc.map(c => c.s).join(' ');
+        if(!codigo || !(cantidad > 0)) { actual = null; return; }
+        actual = {
+          id: 'ocr_' + Date.now() + '_' + items.length + '_' + Math.random().toString(36).slice(2,5),
+          codigo, marca: '', cantidad, descripcion: desc, precioDist, descuento, precio, total,
+          existe: db.productos.some(p => normalize(p.codigo) === normalize(codigo)), activo: true
+        };
+        actual._y = r.y;
+        items.push(actual);
+        return;
+      }
+      // 2ª línea de descripción: solo texto en la columna de descripción, justo debajo de la fila
+      if(actual && r.cells.length && r.cells.every(c => c.x >= 150 && c.x < 395) && (actual._y - r.y) < 16 && (actual._y - r.y) > 0){
+        actual.descripcion += ' ' + textoDe(r);
+      }
+    });
+  });
+  items.forEach(it => { it.descripcion = it.descripcion.replace(/\s+/g, ' ').trim(); it.marca = marcaFactura ? (marcaFactura.charAt(0).toUpperCase() + marcaFactura.slice(1).toLowerCase()) : ''; delete it._y; });
+  return { items, fecha, hora, totalFactura };
+}
+
+function openPdfIngco(){
+  if(!exigirIngresosActivos()) return;
+  const inp = document.getElementById('filePdfIngco');
+  if(!inp) return;
+  inp.value = '';
+  inp.click();
+}
+
+async function procesarPdfIngco(file){
+  ocrFormato = 'ingco';
+  const tt = document.getElementById('ocrModalTitulo'); if(tt) tt.textContent = '📄 Factura INGCO — revisar y registrar';
+  ocrParsedItems = [];
+  ocrFacturaFecha = '';
+  ocrFacturaInfo = '';
+  ocrFacturaHora = '';
+  ocrBindTabla();
+  const status = document.getElementById('ocrStatus');
+  const prog = document.getElementById('ocrProgress');
+  const step2 = document.getElementById('ocrStep2');
+  document.getElementById('ocrProgressBar').style.width = '10%';
+  if(status) status.textContent = 'Leyendo la factura INGCO...';
+  if(prog) prog.style.display = '';
+  if(step2) step2.style.display = 'none';
+  openModal('modalFacturaOCR');
+  try{
+    if(typeof window.__LAZY_LIBS__ !== 'undefined' && window.__LAZY_LIBS__.pdf){
+      await window.__LAZY_LIBS__.pdf();
+    }
+    if(typeof pdfjsLib === 'undefined') throw new Error('No se pudo cargar el lector de PDF (revisa tu internet)');
+    const buf = await file.arrayBuffer();
+    const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+    const pages = [];
+    for(let i = 1; i <= pdf.numPages; i++){
+      const page = await pdf.getPage(i);
+      const tc = await page.getTextContent();
+      pages.push(tc.items);
+      document.getElementById('ocrProgressBar').style.width = (10 + (i / pdf.numPages) * 80) + '%';
+    }
+    const r = ingcoParseItems(pages);
+    if(!r.items.length){
+      closeModalById('modalFacturaOCR');
+      toast('No encontré productos en este PDF. ¿Es la factura de INGCO en PDF original (no una foto)?', 'error');
+      return;
+    }
+    ocrParsedItems = r.items;
+    ocrFacturaHora = r.hora || '12:00';
+    if(r.fecha) ocrFacturaFecha = boliviaStamp(r.fecha.y + '-' + r.fecha.m + '-' + r.fecha.d, ocrFacturaHora);
+    const inpFecha = document.getElementById('ocrFechaFactura');
+    if(inpFecha) inpFecha.value = r.fecha ? (r.fecha.y + '-' + r.fecha.m + '-' + r.fecha.d) : boliviaDateKey(new Date());
+    const suma = r.items.reduce((s, it) => s + it.total, 0);
+    const partes = [];
+    if(!r.fecha) partes.push('⚠️ No encontré la Fecha de Venta en el PDF: elígela arriba');
+    if(r.totalFactura){
+      partes.push(Math.abs(suma - r.totalFactura) < 0.05
+        ? '✔ La suma (' + fmtMoney(suma) + ') coincide con el total de la factura'
+        : '⚠️ La suma (' + fmtMoney(suma) + ') NO coincide con el total de la factura (' + fmtMoney(r.totalFactura) + '): revisa que no falte ninguna fila');
+    }
+    ocrFacturaInfo = partes.join(' · ');
+    if(prog) prog.style.display = 'none';
+    if(step2) step2.style.display = '';
+    ocrRenderTable();
+  }catch(err){
+    console.error('PDF INGCO error:', err);
+    closeModalById('modalFacturaOCR');
+    toast('Error al leer el PDF: ' + ((err && err.message) || err), 'error');
+  }
+}
+
 function ocrConfirmarIngresos(){
   if(!exigirIngresosActivos()) return;
   if(ocrParsedItems.some(it => it.activo && it.editando)){
@@ -8497,8 +8653,8 @@ function ocrRegistrarIngresos(activos){
         nombre: prod.nombre,
         cantidad: it.cantidad,
         precioUnitario: it.precio,
-        precioDistribuidor: it.precio,
-        descuento: 0,
+        precioDistribuidor: it.precioDist || it.precio,
+        descuento: it.descuento || 0,
         total: it.total,
         fecha: fecha,
         metodoPago: 'efectivo',
@@ -8524,8 +8680,8 @@ function ocrRegistrarIngresos(activos){
         marca: it.marca || '',
         categoria: '',
         precioCompra: it.precio,
-        precioDistribuidor: it.precio,
-        descuento: 0,
+        precioDistribuidor: it.precioDist || it.precio,
+        descuento: it.descuento || 0,
         precioMarca: 0,
         precioVenta: it.precio,
         stock: it.cantidad,
@@ -8542,8 +8698,8 @@ function ocrRegistrarIngresos(activos){
         nombre: newProd.nombre,
         cantidad: it.cantidad,
         precioUnitario: it.precio,
-        precioDistribuidor: it.precio,
-        descuento: 0,
+        precioDistribuidor: it.precioDist || it.precio,
+        descuento: it.descuento || 0,
         total: it.total,
         fecha: fecha,
         metodoPago: 'efectivo',
@@ -14019,6 +14175,10 @@ function setupEventListeners(){
 
   // PDF Truper
   document.getElementById('btnPdfTruper').addEventListener('click', openPdfTruper);
+  document.getElementById('btnPdfIngco').addEventListener('click', openPdfIngco);
+  document.getElementById('filePdfIngco').addEventListener('change', (e)=>{
+    if(e.target.files[0]) procesarPdfIngco(e.target.files[0]);
+  });
   document.getElementById('filePdfTruper').addEventListener('change', (e)=>{
     if(e.target.files[0]) procesarPdfTruper(e.target.files[0]);
   });

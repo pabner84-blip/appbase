@@ -834,14 +834,26 @@ function podarTombstones(){
   }catch(e){ /* ignorar */ }
 }
 
+// Une las tumbas de DOS copias. La estructura es { tipo: { id: marcaDeTiempo } }
+// (p. ej. { compras: { c1: 1731..., c2: ... }, ventas: {...} }). ANTES se unía como
+// si fuera un mapa plano: cuando los dos lados tenían tumbas del mismo tipo hacía
+// Math.max(objeto, objeto) = NaN y TODAS las tumbas de ese tipo se perdían. Por eso
+// lo borrado (ingresos, ventas, productos...) "resucitaba" y el historial se volvía
+// a llenar. Ahora se unen id por id y gana la marca más reciente.
 function unionTombstones(a, b){
   const out = {};
   a = a || {};
   b = b || {};
-  Object.keys(a).forEach(id => { out[id] = a[id]; });
-  Object.keys(b).forEach(id => {
-    if(!out[id]) out[id] = b[id];
-    else out[id] = Math.max(out[id], b[id]);
+  const tipos = {};
+  Object.keys(a).forEach(t => { tipos[t] = 1; });
+  Object.keys(b).forEach(t => { tipos[t] = 1; });
+  Object.keys(tipos).forEach(t => {
+    const ma = (a[t] && typeof a[t] === 'object') ? a[t] : {};
+    const mb = (b[t] && typeof b[t] === 'object') ? b[t] : {};
+    const m = {};
+    Object.keys(ma).forEach(id => { m[id] = Number(ma[id]) || 0; });
+    Object.keys(mb).forEach(id => { m[id] = Math.max(m[id] || 0, Number(mb[id]) || 0); });
+    out[t] = m;
   });
   return out;
 }

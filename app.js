@@ -3609,10 +3609,8 @@ function saveProducto(data){
       syncProductoDoc(existing);
       return existing;
     }
-    if(!maestro){
-      toast('Solo la PC principal crea productos nuevos.', 'error');
-      return null;
-    }
+    // Cualquier dispositivo (no solo la PC principal) puede crear productos nuevos:
+    // se suben a Firebase para que todos los dispositivos los vean.
     const p = {
       id: uid(),
       codigo: data.codigo.trim(),
@@ -3632,7 +3630,7 @@ function saveProducto(data){
     aplicarPreciosProductoForm(p, data);
     db.productos.push(p);
     saveDB();
-    syncProductoDoc(p);
+    syncProductoDoc(p, undefined, { crear: true }); // producto nuevo: sube a la nube con su código y marca
     return p;
   }
 }
@@ -6030,7 +6028,8 @@ function renderCompras(){
   if(s){
     entries = entries.filter(e => normalize(e.codigo).includes(s) || normalize(e.nombre).includes(s));
   }
-  entries.sort((a,b)=> a.nombre.localeCompare(b.nombre, 'es'));
+  // Del ingreso más RECIENTE al más antiguo (por la fecha de su último ingreso).
+  entries.sort((a,b)=> (new Date(b.ultimaFecha) - new Date(a.ultimaFecha)) || a.nombre.localeCompare(b.nombre, 'es'));
 
   if(entries.length === 0){
     tbody.innerHTML = `<tr class="empty-row"><td colspan="${colspan}">No hay ingresos que coincidan con la búsqueda.</td></tr>`;
@@ -8326,8 +8325,8 @@ function ocrConfirmarIngresos(){
   closeModalById('modalFacturaOCR');
   let msgOcr = added + ' ingreso(s) registrado(s) correctamente';
   if(omitidos){
-    msgOcr += ' — ' + omitidos + ' producto(s) nuevo(s) NO registrado(s) (solo la PC principal crea productos): ' +
-      codigosOmitidos.join(', ') + '. Pídele a la PC principal que los cree.';
+    msgOcr += ' — ' + omitidos + ' producto(s) nuevo(s) NO registrado(s): ' +
+      codigosOmitidos.join(', ');
   }
   toast(msgOcr, omitidos && !added ? 'error' : (omitidos ? 'warning' : 'success'));
 }
@@ -9715,10 +9714,6 @@ function handleProductSubmit(e){
   if(dup && dup.id !== data.id){
     toast('Ya existe otro producto con ese código', 'error');
     return;
-  }
-  if(!data.id && !esMaestro()){
-    toast('Solo la PC principal crea productos nuevos.', 'error');
-    return; // el modal queda abierto para no perder lo escrito
   }
   const saved = saveProducto(data);
   closeAllModals();
@@ -13327,7 +13322,7 @@ function setupEventListeners(){
     setEsMaestro(e.target.checked);
     toast(e.target.checked
       ? 'Esta PC ahora es la PC principal: puede crear y borrar productos'
-      : 'Modo normal: los productos nuevos solo los crea la PC principal', 'success');
+      : 'Modo normal: todos los dispositivos pueden crear productos nuevos', 'success');
   });
 
   // Instalar la app (PWA): el botón de Configuración y la guía según cómo se

@@ -4044,12 +4044,26 @@ function rapidoResetModo(){
   const rm = document.querySelector('#rrModoBox input[value="manual"]');
   if(rm) rm.checked = true;
 }
+// Quién cobra el QR en el registro rápido, según desde dónde se registra:
+// ventas Manuales -> Abner · ventas Eléctricas -> José · ventas de Invitados -> Richard.
+function rapidoQrPersona(){
+  if(currentModo === 'invitado') return 'Richard';
+  if(currentModo === 'electrico') return 'José';
+  return 'Abner';
+}
+function rapidoQrRefrescar(){
+  const q = document.getElementById('rrQrQuien');
+  if(q) q.textContent = '(' + rapidoQrPersona() + ')';
+}
 function openRegistroRapido(){
   rapidoNum = 1;
   rapidoPrecio = '';
   const st = document.getElementById('rrStatus');
   if(st) st.textContent = 'Escribe el precio y presiona Siguiente';
   rapidoRender();
+  const cbQr0 = document.getElementById('rrQr');
+  if(cbQr0) cbQr0.checked = false;
+  rapidoQrRefrescar();
   // Manuales / Eléctricas: solo lo usa el modo invitado (igual que "Nueva venta");
   // siempre arranca marcado en Manuales.
   const box = document.getElementById('rrModoBox');
@@ -4078,16 +4092,20 @@ function rapidoSiguiente(){
   const nombre = 'producto';
   const rSel = document.querySelector('input[name="rrModo"]:checked');
   const modoDestino = (currentModo === 'invitado' && rSel) ? rSel.value : 'manual';
+  const cbQr = document.getElementById('rrQr');
+  const esQr = !!(cbQr && cbQr.checked);
+  const qrPersona = esQr ? rapidoQrPersona() : '';
   const venta = saveVenta({
     codigo: 'OTRO', nombre, cantidad: 1, total: precio,
-    metodoPago: 'efectivo', modoDestino,
-    qrPersona: '', efectivoMonto: 0, qrMonto: 0
+    metodoPago: esQr ? 'qr' : 'efectivo', modoDestino,
+    qrPersona, efectivoMonto: 0, qrMonto: 0
   });
   try{ notifySale(venta); }catch(e){}
   try{ playCashRegisterSound(); }catch(e){}
   renderVentas();
   if(typeof renderFinanzas === 'function') renderFinanzas();
-  if(st) st.textContent = '✔ Guardado: ' + nombre + ' — Bs ' + precio;
+  if(st) st.textContent = '✔ Guardado: ' + nombre + ' — Bs ' + precio + (esQr ? ' · QR de ' + qrPersona : '');
+  if(cbQr) cbQr.checked = false; // cada venta vuelve a efectivo por defecto
   rapidoPrecio = '';
   rapidoRender();
   rapidoResetModo();

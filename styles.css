@@ -1137,3 +1137,7 @@ button, a, select, input, .nav-item, .guest-card{ touch-action:manipulation; -we
 .rr-modo{display:flex; justify-content:center; gap:18px; margin-bottom:10px; font-weight:600;}
 .rr-modo label{display:flex; align-items:center; gap:6px; cursor:pointer; font-size:15px;}
 .rr-modo input{width:20px; height:20px;}
+
+.rr-qr{display:flex; align-items:center; justify-content:center; gap:10px; margin:0 0 12px; padding:10px 12px; border:1px solid var(--border); border-radius:10px; background:var(--surface); font-weight:700; font-size:16px; cursor:pointer; user-select:none;}
+.rr-qr input{width:24px; height:24px; accent-color:var(--primary); cursor:pointer;}
+.rr-qr-quien{font-size:13px; font-weight:600; opacity:.75;}

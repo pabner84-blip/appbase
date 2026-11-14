@@ -615,6 +615,7 @@ function alinearCatalogoUnaVez(dbObj, remote){
   return false;
 }
 function applyMasterUI(){
+  try{ syncIngresosSwitchUI(); }catch(e){}
   document.body.classList.toggle('role-noMaster', !esMaestro());
   syncMasterSwitchUI();
   // Sin PC madre no existe el filtro "Productos sin foto": se quita y se muestra todo.
@@ -1487,6 +1488,7 @@ async function connectFirebase(){
     // en recibir lo de otros dispositivos). Los respaldos pasan a segundo plano.
     startVentasListener(currentModo);
     startComprasListener(currentModo);
+    startVaciadoIngresosListener(currentModo);
     startAjustesListener(currentModo);
     startGastosPrestamosListener(currentModo);
 
@@ -2198,6 +2200,99 @@ async function deleteCompraDocs(ids, modo){
   }catch(e){ console.error('Error borrando ingresos de la nube', e); }
 }
 
+/* -------------------------------------------------------------------------
+   SUICH DE INGRESOS (por dispositivo) + VACIADO COMPARTIDO
+   -------------------------------------------------------------------------
+   Encendido: este dispositivo puede registrar ingresos (uno por uno, Excel, PDF),
+   borrarlos/vaciar el historial y respaldar los suyos en la nube.
+   Apagado: NO registra ni borra ingresos y NUNCA sube sus copias locales a la nube
+   (así un dispositivo con datos viejos no puede "resucitar" ingresos ya eliminados).
+   Por defecto: encendido solo en la PC principal.
+   Al VACIAR el historial se deja una marca en la nube; cada dispositivo que la ve
+   quita de su copia local todo ingreso que ya no exista en la nube.
+   ------------------------------------------------------------------------- */
+const INGRESOS_SW_KEY = 'stockferre_ingresos_activo_v1';
+function ingresosActivos(){
+  if(currentRole === 'guest') return false;
+  try{
+    const v = localStorage.getItem(INGRESOS_SW_KEY);
+    if(v === null) return esMaestro();
+    return v === '1';
+  }catch(e){ return esMaestro(); }
+}
+function setIngresosActivos(on){
+  try{ localStorage.setItem(INGRESOS_SW_KEY, on ? '1' : '0'); }catch(e){}
+  syncIngresosSwitchUI();
+}
+function syncIngresosSwitchUI(){
+  const sw = document.getElementById('ingresosSwitch');
+  if(sw) sw.checked = ingresosActivos();
+}
+// true = se puede continuar; false = avisa y bloquea.
+function exigirIngresosActivos(accion){
+  if(ingresosActivos()) return true;
+  toast('No se puede ' + (accion || 'realizar ingresos') + ': el suich "Ingresos activos" está apagado en este dispositivo', 'error');
+  return false;
+}
+
+const ING_VACIADO_SEEN_KEY = 'fs_ing_vaciado_';
+function fbIngresosVaciadoRef(modo){
+  const fs = fbFirestoreOrNull(modo);
+  return fs ? fs.collection('stockferre').doc('ingresos_vaciado_' + (modo || currentModo)) : null;
+}
+// Deja en la nube la marca "se vació el historial de ingresos" (con la hora).
+async function marcarVaciadoIngresosNube(){
+  const at = Date.now();
+  try{ localStorage.setItem(ING_VACIADO_SEEN_KEY + currentModo, String(at)); }catch(e){}
+  const ref = fbIngresosVaciadoRef(currentModo);
+  if(!ref) return;
+  try{ await ref.set({ at: at }); }catch(e){ console.error('No se pudo marcar el vaciado de ingresos en la nube', e); }
+}
+// Si la nube dice que el historial se vació DESPUÉS de lo que este dispositivo
+// ya conocía, quita de la copia local los ingresos que ya no existen en la nube.
+async function aplicarVaciadoIngresos(at){
+  at = Number(at) || 0;
+  let visto = 0;
+  try{ visto = Number(localStorage.getItem(ING_VACIADO_SEEN_KEY + currentModo) || 0); }catch(e){}
+  if(!at || at <= visto) return;
+  const modo = currentModo;
+  const col = fbComprasCol(modo);
+  if(!col) return;
+  try{
+    const snap = await col.get();
+    if(modo !== currentModo) return;
+    const enNube = new Set(snap.docs.map(d => String(d.id)));
+    const sobran = (db.compras || []).filter(c => c && !enNube.has(String(c.id)));
+    if(sobran.length){
+      sobran.forEach(c => marcarBorrado('compras', c.id));
+      const set = new Set(sobran.map(c => String(c.id)));
+      db.compras = db.compras.filter(c => !set.has(String(c.id)));
+      persistLocalCache();
+      rerenderCurrentView();
+    }
+    try{ localStorage.setItem(ING_VACIADO_SEEN_KEY + modo, String(at)); }catch(e){}
+  }catch(e){ /* se reintenta en la próxima conexión */ }
+}
+async function revisarVaciadoIngresos(){
+  const ref = fbIngresosVaciadoRef(currentModo);
+  if(!ref) return;
+  try{
+    const snap = await withTimeout(ref.get(), 10000);
+    if(snap && snap.exists) await aplicarVaciadoIngresos((snap.data() || {}).at);
+  }catch(e){ /* sin internet: se revisa luego */ }
+}
+let fbIngVaciadoUnsub = null;
+function startVaciadoIngresosListener(modo){
+  const ref = fbIngresosVaciadoRef(modo);
+  if(!ref) return;
+  if(fbIngVaciadoUnsub){ try{ fbIngVaciadoUnsub(); }catch(e){} }
+  const tokenL = modeToken;
+  fbIngVaciadoUnsub = ref.onSnapshot(snap => {
+    if(tokenL !== modeToken || snap.metadata.hasPendingWrites) return;
+    if(snap.exists) aplicarVaciadoIngresos((snap.data() || {}).at);
+  }, ()=>{ /* ignorar */ });
+}
+
 // Sube a la colección los ingresos locales que todavía no tienen documento en
 // la nube (historial de antes de este arreglo, y los registrados con la
 // sincronización apagada). Se revisa como máximo una vez por semana para no
@@ -2205,6 +2300,10 @@ async function deleteCompraDocs(ids, modo){
 async function backfillCompras(modo){
   const col = fbComprasCol(modo);
   if(!col) return;
+  // Con el suich de Ingresos apagado este dispositivo NO sube sus copias locales.
+  if(!ingresosActivos()) return;
+  // Antes de subir nada, se aplica cualquier vaciado hecho en otro dispositivo.
+  await revisarVaciadoIngresos();
   const markKey = 'fs_backfill_compras_' + (modo || currentModo);
   if(sfForceComprasBackfill){
     sfForceComprasBackfill = false; // "Recibir y mandar actualizaciones" pidió forzar
@@ -2300,6 +2399,7 @@ function startComprasListener(modo){
 }
 
 function stopComprasListeners(){
+  if(fbIngVaciadoUnsub){ try{ fbIngVaciadoUnsub(); }catch(e){ /* ignorar */ } fbIngVaciadoUnsub = null; }
   if(fbComprasUnsub){ try{ fbComprasUnsub(); }catch(e){ /* ignorar */ } fbComprasUnsub = null; }
   comprasStoreCache.list = null;
 }
@@ -6302,6 +6402,7 @@ function deleteCompra(id, mantenerInventario){
 
 function vaciarHistorialCompras(){
   if(!esMaestro()){ toast('Solo la PC principal puede vaciar el historial de ingresos', 'error'); return; }
+  if(!exigirIngresosActivos('vaciar el historial de ingresos')) return;
   ventaBorrarDialog('Vaciar historial de ingresos', '¿Vaciar todo el historial de ingresos?\n\n¿Mantener el inventario?\n• Sí = el inventario NO se modifica.\n• No = las cantidades se quitan del stock.',
     ()=> vaciarComprasConStock(false),
     ()=> vaciarComprasConStock(true));
@@ -6321,6 +6422,7 @@ function vaciarComprasConStock(quitarStock){
   idsBorrados.forEach(id => marcarBorrado('compras', id));
   db.compras = [];
   deleteCompraDocs(idsBorrados); // vacía también la colección en la nube
+  marcarVaciadoIngresosNube(); // los demás dispositivos quitan sus copias locales viejas
   saveDB();
   renderCompras();
   renderInventario();
@@ -6333,6 +6435,7 @@ function vaciarComprasConStock(quitarStock){
 // si se quitan las cantidades de esos ingresos.
 function borrarIngresosDelDia(){
   if(!esMaestro()){ toast('Solo la PC principal puede borrar ingresos', 'error'); return; }
+  if(!exigirIngresosActivos('borrar ingresos')) return;
   if(compraDateFilter === 'todas'){
     toast('Primero elige un día (Hoy, Ayer, Anteayer o una fecha) para borrar sus ingresos', 'error');
     return;
@@ -6373,6 +6476,7 @@ function borrarComprasDelDiaConStock(ids, quitarStock, etiqueta){
 
 // Borra ingresos de hace más de 3 meses (el stock no se modifica).
 function purgeComprasAntiguas(){
+  if(!exigirIngresosActivos('borrar ingresos antiguos')) return;
   const corte = new Date();
   corte.setDate(corte.getDate() - 90);
   const corteKey = localDateKey(corte);
@@ -6549,6 +6653,7 @@ function obsPreview(s){
 }
 
 function importComprasCSV(file){
+  if(!exigirIngresosActivos('importar ingresos')) return;
   readTableFile(file, (rows)=>{
     try{
       const headers = rows[0].map(normalizeHeader);
@@ -7601,6 +7706,7 @@ function applyCompraFormModo(){
 }
 
 function openCompraDetalleForm(producto, codigo, opts){
+  if(!exigirIngresosActivos()) return;
   if(producto && producto.codigo) codigo = producto.codigo; // se identifica por el código del producto
   const esNuevo = !producto;
   compraFormModo = esNuevo ? 'nuevo' : 'ingreso';
@@ -7747,6 +7853,7 @@ function setLastCompraProveedor(val){
 
 function handleCompraSubmit(e){
   e.preventDefault();
+  if(!exigirIngresosActivos()) return;
   const codigo = document.getElementById('cCodigo').value.trim();
   const nombre = document.getElementById('cNombreInput').value.trim();
   const cantidad = parseFloat(document.getElementById('cCantidad').value);
@@ -8063,6 +8170,7 @@ function renderVentaSearchResults(){
 // botón de escáner y el buscador por nombre/código. Al elegir un producto se
 // abre el formulario de registro del ingreso.
 function openNuevaCompraModal(){
+  if(!exigirIngresosActivos()) return;
   document.getElementById('compraSearchInput').value = '';
   renderCompraSearchResults();
   openModal('modalNuevaCompra');
@@ -8276,6 +8384,7 @@ function truperParseRows(rows){
 }
 
 function openPdfTruper(){
+  if(!exigirIngresosActivos()) return;
   const inp = document.getElementById('filePdfTruper');
   if(!inp) return;
   inp.value = '';
@@ -8343,6 +8452,7 @@ async function procesarPdfTruper(file){
 }
 
 function ocrConfirmarIngresos(){
+  if(!exigirIngresosActivos()) return;
   if(ocrParsedItems.some(it => it.activo && it.editando)){
     toast('Guarda o cancela la fila que estás modificando antes de registrar', 'error');
     return;
@@ -8365,6 +8475,7 @@ function ocrConfirmarIngresos(){
 }
 
 function ocrRegistrarIngresos(activos){
+  if(!exigirIngresosActivos()) return;
 
   const inpF = document.getElementById('ocrFechaFactura');
   const fecha = (inpF && inpF.value) ? boliviaStamp(inpF.value, ocrFacturaHora || '12:00') : (ocrFacturaFecha || new Date().toISOString()); // fecha de la factura
@@ -13453,6 +13564,17 @@ function setupEventListeners(){
       toast('No se pudo enviar (¿sin internet?): ' + ((e && e.message) || e), 'error');
     }finally{ btnPush.disabled = false; }
   });
+  const swIng = document.getElementById('ingresosSwitch');
+  if(swIng){
+    syncIngresosSwitchUI();
+    swIng.addEventListener('change', (e)=>{
+      setIngresosActivos(e.target.checked);
+      if(e.target.checked) revisarVaciadoIngresos(); // al activarlo, primero se limpia lo que ya se vació
+      toast(e.target.checked
+        ? 'Ingresos ACTIVOS en este dispositivo'
+        : 'Ingresos APAGADOS: este dispositivo no registra ni borra ingresos', 'success');
+    });
+  }
   const swMaster = document.getElementById('masterSwitchConfig');
   if(swMaster) swMaster.addEventListener('change', (e)=>{
     setEsMaestro(e.target.checked);

@@ -319,14 +319,6 @@
     <!-- ---------- INGRESOS (compras de productos, solo dueño) ---------- -->
     <section class="view" id="view-compras">
       <div class="toolbar">
-        <label class="remember-switch" id="ingresosSwitchRow" title="Actívalo SOLO en el dispositivo donde registras ingresos">
-          <input type="checkbox" id="ingresosSwitch">
-          <span class="switch-track"><span class="switch-thumb"></span></span>
-          <span class="remember-text">
-            <strong>Ingresos activos</strong>
-            <small>Apagado: este dispositivo no registra ni borra ingresos</small>
-          </span>
-        </label>
         <button class="btn btn-primary" id="btnNuevaCompra">➕ Nuevo ingreso</button>
         <button class="btn btn-secondary" id="btnPdfTruper">📄 PDF Truper</button>
         <button class="btn btn-secondary" id="btnExportCompras">📤 Exportar Excel</button>
@@ -334,6 +326,14 @@
         <button class="btn btn-secondary" id="btnPurgeCompras">🧹 Borrar antiguas</button>
         <button class="btn btn-danger master-only" id="btnBorrarDiaCompras">🗑️ Borrar este día</button>
         <button class="btn btn-danger master-only" id="btnVaciarCompras">🧹 Vaciar historial</button>
+        <label class="ingresos-switch" id="ingresosSwitchRow" title="Actívalo SOLO en el dispositivo donde registras ingresos">
+          <input type="checkbox" id="ingresosSwitch">
+          <span class="ing-track"><span class="ing-thumb"></span></span>
+          <span class="ing-text">
+            <strong>INGRESOS: <span id="ingresosSwitchEstado">APAGADO</span></strong>
+            <small>Solo en el dispositivo que registra ingresos</small>
+          </span>
+        </label>
       </div>
       <div class="ventas-dates" id="comprasDates">
         <button type="button" class="compra-date-chip" id="compraDateBtn" onclick="document.getElementById('compraDateInput').showPicker()">📅 Calendario</button>

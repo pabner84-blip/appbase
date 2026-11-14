@@ -2207,26 +2207,32 @@ async function deleteCompraDocs(ids, modo){
    borrarlos/vaciar el historial y respaldar los suyos en la nube.
    Apagado: NO registra ni borra ingresos y NUNCA sube sus copias locales a la nube
    (así un dispositivo con datos viejos no puede "resucitar" ingresos ya eliminados).
-   Por defecto: encendido solo en la PC principal.
+   Siempre arranca APAGADO al abrir la app y se apaga al cerrarla.
    Al VACIAR el historial se deja una marca en la nube; cada dispositivo que la ve
    quita de su copia local todo ingreso que ya no exista en la nube.
    ------------------------------------------------------------------------- */
-const INGRESOS_SW_KEY = 'stockferre_ingresos_activo_v1';
+// El estado vive SOLO en memoria: cada vez que se abre (o recarga) la app arranca
+// APAGADO, y al cerrarla se pierde. Así nadie se queda con los ingresos activos
+// por olvido. Hay que encenderlo a propósito cuando se va a registrar ingresos.
+const INGRESOS_SW_KEY = 'stockferre_ingresos_activo_v1'; // clave vieja (ya no se usa)
+try{ localStorage.removeItem(INGRESOS_SW_KEY); }catch(e){}
+let ingresosActivoSesion = false;
 function ingresosActivos(){
   if(currentRole === 'guest') return false;
-  try{
-    const v = localStorage.getItem(INGRESOS_SW_KEY);
-    if(v === null) return esMaestro();
-    return v === '1';
-  }catch(e){ return esMaestro(); }
+  return ingresosActivoSesion === true;
 }
 function setIngresosActivos(on){
-  try{ localStorage.setItem(INGRESOS_SW_KEY, on ? '1' : '0'); }catch(e){}
+  ingresosActivoSesion = !!on;
   syncIngresosSwitchUI();
 }
 function syncIngresosSwitchUI(){
   const sw = document.getElementById('ingresosSwitch');
-  if(sw) sw.checked = ingresosActivos();
+  const on = ingresosActivos();
+  if(sw) sw.checked = on;
+  const est = document.getElementById('ingresosSwitchEstado');
+  if(est) est.textContent = on ? 'ACTIVADO' : 'APAGADO';
+  const row = document.getElementById('ingresosSwitchRow');
+  if(row) row.classList.toggle('on', on);
 }
 // true = se puede continuar; false = avisa y bloquea.
 function exigirIngresosActivos(accion){

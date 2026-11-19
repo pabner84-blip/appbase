@@ -582,13 +582,16 @@ function nuevoTag(p){
 // El estado vive SOLO en memoria: cada vez que se abre (o recarga) la app el suich
 // arranca APAGADO y al cerrarla se pierde. Hay que encenderlo a propósito.
 try{ localStorage.removeItem(MASTER_KEY); }catch(e){} // clave vieja (ya no se guarda)
+const MASTER_SESSION_KEY = 'stockferre_maestro_sesion_v1';
 let maestroSesion = false;
+try{ maestroSesion = sessionStorage.getItem(MASTER_SESSION_KEY) === '1'; }catch(e){ maestroSesion = false; }
 function esMaestro(){
   if(currentRole === 'guest') return false;
   return maestroSesion === true;
 }
 function setEsMaestro(on){
   maestroSesion = !!on;
+  try{ if(on) sessionStorage.setItem(MASTER_SESSION_KEY, '1'); else sessionStorage.removeItem(MASTER_SESSION_KEY); }catch(e){}
   // Al apagar el modo maestro, la próxima conexión vuelve a alinear el catálogo.
   if(!on){ try{ localStorage.removeItem(ALIGN_KEY); }catch(e){} }
   applyMasterUI();
@@ -2178,28 +2181,83 @@ function compraDocData(c){
   return d;
 }
 
-// Sube (crea o actualiza) el documento de UN ingreso.
+// COLA DE INGRESOS PENDIENTES: todo ingreso se anota aquí ANTES de subirlo y solo
+// se quita cuando Firebase CONFIRMA que lo recibió. Si recargas la página (o se
+// cae el internet) antes de la confirmación, al volver a abrir la app el ingreso
+// sigue visible y se reenvía solo. Así nunca se pierde un ingreso.
+const COMPRAS_PEND_KEY = 'fs_compras_pend_';
+function comprasPendLeer(modo){
+  try{ const a = JSON.parse(localStorage.getItem(COMPRAS_PEND_KEY + (modo || currentModo)) || '[]'); return Array.isArray(a) ? a : []; }
+  catch(e){ return []; }
+}
+function comprasPendGuardar(modo, arr){
+  try{
+    const k = COMPRAS_PEND_KEY + (modo || currentModo);
+    if(arr && arr.length) localStorage.setItem(k, JSON.stringify(arr)); else localStorage.removeItem(k);
+  }catch(e){}
+}
+function comprasPendAgregar(lista, modo){
+  const m = modo || currentModo;
+  const ids = new Set(lista.map(c => String(c.id)));
+  const a = comprasPendLeer(m).filter(x => x && !ids.has(String(x.id)));
+  comprasPendGuardar(m, a.concat(lista));
+}
+function comprasPendQuitar(ids, modo){
+  const m = modo || currentModo;
+  const set = new Set((Array.isArray(ids) ? ids : [ids]).map(String));
+  comprasPendGuardar(m, comprasPendLeer(m).filter(x => x && !set.has(String(x.id))));
+}
+
+// Sube (crea o actualiza) el documento de UN ingreso. Devuelve true solo cuando
+// Firebase confirmó que lo guardó.
 async function syncCompraDoc(c, modo){
-  const col = fbComprasCol(modo);
-  if(!col || !c || !c.id) return;
+  const m = modo || currentModo;
+  if(!c || !c.id) return false;
+  comprasPendAgregar([c], m); // primero se anota en este dispositivo
+  const col = fbComprasCol(m);
+  if(!col) return false; // sin conexión por ahora: queda pendiente y se reintenta
   try{
     await col.doc(String(c.id)).set(compraDocData(c));
-  }catch(e){ console.error('Error subiendo ingreso a la nube', e); }
+    comprasPendQuitar(c.id, m);
+    return true;
+  }catch(e){
+    console.error('Error subiendo ingreso a la nube', e);
+    try{ toast('El ingreso NO subió a Firebase (' + ((e && e.code) || 'error') + '). Quedó guardado aquí y se reintenta solo. Si dice permission-denied, revisa las reglas de Firestore.', 'error'); }catch(_){}
+    return false;
+  }
+}
+
+// Reenvía a Firebase los ingresos que quedaron pendientes (recarga, sin internet, error).
+async function reintentarComprasPendientes(modo){
+  const m = modo || currentModo;
+  const pend = comprasPendLeer(m).filter(c => c && c.id);
+  if(!pend.length) return;
+  const ok = await syncCompraDocs(pend, m);
+  if(ok){ try{ toast(pend.length + ' ingreso(s) pendiente(s) se subieron a Firebase', 'success'); }catch(_){} }
 }
 
 async function syncCompraDocs(list, modo){
-  const col = fbComprasCol(modo);
-  if(!col || !list || !list.length) return;
+  const m = modo || currentModo;
+  list = (list || []).filter(c => c && c.id);
+  if(!list.length) return false;
+  comprasPendAgregar(list, m);
+  const col = fbComprasCol(m);
+  if(!col) return false;
   try{
     const fs = col.firestore;
     for(let i = 0; i < list.length; i += 450){
+      const trozo = list.slice(i, i + 450);
       const batch = fs.batch();
-      list.slice(i, i + 450).forEach(c => {
-        if(c && c.id) batch.set(col.doc(String(c.id)), compraDocData(c));
-      });
+      trozo.forEach(c => batch.set(col.doc(String(c.id)), compraDocData(c)));
       await batch.commit();
+      comprasPendQuitar(trozo.map(c => c.id), m);
     }
-  }catch(e){ console.error('Error subiendo ingresos a la nube', e); }
+    return true;
+  }catch(e){
+    console.error('Error subiendo ingresos a la nube', e);
+    try{ toast('Los ingresos NO subieron a Firebase (' + ((e && e.code) || 'error') + '). Quedaron guardados aquí y se reintentan solos.', 'error'); }catch(_){}
+    return false;
+  }
 }
 
 async function deleteCompraDocs(ids, modo){
@@ -2387,18 +2445,30 @@ function startComprasListener(modo){
   // escritura en Firebase).
   fbComprasUnsub = col.onSnapshot(snap => {
     if(tokenListener !== modeToken || currentModo !== modoListener) return; // snapshot de otro modo: se ignora
-    if(snap.metadata && snap.metadata.fromCache) return;
+    // RÁPIDO: ya NO se espera al servidor; la copia que Firestore guarda en este
+    // dispositivo se muestra al instante y el servidor la corrige apenas llega.
     const lista = [];
+    const idsNube = new Set();
     snap.docs.forEach(d => {
       const data = d.data();
-      if(data && data.id) lista.push(data);
+      if(data && data.id){ lista.push(data); idsNube.add(String(data.id)); }
     });
+    // Ingresos aún sin confirmar por Firebase: se siguen mostrando (nunca desaparecen).
+    const pend = comprasPendLeer(modoListener);
+    if(pend.length){
+      if(!snap.metadata.fromCache){
+        const yaEstan = pend.filter(c => c && idsNube.has(String(c.id))).map(c => c.id);
+        if(yaEstan.length) comprasPendQuitar(yaEstan, modoListener);
+      }
+      pend.forEach(c => { if(c && c.id && !idsNube.has(String(c.id))) lista.push(c); });
+    }
     lista.sort((a,b)=> new Date(b.fecha) - new Date(a.fecha)); // la fecha más nueva arriba
     db.compras = lista;
     rerenderCurrentView();
   }, err => {
     console.error('Error escuchando los ingresos compartidos', err);
   });
+  reintentarComprasPendientes(modoListener); // reenvía lo que quedó pendiente antes de recargar
 }
 
 function stopComprasListeners(){
@@ -6387,6 +6457,7 @@ function deleteCompra(id, mantenerInventario){
     }
   }
   db.compras = db.compras.filter(c => c.id !== id);
+  comprasPendQuitar(id);
   marcarBorrado('compras', id); // el borrado viaja a los otros dispositivos
   deleteCompraDocs([id]); // y borra SU documento de la colección en la nube
   saveDB();
@@ -6424,6 +6495,7 @@ function vaciarComprasConStock(quitarStock){
   const idsBorrados = db.compras.map(c => c.id);
   idsBorrados.forEach(id => marcarBorrado('compras', id));
   db.compras = [];
+  comprasPendGuardar(currentModo, []);
   deleteCompraDocs(idsBorrados); // vacía también la colección en la nube
   marcarVaciadoIngresosNube(); // los demás dispositivos quitan sus copias locales viejas
   saveDB();
@@ -6469,6 +6541,7 @@ function borrarComprasDelDiaConStock(ids, quitarStock, etiqueta){
   }
   lista.forEach(c => marcarBorrado('compras', c.id));
   db.compras = db.compras.filter(c => !set.has(c.id));
+  comprasPendQuitar(Array.from(set));
   deleteCompraDocs(lista.map(c => c.id));
   saveDB();
   renderCompras();
@@ -7984,7 +8057,9 @@ function handleCompraSubmit(e){
   if(currentModo === 'manual' && !isNaN(Number(p.precioVenta))) nuevaCompra.precioVenta = Number(p.precioVenta);
   db.compras.unshift(nuevaCompra);
   db.compras.sort((a,b)=> new Date(b.fecha) - new Date(a.fecha));
-  syncCompraDoc(nuevaCompra, currentModo); // al instante, en SU documento de la nube
+  syncCompraDoc(nuevaCompra, currentModo).then(ok => { // al instante, en SU documento de la nube
+    if(ok) toast('✓ Ingreso guardado en Firebase', 'success');
+  });
 
   logInventarioHistorial(p, cantidad, 'compra');
   saveDB();
@@ -11618,12 +11693,23 @@ async function checkRemoteResetGen(){
     // El proyecto 'manual' guarda solo el modo manual y el 'electrico' solo el modo
     // eléctrico (+ invitado): cada modo lee la marca de SU proyecto.
     const modos = ['manual', 'electrico'];
+    // IMPORTANTE: la persistencia offline se activa ANTES de la primera lectura. Si se
+    // activaba después, Firestore la rechazaba en silencio (failed-precondition) y un
+    // ingreso aún sin confirmar se perdía al recargar la página.
+    // Además las dos lecturas van EN PARALELO y con 3 s de tope (antes: seguidas, hasta
+    // 16 s de espera antes de conectar).
+    const snaps = await Promise.all(modos.map(modo => {
+      const fs = fsFor(modo);
+      if(!fs) return null;
+      try{ enableOfflinePersistence(fs, fbProjectKeyFor(modo)); }catch(e){}
+      return withTimeout(fs.collection('stockferre').doc('_meta').get(), 3000).catch(() => null);
+    }));
     for(let i = 0; i < modos.length; i++){
       const modo = modos[i];
       const fs = fsFor(modo);
       if(!fs) continue;
       try{
-        const snap = await withTimeout(fs.collection('stockferre').doc('_meta').get(), 8000);
+        const snap = snaps[i];
         if(!snap || !snap.exists) continue;
         const g = Number((snap.data() || {})[resetGenFieldFor(modo)]) || 0;
         if(!g) continue;

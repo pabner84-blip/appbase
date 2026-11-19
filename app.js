@@ -583,19 +583,36 @@ function nuevoTag(p){
 // arranca APAGADO y al cerrarla se pierde. Hay que encenderlo a propósito.
 try{ localStorage.removeItem(MASTER_KEY); }catch(e){} // clave vieja (ya no se guarda)
 const MASTER_SESSION_KEY = 'stockferre_maestro_sesion_v1';
-let maestroSesion = false;
-try{ maestroSesion = sessionStorage.getItem(MASTER_SESSION_KEY) === '1'; }catch(e){ maestroSesion = false; }
+let maestroSesion = false; // SIEMPRE arranca apagado: al recargar la página el suich se desactiva
+try{ sessionStorage.removeItem(MASTER_SESSION_KEY); }catch(e){} // clave de la versión anterior (ya no se guarda)
 function esMaestro(){
   if(currentRole === 'guest') return false;
   return maestroSesion === true;
 }
 function setEsMaestro(on){
   maestroSesion = !!on;
-  try{ if(on) sessionStorage.setItem(MASTER_SESSION_KEY, '1'); else sessionStorage.removeItem(MASTER_SESSION_KEY); }catch(e){}
+  if(on) suichMarcarActividad(); // empieza a contar los 10 minutos sin uso
   // Al apagar el modo maestro, la próxima conexión vuelve a alinear el catálogo.
   if(!on){ try{ localStorage.removeItem(ALIGN_KEY); }catch(e){} }
   applyMasterUI();
 }
+// APAGADO AUTOMÁTICO: si pasan 10 minutos sin tocar, escribir ni registrar nada,
+// el suich se apaga solo. Se compara con la hora real (no con un temporizador
+// largo) para que funcione aunque el navegador "duerma" la pestaña.
+const SUICH_INACTIVIDAD_MS = 10 * 60 * 1000;
+let suichUltimaActividad = Date.now();
+function suichMarcarActividad(){ suichUltimaActividad = Date.now(); }
+function suichRevisarInactividad(){
+  if(!maestroSesion) return;
+  if(Date.now() - suichUltimaActividad < SUICH_INACTIVIDAD_MS) return;
+  setEsMaestro(false);
+  try{ toast('El suich se apagó solo por 10 minutos sin uso. Vuelve a encenderlo para registrar ingresos.', 'warning'); }catch(e){}
+}
+['pointerdown','keydown','touchstart','wheel','input','change'].forEach(ev =>
+  document.addEventListener(ev, ()=>{ if(maestroSesion) suichMarcarActividad(); }, { passive: true, capture: true }));
+setInterval(suichRevisarInactividad, 15000);
+document.addEventListener('visibilitychange', ()=>{ if(!document.hidden) suichRevisarInactividad(); });
+
 function catalogoAlineado(){
   try{ return localStorage.getItem(ALIGN_KEY) === '1'; }catch(e){ return false; }
 }
@@ -1553,8 +1570,8 @@ async function connectFirebase(){
     // listeners; ahora los listeners ya están activos y esto corre aparte.
     (async () => {
       const pasos = [
-        () => reintentarProductosPendientes(currentModo),
-        () => reintentarProductosPendientes(currentModo === 'manual' ? 'electrico' : 'manual'),
+        () => ingresosActivos() ? reintentarProductosPendientes(currentModo) : null, // sin suich no sube nada
+        () => ingresosActivos() ? reintentarProductosPendientes(currentModo === 'manual' ? 'electrico' : 'manual') : null,
         () => backfillProductos(currentModo),
         () => backfillProductos(otherModo),
         () => syncCaracteristicasCloud(currentModo),
@@ -2186,6 +2203,10 @@ function compraDocData(c){
 // cae el internet) antes de la confirmación, al volver a abrir la app el ingreso
 // sigue visible y se reenvía solo. Así nunca se pierde un ingreso.
 const COMPRAS_PEND_KEY = 'fs_compras_pend_';
+// Ingresos confirmados y registrados en ESTA sesión de la página (desde que se abrió/recargó).
+// Solo esos se reintentan solos (corte de internet con el suich encendido). Los que
+// sobrevivieron a una recarga NUNCA suben solos: se pregunta (Subir / Descartar).
+const comprasSesionIds = new Set();
 function comprasPendLeer(modo){
   try{ const a = JSON.parse(localStorage.getItem(COMPRAS_PEND_KEY + (modo || currentModo)) || '[]'); return Array.isArray(a) ? a : []; }
   catch(e){ return []; }
@@ -2213,7 +2234,8 @@ function comprasPendQuitar(ids, modo){
 async function syncCompraDoc(c, modo){
   const m = modo || currentModo;
   if(!c || !c.id) return false;
-  comprasPendAgregar([c], m); // primero se anota en este dispositivo
+  comprasSesionIds.add(String(c.id));
+  comprasPendAgregar([c], m); // primero se anota en este dispositivo (se borra al confirmar Firebase)
   const col = fbComprasCol(m);
   if(!col) return false; // sin conexión por ahora: queda pendiente y se reintenta
   try{
@@ -2230,7 +2252,9 @@ async function syncCompraDoc(c, modo){
 // Reenvía a Firebase los ingresos que quedaron pendientes (recarga, sin internet, error).
 async function reintentarComprasPendientes(modo){
   const m = modo || currentModo;
-  const pend = comprasPendLeer(m).filter(c => c && c.id);
+  // Sin suich encendido no sube nada; y solo reintenta lo registrado en esta sesión.
+  if(!ingresosActivos()) return;
+  const pend = comprasPendLeer(m).filter(c => c && c.id && comprasSesionIds.has(String(c.id)));
   if(!pend.length) return;
   const ok = await syncCompraDocs(pend, m);
   if(ok){ try{ toast(pend.length + ' ingreso(s) pendiente(s) se subieron a Firebase', 'success'); }catch(_){} }
@@ -2240,6 +2264,7 @@ async function syncCompraDocs(list, modo){
   const m = modo || currentModo;
   list = (list || []).filter(c => c && c.id);
   if(!list.length) return false;
+  list.forEach(c => comprasSesionIds.add(String(c.id)));
   comprasPendAgregar(list, m);
   const col = fbComprasCol(m);
   if(!col) return false;
@@ -2321,6 +2346,38 @@ function exigirIngresosActivos(accion){
   }
   toast('No se puede ' + (accion || 'realizar ingresos') + ': el suich "Ingresos activos" está apagado en este dispositivo', 'error');
   return false;
+}
+
+// Al ENCENDER el suich: si quedaron ingresos sin confirmar de antes de recargar, nada
+// sube solo; se pregunta. Aceptar = subir · Cancelar → se puede descartar o dejar pendientes.
+async function revisarPendientesAlEncender(){
+  const modos = ['manual', 'electrico'];
+  for(const m of modos){
+    const pend = comprasPendLeer(m).filter(c => c && c.id && !comprasSesionIds.has(String(c.id)));
+    const prods = pendProdLeer(m);
+    if(!pend.length && !prods.length) continue;
+    const nombreModo = m === 'manual' ? 'Manuales' : 'Eléctricas';
+    const resumen = pend.slice(0, 5).map(c => '• ' + (c.nombre || c.codigo) + ' × ' + c.cantidad).join('\n') +
+      (pend.length > 5 ? '\n• … y ' + (pend.length - 5) + ' más' : '');
+    const subir = confirm('INGRESOS SIN CONFIRMAR (' + nombreModo + ')\n\n' +
+      'Quedaron en este dispositivo ' + pend.length + ' ingreso(s)' + (prods.length ? ' y ' + prods.length + ' producto(s) nuevo(s)' : '') +
+      ' que no llegaron a Firebase:\n' + resumen + '\n\n' +
+      'Aceptar → SUBIRLOS a Firebase ahora.\nCancelar → decidir si descartarlos.');
+    if(subir){
+      if(pend.length) await syncCompraDocs(pend, m);
+      if(prods.length) await reintentarProductosPendientes(m);
+      continue;
+    }
+    const descartar = confirm('¿DESCARTAR esos ' + pend.length + ' ingreso(s) pendiente(s) de ' + nombreModo + '?\n\n' +
+      'Aceptar → se borran de este dispositivo y NO se suben.\nCancelar → siguen guardados (no se sube nada).');
+    if(descartar){
+      comprasPendGuardar(m, []);
+      pendProdGuardar(m, []);
+      db.compras = (db.compras || []).filter(c => !pend.some(p => String(p.id) === String(c.id)));
+      try{ persistLocalCache(); rerenderCurrentView(); }catch(e){}
+      toast('Ingresos pendientes descartados', 'info');
+    }
+  }
 }
 
 const ING_VACIADO_SEEN_KEY = 'fs_ing_vaciado_';
@@ -6730,7 +6787,12 @@ function obsPreview(s){
 
 function importComprasCSV(file){
   if(!exigirIngresosActivos('importar ingresos')) return;
-  readTableFile(file, (rows)=>{
+  readTableFile(file, (rowsIn)=>{
+    const nFilas = Math.max(0, ((rowsIn && rowsIn.length) || 0) - 1);
+    confirmDialog('Confirmar importación de ingresos',
+      'El archivo "' + (file && file.name ? file.name : 'ingresos') + '" trae ' + nFilas +
+      ' fila(s). Nada se guarda hasta que aceptes. ¿Continuar con la importación?',
+      ()=>{ ((rows)=>{
     try{
       const headers = rows[0].map(normalizeHeader);
       const idx = {
@@ -6939,6 +7001,7 @@ function importComprasCSV(file){
       console.error(err);
       toast('No se pudo leer el archivo Excel/CSV. Verifica el formato.', 'error');
     }
+      })(rowsIn); });
   });
 }
 
@@ -7927,6 +7990,7 @@ function setLastCompraProveedor(val){
   try{ localStorage.setItem(COMPRA_PROVEEDOR_KEY + currentModo, val || ''); }catch(e){}
 }
 
+let compraConfirmada = false; // true solo mientras se ejecuta un ingreso ya confirmado
 function handleCompraSubmit(e){
   e.preventDefault();
   if(!exigirIngresosActivos()) return;
@@ -7987,6 +8051,22 @@ function handleCompraSubmit(e){
 
   if(currentRole === 'guest'){
     toast('Los invitados no pueden registrar ingresos', 'error');
+    return;
+  }
+  // CONFIRMACIÓN OBLIGATORIA: nada se guarda hasta que se acepte el resumen.
+  if(!compraConfirmada){
+    confirmDialog('Confirmar ingreso',
+      (esFormNuevo ? 'PRODUCTO NUEVO\n' : '') +
+      'Código: ' + codigo + '\n' +
+      'Producto: ' + nombre + '\n' +
+      'Cantidad: ' + cantidad + '\n' +
+      'Precio de compra: ' + fmtMoney(precioCompra) + '\n' +
+      'Total: ' + fmtMoney(precioCompra * cantidad) + '\n\n¿Guardar este ingreso?',
+      ()=>{
+        compraConfirmada = true;
+        try{ handleCompraSubmit({ preventDefault(){} }); }
+        finally{ compraConfirmada = false; }
+      });
     return;
   }
   // Cualquier dueño (cualquier dispositivo) puede registrar ingresos de
@@ -13814,7 +13894,10 @@ function setupEventListeners(){
     syncIngresosSwitchUI();
     swIng.addEventListener('change', (e)=>{
       setIngresosActivos(e.target.checked); // Ingresos + PC principal, todo en uno
-      if(e.target.checked) revisarVaciadoIngresos(); // al activarlo, primero se limpia lo que ya se vació
+      if(e.target.checked){
+        revisarVaciadoIngresos(); // al activarlo, primero se limpia lo que ya se vació
+        setTimeout(()=>{ try{ revisarPendientesAlEncender(); }catch(err){ console.error(err); } }, 300);
+      }
       toast(e.target.checked
         ? 'ACTIVADO: este dispositivo registra ingresos y es la PC principal (crea y borra productos)'
         : 'APAGADO: sin ingresos y sin funciones de PC principal en este dispositivo', 'success');

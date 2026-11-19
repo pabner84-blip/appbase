@@ -8055,14 +8055,28 @@ function handleCompraSubmit(e){
   }
   // CONFIRMACIÓN OBLIGATORIA: nada se guarda hasta que se acepte el resumen.
   if(!compraConfirmada){
-    confirmDialog('Confirmar ingreso',
-      (esFormNuevo ? 'PRODUCTO NUEVO\n' : '') +
-      'Código: ' + codigo + '\n' +
-      'Producto: ' + nombre + '\n' +
-      'Cantidad: ' + cantidad + '\n' +
-      'Precio de compra: ' + fmtMoney(precioCompra) + '\n' +
-      'Total: ' + fmtMoney(precioCompra * cantidad) + '\n\n¿Guardar este ingreso?',
-      ()=>{
+    const _selPago = document.getElementById('cMetodoPago');
+    const _pagoTxt = _selPago && _selPago.options && _selPago.selectedIndex >= 0 ? _selPago.options[_selPago.selectedIndex].text : (_selPago ? _selPago.value : '');
+    const _prov = document.getElementById('cProveedor').value.trim();
+    const _obs = document.getElementById('cObservaciones').value.trim();
+    confirmIngresoFormal({
+      titulo: esFormNuevo ? 'INGRESO · PRODUCTO NUEVO' : 'COMPROBANTE DE INGRESO',
+      subtitulo: 'Vista previa · aún no guardado',
+      meta: [
+        ['Fecha', ciFmtFecha(document.getElementById('cFecha').value)],
+        ['Proveedor', _prov],
+        ['Marca', marca],
+        ['Método de pago', _pagoTxt]
+      ],
+      items: [{ codigo, nombre, cantidad, precio: precioCompra, total: precioCompra * cantidad, nuevo: esFormNuevo }],
+      lineas: [
+        ['Unidades', String(cantidad)],
+        ['Precio distribuidor', fmtMoney(precioDistribuidor)],
+        ['Descuento', descuento + '%']
+      ],
+      total: precioCompra * cantidad,
+      obs: _obs
+    }, ()=>{
         compraConfirmada = true;
         try{ handleCompraSubmit({ preventDefault(){} }); }
         finally{ compraConfirmada = false; }
@@ -8778,14 +8792,33 @@ function ocrConfirmarIngresos(){
   }
   const totalReg = activos.reduce((s, it) => s + (Number(it.total) || 0), 0);
   const nuevos = activos.filter(it => !it.existe).length;
-  confirmDialog('Registrar ingresos',
-    'Se van a registrar ' + activos.length + ' producto(s) por ' + fmtMoney(totalReg) +
-    (nuevos ? ' (' + nuevos + ' producto(s) nuevo(s) se crearán: ' + (()=>{
-      const c = {};
-      activos.filter(it => !it.existe).forEach(it => { const k = it.marca || 'sin marca'; c[k] = (c[k] || 0) + 1; });
-      return Object.keys(c).map(k => k + ' ' + c[k]).join(', ');
-    })() + ')' : '') + '. ¿Continuar?',
-    ()=> ocrRegistrarIngresos(activos));
+  const _inpF = document.getElementById('ocrFechaFactura');
+  const _marcaNuevos = (()=>{
+    const c = {};
+    activos.filter(it => !it.existe).forEach(it => { const k = it.marca || 'sin marca'; c[k] = (c[k] || 0) + 1; });
+    return Object.keys(c).map(k => k + ' ' + c[k]).join(', ');
+  })();
+  const _unidades = activos.reduce((s, it) => s + (Number(it.cantidad) || 0), 0);
+  confirmIngresoFormal({
+    titulo: 'INGRESO DE FACTURA ' + (ocrFormato === 'ingco' ? 'INGCO' : 'TRUPER'),
+    subtitulo: 'Vista previa · aún no guardado',
+    meta: [
+      ['Fecha de la factura', ciFmtFecha(_inpF ? _inpF.value : '')],
+      ['Proveedor', ocrFormato === 'ingco' ? 'INGCO' : 'Truper'],
+      ['Productos', String(activos.length)],
+      ['Productos nuevos', nuevos ? (nuevos + ' (' + _marcaNuevos + ')') : 'Ninguno']
+    ],
+    items: activos.map(it => ({
+      codigo: it.codigo,
+      nombre: it.descripcion || it.codigo,
+      cantidad: it.cantidad,
+      precio: it.precio,
+      total: Number(it.total) || 0,
+      nuevo: !it.existe
+    })),
+    lineas: [['Unidades', String(_unidades)]],
+    total: totalReg
+  }, ()=> ocrRegistrarIngresos(activos));
 }
 
 function ocrRegistrarIngresos(activos){
@@ -12832,6 +12865,38 @@ function confirmDialog(title, message, onAccept){
   openModal('modalConfirm');
 }
 
+// Confirmación FORMAL de ingresos (estilo comprobante, como la factura Truper/INGCO).
+//   o = { titulo, subtitulo, meta:[[etiqueta, valor],...], items:[{codigo, nombre, cantidad, precio, total, nuevo}],
+//         lineas:[[etiqueta, valor],...], total, obs }
+let ciCallback = null;
+function ciFmtFecha(v){
+  const m = String(v || '').match(/^(\d{4})-(\d{2})-(\d{2})/);
+  return m ? (m[3] + '/' + m[2] + '/' + m[1]) : (v || '—');
+}
+function confirmIngresoFormal(o, onAccept){
+  const $ = id => document.getElementById(id);
+  $('ciTitulo').textContent = o.titulo || 'COMPROBANTE DE INGRESO';
+  $('ciSubtitulo').textContent = o.subtitulo || 'Vista previa · aún no guardado';
+  $('ciModo').textContent = currentModo === 'electrico' ? 'Herramientas eléctricas' : 'Herramientas manuales';
+  $('ciMeta').innerHTML = (o.meta || []).map(([k, v]) =>
+    '<div><small>' + escapeHtml(k) + '</small><span>' + escapeHtml(v || '—') + '</span></div>').join('');
+  $('ciItems').innerHTML = (o.items || []).map((it, i) =>
+    '<tr><td>' + (i + 1) + '</td>' +
+    '<td class="ci-cod">' + escapeHtml(it.codigo) + '</td>' +
+    '<td>' + escapeHtml(it.nombre) + (it.nuevo ? '<span class="ci-tag">NUEVO</span>' : '') + '</td>' +
+    '<td class="ci-r">' + escapeHtml(it.cantidad) + '</td>' +
+    '<td class="ci-r">' + fmtMoney(it.precio) + '</td>' +
+    '<td class="ci-r"><strong>' + fmtMoney(it.total) + '</strong></td></tr>').join('');
+  $('ciTotales').innerHTML =
+    (o.lineas || []).map(([k, v]) => '<div class="ci-linea"><span>' + escapeHtml(k) + '</span><b>' + escapeHtml(v) + '</b></div>').join('') +
+    '<div class="ci-total-final"><span>TOTAL</span><span>' + fmtMoney(o.total) + '</span></div>';
+  const obs = $('ciObs');
+  obs.style.display = o.obs ? '' : 'none';
+  obs.textContent = o.obs ? ('Observaciones: ' + o.obs) : '';
+  ciCallback = onAccept;
+  openModal('modalConfirmIngreso');
+}
+
 // Diálogo "¿Mantener inventario?" al borrar o vaciar ventas/compras:
 //   onKeep    → Sí (el inventario NO se modifica).
 //   onRestore → No (el inventario sí se modifica).
@@ -14011,6 +14076,13 @@ function setupEventListeners(){
   document.getElementById('confirmAcceptBtn').addEventListener('click', ()=>{
     if(confirmCallback) confirmCallback();
     confirmCallback = null;
+    closeAllModalsKeepViewers();
+  });
+
+  // Confirmación formal de ingresos
+  document.getElementById('ciAcceptBtn').addEventListener('click', ()=>{
+    if(ciCallback) ciCallback();
+    ciCallback = null;
     closeAllModalsKeepViewers();
   });
 

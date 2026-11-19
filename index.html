@@ -1426,6 +1426,44 @@
   </div>
 </div>
 
+<!-- Confirmación FORMAL de ingresos (estilo comprobante, como la factura Truper/INGCO) -->
+<div class="modal" id="modalConfirmIngreso">
+  <div class="modal-header">
+    <h3>🧾 Confirmar ingreso</h3>
+    <button class="modal-close" data-close-modal>✕</button>
+  </div>
+  <div class="modal-body ci-body">
+    <div class="ci-doc">
+      <div class="ci-head">
+        <div>
+          <div class="ci-brand">TIENDA 1</div>
+          <div class="ci-brand-sub" id="ciModo"></div>
+        </div>
+        <div class="ci-head-right">
+          <div class="ci-doc-title" id="ciTitulo">COMPROBANTE DE INGRESO</div>
+          <div class="ci-doc-sub" id="ciSubtitulo"></div>
+        </div>
+      </div>
+      <div class="ci-meta" id="ciMeta"></div>
+      <div class="ci-table-wrap">
+        <table class="ci-table">
+          <thead>
+            <tr><th>#</th><th>Código</th><th>Descripción</th><th class="ci-r">Cant.</th><th class="ci-r">P. unit.</th><th class="ci-r">Total</th></tr>
+          </thead>
+          <tbody id="ciItems"></tbody>
+        </table>
+      </div>
+      <div class="ci-totales" id="ciTotales"></div>
+      <div class="ci-obs" id="ciObs" style="display:none;"></div>
+      <div class="ci-foot">Revisa los datos. El stock y el historial <strong>no cambian</strong> hasta que presiones “Confirmar y guardar”.</div>
+    </div>
+    <div class="form-actions ci-actions">
+      <button class="btn btn-secondary" data-close-modal>Cancelar</button>
+      <button class="btn btn-primary" id="ciAcceptBtn">✅ Confirmar y guardar</button>
+    </div>
+  </div>
+</div>
+
 <!-- Mantener inventario al borrar/vaciar ventas -->
 <div class="modal modal-sm" id="modalVentaBorrar">
   <div class="modal-header">

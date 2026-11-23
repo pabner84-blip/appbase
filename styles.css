@@ -1208,3 +1208,8 @@ body.theme-blanco .ci-table tbody tr:nth-child(even){background:rgba(0,0,0,.025)
   .ci-table th:nth-child(1), .ci-table td:nth-child(1){display:none;}
   .ci-table th, .ci-table td{padding:8px 7px; font-size:12px;}
 }
+
+
+/* Botón "Enviar PDF por WhatsApp" en Ventas: por ahora solo en Herramientas Manuales */
+.btn-wa-ventas{display:none;}
+body.modo-manual .btn-wa-ventas{display:inline-flex;}

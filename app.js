@@ -9645,6 +9645,141 @@ function buildGeneralResumenHtml(gen, dineroReal, resultadoHtml){
   </div>`;
 }
 
+// =========================================================================
+//  ENVIAR PDF DE VENTAS POR WHATSAPP (por ahora solo Herramientas Manuales)
+//  No toca Firebase: solo lee las ventas ya cargadas, arma el MISMO documento
+//  que "Exportar PDF", lo convierte a un archivo PDF real y lo comparte.
+// =========================================================================
+const WHATSAPP_VENTAS_MANUAL = '59178477336';   // +591 78477336
+let _ventasHtmlCaptura = null;
+
+// Prefija cada regla CSS con un selector para que no afecte al resto de la app.
+function _scopeCssPdf(cssText, prefix){
+  const st = document.createElement('style');
+  st.textContent = cssText;
+  document.head.appendChild(st);
+  let out = '';
+  try{
+    for(const r of Array.from(st.sheet.cssRules)){
+      if(r.type !== 1) continue; // solo reglas normales (ignora @page / @media print)
+      const sels = r.selectorText.split(',').map(x=>{
+        x = x.trim();
+        if(x === 'body' || x === 'html') return prefix;
+        if(x === '*') return prefix + ', ' + prefix + ' *';
+        return prefix + ' ' + x;
+      }).join(',');
+      out += sels + '{' + r.style.cssText + '}\n';
+    }
+  } finally { st.remove(); }
+  return out;
+}
+
+// Convierte el HTML del reporte en un Blob PDF (sin abrir ventanas).
+async function _htmlAPdfBlob(html){
+  if(!window.html2pdf){
+    if(!window.__LAZY_LIBS__ || !window.__LAZY_LIBS__.html2pdf) throw new Error('Generador de PDF no disponible');
+    await window.__LAZY_LIBS__.html2pdf();
+  }
+  const doc = new DOMParser().parseFromString(html, 'text/html');
+  doc.querySelectorAll('.no-print').forEach(n => n.remove());
+  const css = Array.from(doc.querySelectorAll('style')).map(s => s.textContent).join('\n');
+  const styleEl = document.createElement('style');
+  styleEl.textContent = _scopeCssPdf(css, '#pdfRootWA') +
+    '\n#pdfRootWA{padding:0 !important; min-height:0 !important; display:block !important; background:#fff;}';
+  const root = document.createElement('div');
+  root.id = 'pdfRootWA';
+  root.style.cssText = 'position:fixed; left:-10000px; top:0; width:740px; background:#fff; color:#1a1a1a; font-family:Arial,Helvetica,sans-serif;';
+  root.innerHTML = doc.body.innerHTML;
+  document.head.appendChild(styleEl);
+  document.body.appendChild(root);
+  try{
+    return await window.html2pdf().set({
+      margin: [10, 10, 10, 10],
+      image: { type: 'jpeg', quality: 0.95 },
+      html2canvas: { scale: 2, useCORS: true, backgroundColor: '#ffffff' },
+      jsPDF: { unit: 'mm', format: 'letter', orientation: 'portrait' },
+      pagebreak: { mode: ['css', 'legacy'], avoid: 'tr' }
+    }).from(root).outputPdf('blob');
+  } finally {
+    root.remove(); styleEl.remove();
+  }
+}
+
+// Ventana con los botones finales (así el "compartir" ocurre con un toque nuevo,
+// que es lo que exigen los celulares para abrir el menú de compartir).
+function _mostrarEnvioWhatsApp(blob, nombre, texto){
+  const file = new File([blob], nombre, { type: 'application/pdf' });
+  const puedeCompartir = !!(navigator.canShare && navigator.canShare({ files: [file] }));
+  const ov = document.createElement('div');
+  ov.style.cssText = 'position:fixed; inset:0; z-index:100000; background:rgba(0,0,0,.65); display:flex; align-items:center; justify-content:center; padding:16px;';
+  const box = document.createElement('div');
+  box.style.cssText = 'background:#14171c; color:#fff; border-radius:14px; padding:20px; max-width:380px; width:100%; display:flex; flex-direction:column; gap:10px; border:1px solid #2a2f37;';
+  box.innerHTML = '<div style="font-size:17px; font-weight:700;">📄 PDF de ventas listo</div>' +
+    '<div style="font-size:13px; opacity:.8;"></div>';
+  box.lastChild.textContent = texto;
+  const mkBtn = (txt, cls)=>{ const b = document.createElement('button'); b.type = 'button'; b.className = 'btn ' + cls; b.textContent = txt; b.style.width = '100%'; return b; };
+  const cerrar = ()=> ov.remove();
+
+  if(puedeCompartir){
+    const bs = mkBtn('📲 Compartir por WhatsApp', 'btn-success');
+    bs.addEventListener('click', async ()=>{
+      try{ await navigator.share({ files: [file], title: texto, text: texto }); cerrar(); }
+      catch(e){ if(!e || e.name !== 'AbortError') toast('No se pudo compartir: ' + ((e && e.message) || e), 'error'); }
+    });
+    box.appendChild(bs);
+    const nota = document.createElement('div');
+    nota.style.cssText = 'font-size:11.5px; opacity:.65;';
+    nota.textContent = 'Se abre el menú del celular: elige WhatsApp y el contacto +591 78477336.';
+    box.appendChild(nota);
+  }
+
+  const bc = mkBtn('💬 Abrir chat de +591 78477336 (y descargar PDF)', 'btn-secondary');
+  bc.addEventListener('click', ()=>{
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = nombre;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(()=> URL.revokeObjectURL(url), 60000);
+    window.open('https://wa.me/' + WHATSAPP_VENTAS_MANUAL + '?text=' + encodeURIComponent(texto), '_blank');
+    toast('PDF descargado. En el chat de WhatsApp adjúntalo (📎 → Documento).');
+  });
+  box.appendChild(bc);
+
+  const bx = mkBtn('Cerrar', 'btn-secondary');
+  bx.addEventListener('click', cerrar);
+  box.appendChild(bx);
+  ov.appendChild(box);
+  ov.addEventListener('click', (e)=>{ if(e.target === ov) cerrar(); });
+  document.body.appendChild(ov);
+}
+
+async function enviarVentasWhatsApp(){
+  if(currentRole !== 'admin' || currentModo !== 'manual'){
+    toast('Por ahora este botón funciona solo en Herramientas Manuales.', 'error');
+    return;
+  }
+  const btn = document.getElementById('btnEnviarVentasWA');
+  const txtOrig = btn ? btn.textContent : '';
+  if(btn){ btn.disabled = true; btn.textContent = '⏳ Generando PDF...'; }
+  try{
+    // Pide a exportVentasPDF el mismo HTML del reporte (respeta la fecha elegida).
+    const cap = await new Promise((ok, no)=>{
+      _ventasHtmlCaptura = (html, diaFmt, label)=> ok({ html, diaFmt, label });
+      try{ exportVentasPDF(); } catch(e){ _ventasHtmlCaptura = null; return no(e); }
+      if(_ventasHtmlCaptura){ _ventasHtmlCaptura = null; no(new Error('No se pudo armar el reporte')); }
+    });
+    const blob = await _htmlAPdfBlob(cap.html);
+    const nombre = ('Ventas-' + cap.label + '-' + cap.diaFmt).replace(/[^\w\-]+/g, '-').replace(/-+/g, '-') + '.pdf';
+    _mostrarEnvioWhatsApp(blob, nombre, '🛠️ Ventas ' + cap.label + ' — ' + cap.diaFmt);
+  } catch(err){
+    console.error('Enviar ventas WhatsApp:', err);
+    toast('No se pudo generar el PDF: ' + ((err && err.message) || err), 'error');
+  } finally {
+    _ventasHtmlCaptura = null;
+    if(btn){ btn.disabled = false; btn.textContent = txtOrig; }
+  }
+}
+
 function exportVentasPDF(){
   const dia = ventaFilterDateKey() || 'todas';
   const diaFmt = dia === 'todas' ? 'Todas las fechas' : dia;
@@ -9720,6 +9855,12 @@ function exportVentasPDF(){
     <button onclick="window.print(); window.close();" style="padding:10px 24px; font-size:14px; background:${dotColorSn}; color:#fff; border:none; border-radius:6px; cursor:pointer;">🖨️ Imprimir / Guardar como PDF</button>
   </div>
 </body></html>`;
+      // Si "Enviar PDF por WhatsApp" pidió el documento, se lo entregamos en vez de abrir la ventana.
+      if(typeof _ventasHtmlCaptura === 'function'){
+        const _cb = _ventasHtmlCaptura; _ventasHtmlCaptura = null;
+        _cb(htmlSn, diaFmt, dotLabelSn);
+        return;
+      }
       const winSn = window.open('', '_blank');
       if(!winSn){ toast('No se pudo abrir la ventana. Permití pop-ups para esta página.', 'error'); return; }
       winSn.document.write(htmlSn);
@@ -14216,6 +14357,7 @@ function setupEventListeners(){
   document.getElementById('btnCloseVentaScan').addEventListener('click', closeVentaScan);
   document.getElementById('btnExportVentas').addEventListener('click', exportVentasCSV);
   document.getElementById('btnExportVentasPDF').addEventListener('click', exportVentasPDF);
+  document.getElementById('btnEnviarVentasWA').addEventListener('click', enviarVentasWhatsApp);
   document.getElementById('btnImportVentas').addEventListener('click', ()=> document.getElementById('fileImportVentas').click());
   document.getElementById('fileImportVentas').addEventListener('change', (e)=>{
     if(e.target.files[0]) importVentasCSV(e.target.files[0]);

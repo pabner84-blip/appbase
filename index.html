@@ -227,6 +227,7 @@
         <input type="text" id="ventaSearch" class="input" placeholder="🔍 Buscar por código o nombre..." style="flex:1; min-width:180px;">
         <button class="btn btn-secondary" id="btnExportVentas">📤 Exportar Excel</button>
         <button class="btn btn-secondary" id="btnExportVentasPDF">📄 Exportar PDF</button>
+        <button class="btn btn-success btn-wa-ventas admin-only" id="btnEnviarVentasWA">📲 Enviar PDF por WhatsApp</button>
         <button class="btn btn-secondary admin-only" id="btnImportVentas">📥 Importar Excel</button>
         <button class="btn btn-secondary admin-only" id="btnPurgeVentas">🧹 Borrar antiguas</button>
         <button class="btn btn-danger admin-only" id="btnVaciarVentas">🧹 Vaciar historial</button>
@@ -1555,6 +1556,10 @@ window.__LAZY_LIBS__ = (function(){
     ], function(){ return !!window.pdfjsLib; }, function(){
       window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
     }); },
+    html2pdf: function(){ return loadFirst([
+      'https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js',
+      'https://cdn.jsdelivr.net/npm/html2pdf.js@0.10.1/dist/html2pdf.bundle.min.js'
+    ], function(){ return !!window.html2pdf; }); },
     zxing: function(){ return loadFirst([
       'https://unpkg.com/@zxing/library@0.20.0',
       'https://cdn.jsdelivr.net/npm/@zxing/library@0.20.0/umd/index.min.js'

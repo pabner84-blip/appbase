@@ -4,7 +4,7 @@
    funcione sin internet (los datos se sincronizan cuando hay conexión).
    ========================================================================= */
 
-const CACHE = 'stockferre-v22';
+const CACHE = 'stockferre-v23';
 
 // Archivos esenciales para que la app arranque sin conexión.
 // Los CDNs (Firebase, Tesseract, lector de barras, fuentes) también se
@@ -22,6 +22,7 @@ const PRECACHE = [
   'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js',
   'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js',
   'https://unpkg.com/@zxing/library@0.20.0',
+  'https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js',
   'https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js',
   'https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js',
   'https://fonts.googleapis.com/css2?family=Alfa+Slab+One&family=Cormorant+Garamond:ital,wght@1,300&display=swap'

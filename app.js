@@ -5610,7 +5610,7 @@ function openModoDetalle(modo){
 function buildModoDetalleHtml(modo, preview){
   const esMan = modo === 'manual';
   const dia = ventaFilterDateKey() || dateKeyOffset(0);
-  const ventasInvitado = (db.ventas || []).filter(v => v.modoOrigin === modo && ventaFechaKey(v.fecha) === dia);
+  const ventasInvitado = _ordenarVentasAsc((db.ventas || []).filter(v => v.modoOrigin === modo && ventaFechaKey(v.fecha) === dia));
   const gastosAjustados = dedupeGastosById(gastosPrestamosDelDia()).filter(g => g.modo === modo && g.ajustar);
   const allGastos = dedupeGastosById(gastosPrestamosDelDia()).filter(g => g.modo === modo);
   const totalVentas = ventasInvitado.reduce((s,v)=> s + (parseFloat(v.total)||0), 0);
@@ -6465,7 +6465,8 @@ function openCompraHistorial(codigo){
 // producto, cuánto fue en QR y (si fue mixta) cuánto en efectivo, y el total.
 function openQrHistorial(persona){
   const dia = ventaFilterDateKey();
-  const ventas = db.ventas.filter(v => v.qrPersona === persona && qrMontoDeVenta(v) > 0 && (!dia || ventaFechaKey(v.fecha) === dia));
+  const ventas = _ordenarVentasAsc(db.ventas.filter(v => v.qrPersona === persona && qrMontoDeVenta(v) > 0 && (!dia || ventaFechaKey(v.fecha) === dia)));
+  const baseNum = _ordenarVentasAsc(ventasFiltradas());
   const info = document.getElementById('histQrInfo');
   const tbody = document.querySelector('#histQrTable tbody');
   if(!info || !tbody) return;
@@ -6474,7 +6475,7 @@ function openQrHistorial(persona){
     tbody.innerHTML = `<tr class="empty-row"><td colspan="7">${escapeHtml(persona)} no tiene pagos por QR registrados.</td></tr>`;
   }else{
     tbody.innerHTML = ventas.map(v => {
-      const nro = db.ventas.indexOf(v) + 1;
+      const nro = baseNum.indexOf(v) + 1;
       const efCell = v.metodoPago === 'mixto' ? fmtMoney(efectivoMontoDeVenta(v)) : '-';
       return `
       <tr>
@@ -14409,7 +14410,7 @@ function setupEventListeners(){
     openVentaScan();
   });
   document.getElementById('btnCloseVentaScan').addEventListener('click', closeVentaScan);
-  // Menu unico "Exportar / Enviar" (Excel, PDF, WhatsApp)
+  // Menu desplegable "Exportar" (Excel y PDF)
   (function(){
     const menu = document.getElementById('menuExportarVentas');
     const toggle = document.getElementById('btnMenuExportarVentas');

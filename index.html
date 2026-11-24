@@ -225,17 +225,17 @@
         <button class="btn btn-primary" id="btnNuevaVenta">➕ Nueva venta</button>
         <button class="btn btn-success" id="btnRegistroRapido">⚡ Registro rápido</button>
         <input type="text" id="ventaSearch" class="input" placeholder="🔍 Buscar por código o nombre..." style="flex:1; min-width:180px;">
+        <button type="button" class="btn btn-success btn-wa-ventas" id="btnEnviarVentasWA">📲 Enviar por WhatsApp</button>
         <div class="menu-exportar" id="menuExportarVentas">
-          <button type="button" class="btn btn-secondary" id="btnMenuExportarVentas" aria-haspopup="true" aria-expanded="false">📤 Exportar ▾</button>
+          <button type="button" class="btn btn-secondary" id="btnMenuExportarVentas" aria-haspopup="true" aria-expanded="false">⋯ Más opciones ▾</button>
           <div class="menu-exportar-panel" id="panelExportarVentas" hidden>
             <button type="button" class="btn btn-secondary" id="btnExportVentas">📤 Exportar Excel</button>
             <button type="button" class="btn btn-secondary" id="btnExportVentasPDF">📄 Exportar PDF</button>
+            <button type="button" class="btn btn-secondary admin-only" id="btnImportVentas">📥 Importar Excel</button>
+            <button type="button" class="btn btn-secondary admin-only" id="btnPurgeVentas">🧹 Borrar antiguas</button>
+            <button type="button" class="btn btn-danger admin-only" id="btnVaciarVentas">🧹 Vaciar historial</button>
           </div>
         </div>
-        <button type="button" class="btn btn-success btn-wa-ventas" id="btnEnviarVentasWA">📲 Enviar por WhatsApp</button>
-        <button class="btn btn-secondary admin-only" id="btnImportVentas">📥 Importar Excel</button>
-        <button class="btn btn-secondary admin-only" id="btnPurgeVentas">🧹 Borrar antiguas</button>
-        <button class="btn btn-danger admin-only" id="btnVaciarVentas">🧹 Vaciar historial</button>
       </div>
       <div class="ventas-dates" id="ventasDates">
         <button class="venta-date-chip active" data-venta-date="hoy">Hoy</button>

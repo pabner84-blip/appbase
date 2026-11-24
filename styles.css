@@ -1212,13 +1212,13 @@ body.theme-blanco .ci-table tbody tr:nth-child(even){background:rgba(0,0,0,.025)
 
 /* Botón "Enviar PDF por WhatsApp" en Ventas: por ahora solo en Herramientas Manuales */
 .btn-wa-ventas{display:none;}
-body.modo-manual .btn-wa-ventas, body.role-guest .btn-wa-ventas{display:inline-flex;}
+body.modo-manual .btn-wa-ventas, body.modo-electrico .btn-wa-ventas, body.role-guest .btn-wa-ventas{display:inline-flex;}
 
 
 /* Menu desplegable "Exportar / Enviar" en Ventas */
 .menu-exportar{position:relative; display:inline-block;}
 .menu-exportar-panel{
-  position:absolute; top:calc(100% + 6px); left:0; z-index:60;
+  position:absolute; top:calc(100% + 6px); right:0; z-index:60;
   display:flex; flex-direction:column; gap:6px; min-width:210px; padding:8px;
   background:var(--surface); border:1px solid var(--border); border-radius:var(--radius);
   box-shadow:0 8px 24px rgba(0,0,0,.45);

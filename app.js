@@ -9791,8 +9791,8 @@ function _mostrarEnvioWhatsApp(items, texto, numero){
 
 async function enviarVentasWhatsApp(){
   const esInvitado = currentRole === 'guest';
-  if(!esInvitado && currentModo !== 'manual'){
-    toast('Por ahora este botón funciona en Herramientas Manuales o en el modo Invitado.', 'error');
+  if(!esInvitado && currentModo !== 'manual' && currentModo !== 'electrico'){
+    toast('Este botón funciona en Manuales, Eléctricas o en el modo Invitado.', 'error');
     return;
   }
   const btn = document.getElementById('btnEnviarVentasWA');
@@ -9816,7 +9816,7 @@ async function enviarVentasWhatsApp(){
       }
       await _entregarWhatsApp(items, '🧾 Ventas del día ' + dia, '');
     } else {
-      // DUEÑO (Manuales): un solo PDF, como antes.
+      // DUEÑO (Manuales o Eléctricas): un solo PDF del modo que está viendo.
       const cap = await new Promise((ok, no)=>{
         _ventasHtmlCaptura = (html, diaFmt, label)=> ok({ html, diaFmt, label });
         try{ exportVentasPDF(); } catch(e){ _ventasHtmlCaptura = null; return no(e); }
@@ -9824,7 +9824,7 @@ async function enviarVentasWhatsApp(){
       });
       const blob = await _htmlAPdfBlob(cap.html);
       const nombre = limpiar('Ventas-' + cap.label + '-' + cap.diaFmt) + '.pdf';
-      await _entregarWhatsApp([{ blob, nombre }], '🛠️ Ventas ' + cap.label + ' — ' + cap.diaFmt, WHATSAPP_VENTAS_MANUAL);
+      await _entregarWhatsApp([{ blob, nombre }], (currentModo === 'manual' ? '🛠️' : '⚡') + ' Ventas ' + cap.label + ' — ' + cap.diaFmt, currentModo === 'manual' ? WHATSAPP_VENTAS_MANUAL : '');
     }
   } catch(err){
     console.error('Enviar ventas WhatsApp:', err);

@@ -5783,6 +5783,13 @@ function renderTotalVentasDia(list){
   if(fe) fe.textContent = ventasFilterLabel();
 }
 
+// Ordena ventas de la mas antigua a la mas nueva (copia; no toca db.ventas).
+function _ordenarVentasAsc(arr){
+  return (arr || []).map((v, i) => ({ v, i }))
+    .sort((a, b) => ((new Date(a.v.fecha) - new Date(b.v.fecha)) || (b.i - a.i)))
+    .map(x => x.v);
+}
+
 function renderVentas(){
   const tbody = document.querySelector('#ventasTable tbody');
   const summary = document.getElementById('ventasSummary');
@@ -5801,7 +5808,9 @@ function renderVentas(){
 
   const list = ventasFiltradas();
   const search = normalize(document.getElementById('ventaSearch')?.value || '');
-  const filtered = search ? list.filter(v => normalize(v.codigo).includes(search) || normalize(v.nombre).includes(search)) : list;
+  const filtradoBase = search ? list.filter(v => normalize(v.codigo).includes(search) || normalize(v.nombre).includes(search)) : list;
+  // Orden cronologico: la venta mas antigua arriba (#1) y la ultima registrada al final.
+  const filtered = _ordenarVentasAsc(filtradoBase);
   if(filtered.length === 0){
     tbody.innerHTML = `<tr class="empty-row"><td colspan="${colspan}">${search ? 'No se encontraron ventas para "' + escapeHtml(search) + '"' : 'No hay ventas ' + escapeHtml(ventasFilterLabel())}.</td></tr>`;
     summary.innerHTML = currentRole === 'guest'
@@ -9473,7 +9482,7 @@ function exportVentasCSV(){
   }
   const header = ['FECHA','CODIGO','PRODUCTO','CANTIDAD','PRECIO UNITARIO','TOTAL','METODO DE PAGO','EFECTIVO','QR','QR PERSONA'];
   const types = ['text','text','text','number','number','number','text','number','number','text'];
-  const rows = db.ventas.map(v => [
+  const rows = _ordenarVentasAsc(db.ventas).map(v => [
     fmtExcelFecha(v.fecha), v.codigo, v.nombre, Number(v.cantidad)||0, Number(v.precioUnitario)||0, Number(v.total)||0, v.metodoPago,
     Number(efectivoMontoDeVenta(v))||0, Number(qrMontoDeVenta(v))||0, v.qrPersona || ''
   ]);
@@ -9512,6 +9521,7 @@ function ajustesFromDB(dbObj, dia){
 // ajuste: cambio, dinero real, sobra/falta/cuadra) y devuelve los datos y el
 // HTML de la tabla. Sirve para exportar un modo en el PDF.
 function computeVentasSectionData(list, allGastos, cambioBase, dineroReal, puntoColor){
+  list = _ordenarVentasAsc(list);
   const totalMonto = list.reduce((s,v)=> s + (parseFloat(v.total)||0), 0);
   const efectivoTotal = list.reduce((s,v)=> s + efectivoMontoDeVenta(v), 0);
   const qrTotal = list.reduce((s,v)=> s + qrMontoDeVenta(v), 0);
@@ -14399,6 +14409,22 @@ function setupEventListeners(){
     openVentaScan();
   });
   document.getElementById('btnCloseVentaScan').addEventListener('click', closeVentaScan);
+  // Menu unico "Exportar / Enviar" (Excel, PDF, WhatsApp)
+  (function(){
+    const menu = document.getElementById('menuExportarVentas');
+    const toggle = document.getElementById('btnMenuExportarVentas');
+    const panel = document.getElementById('panelExportarVentas');
+    if(!menu || !toggle || !panel) return;
+    const cerrar = ()=>{ panel.hidden = true; toggle.setAttribute('aria-expanded', 'false'); };
+    toggle.addEventListener('click', (e)=>{
+      e.stopPropagation();
+      panel.hidden = !panel.hidden;
+      toggle.setAttribute('aria-expanded', String(!panel.hidden));
+    });
+    panel.addEventListener('click', (e)=>{ if(e.target.closest('button')) cerrar(); });
+    document.addEventListener('click', (e)=>{ if(!menu.contains(e.target)) cerrar(); });
+    document.addEventListener('keydown', (e)=>{ if(e.key === 'Escape') cerrar(); });
+  })();
   document.getElementById('btnExportVentas').addEventListener('click', exportVentasCSV);
   document.getElementById('btnExportVentasPDF').addEventListener('click', exportVentasPDF);
   document.getElementById('btnEnviarVentasWA').addEventListener('click', enviarVentasWhatsApp);

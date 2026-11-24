@@ -1212,4 +1212,4 @@ body.theme-blanco .ci-table tbody tr:nth-child(even){background:rgba(0,0,0,.025)
 
 /* Botón "Enviar PDF por WhatsApp" en Ventas: por ahora solo en Herramientas Manuales */
 .btn-wa-ventas{display:none;}
-body.modo-manual .btn-wa-ventas{display:inline-flex;}
+body.modo-manual .btn-wa-ventas, body.role-guest .btn-wa-ventas{display:inline-flex;}

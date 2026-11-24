@@ -9686,62 +9686,87 @@ async function _htmlAPdfBlob(html){
   const styleEl = document.createElement('style');
   styleEl.textContent = _scopeCssPdf(css, '#pdfRootWA') +
     '\n#pdfRootWA{padding:0 !important; min-height:0 !important; display:block !important; background:#fff;}';
+  // OJO (causa del PDF en blanco): html2pdf CLONA el elemento con todo su estilo
+  // en linea. Si la raiz tenia position:fixed;left:-10000px, la copia tambien
+  // quedaba fuera de pantalla y el canvas salia vacio. Ahora la raiz es normal
+  // y lo que va fuera de pantalla es un contenedor aparte (que no se clona).
+  const wrap = document.createElement('div');
+  wrap.style.cssText = 'position:fixed; left:-10000px; top:0; width:740px; height:1px; overflow:visible; pointer-events:none;';
   const root = document.createElement('div');
   root.id = 'pdfRootWA';
-  root.style.cssText = 'position:fixed; left:-10000px; top:0; width:740px; background:#fff; color:#1a1a1a; font-family:Arial,Helvetica,sans-serif;';
+  root.style.cssText = 'width:740px; background:#fff; color:#1a1a1a; font-family:Arial,Helvetica,sans-serif;';
   root.innerHTML = doc.body.innerHTML;
+  wrap.appendChild(root);
   document.head.appendChild(styleEl);
-  document.body.appendChild(root);
+  document.body.appendChild(wrap);
   try{
+    // Espera a que el navegador pinte el contenido antes de capturarlo.
+    await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
     return await window.html2pdf().set({
       margin: [10, 10, 10, 10],
       image: { type: 'jpeg', quality: 0.95 },
-      html2canvas: { scale: 2, useCORS: true, backgroundColor: '#ffffff' },
+      html2canvas: { scale: 2, useCORS: true, backgroundColor: '#ffffff', scrollX: 0, scrollY: 0, windowWidth: 740 },
       jsPDF: { unit: 'mm', format: 'letter', orientation: 'portrait' },
       pagebreak: { mode: ['css', 'legacy'], avoid: 'tr' }
     }).from(root).outputPdf('blob');
   } finally {
-    root.remove(); styleEl.remove();
+    wrap.remove(); styleEl.remove();
   }
 }
 
-// Ventana con los botones finales (así el "compartir" ocurre con un toque nuevo,
-// que es lo que exigen los celulares para abrir el menú de compartir).
-function _mostrarEnvioWhatsApp(blob, nombre, texto){
-  const file = new File([blob], nombre, { type: 'application/pdf' });
-  const puedeCompartir = !!(navigator.canShare && navigator.canShare({ files: [file] }));
+// Intenta abrir directo el menu de compartir del celular con TODOS los PDF;
+// si el navegador exige un toque nuevo (el PDF tardo en generarse), muestra una
+// ventana con el boton final.
+async function _entregarWhatsApp(items, texto, numero){
+  const files = items.map(it => new File([it.blob], it.nombre, { type: 'application/pdf' }));
+  if(navigator.canShare && navigator.canShare({ files })){
+    try{ await navigator.share({ files, title: texto, text: texto }); return; }
+    catch(e){ if(e && e.name === 'AbortError') return; /* sin permiso: ventana de abajo */ }
+  }
+  _mostrarEnvioWhatsApp(items, texto, numero);
+}
+
+function _mostrarEnvioWhatsApp(items, texto, numero){
+  const files = items.map(it => new File([it.blob], it.nombre, { type: 'application/pdf' }));
+  const puedeCompartir = !!(navigator.canShare && navigator.canShare({ files }));
   const ov = document.createElement('div');
   ov.style.cssText = 'position:fixed; inset:0; z-index:100000; background:rgba(0,0,0,.65); display:flex; align-items:center; justify-content:center; padding:16px;';
   const box = document.createElement('div');
   box.style.cssText = 'background:#14171c; color:#fff; border-radius:14px; padding:20px; max-width:380px; width:100%; display:flex; flex-direction:column; gap:10px; border:1px solid #2a2f37;';
-  box.innerHTML = '<div style="font-size:17px; font-weight:700;">📄 PDF de ventas listo</div>' +
-    '<div style="font-size:13px; opacity:.8;"></div>';
-  box.lastChild.textContent = texto;
+  const tit = document.createElement('div');
+  tit.style.cssText = 'font-size:17px; font-weight:700;';
+  tit.textContent = items.length > 1 ? '📄 ' + items.length + ' PDF listos' : '📄 PDF de ventas listo';
+  const sub = document.createElement('div');
+  sub.style.cssText = 'font-size:13px; opacity:.8;';
+  sub.textContent = texto + ' — ' + items.map(i => i.nombre).join(', ');
+  box.appendChild(tit); box.appendChild(sub);
   const mkBtn = (txt, cls)=>{ const b = document.createElement('button'); b.type = 'button'; b.className = 'btn ' + cls; b.textContent = txt; b.style.width = '100%'; return b; };
   const cerrar = ()=> ov.remove();
 
   if(puedeCompartir){
-    const bs = mkBtn('📲 Compartir por WhatsApp', 'btn-success');
+    const bs = mkBtn('📲 Elegir contacto o grupo en WhatsApp', 'btn-success');
     bs.addEventListener('click', async ()=>{
-      try{ await navigator.share({ files: [file], title: texto, text: texto }); cerrar(); }
+      try{ await navigator.share({ files, title: texto, text: texto }); cerrar(); }
       catch(e){ if(!e || e.name !== 'AbortError') toast('No se pudo compartir: ' + ((e && e.message) || e), 'error'); }
     });
     box.appendChild(bs);
     const nota = document.createElement('div');
     nota.style.cssText = 'font-size:11.5px; opacity:.65;';
-    nota.textContent = 'Se abre el menú del celular: elige WhatsApp y el contacto +591 78477336.';
+    nota.textContent = 'Se abre el menú del celular: elige WhatsApp y el contacto o grupo; se envían todos los PDF juntos.';
     box.appendChild(nota);
   }
 
-  const bc = mkBtn('💬 Abrir chat de +591 78477336 (y descargar PDF)', 'btn-secondary');
+  const bc = mkBtn('💬 Descargar PDF y abrir WhatsApp', 'btn-secondary');
   bc.addEventListener('click', ()=>{
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = nombre;
-    document.body.appendChild(a); a.click(); a.remove();
-    setTimeout(()=> URL.revokeObjectURL(url), 60000);
-    window.open('https://wa.me/' + WHATSAPP_VENTAS_MANUAL + '?text=' + encodeURIComponent(texto), '_blank');
-    toast('PDF descargado. En el chat de WhatsApp adjúntalo (📎 → Documento).');
+    items.forEach((it, i) => setTimeout(()=>{
+      const url = URL.createObjectURL(it.blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = it.nombre;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(()=> URL.revokeObjectURL(url), 60000);
+    }, i * 500));
+    setTimeout(()=> window.open('https://wa.me/' + (numero || '') + '?text=' + encodeURIComponent(texto), '_blank'), items.length * 500 + 200);
+    toast('PDF descargados. En WhatsApp adjúntalos (📎 → Documento). Si el navegador pide permiso para varias descargas, acéptalo.');
   });
   box.appendChild(bc);
 
@@ -9754,23 +9779,42 @@ function _mostrarEnvioWhatsApp(blob, nombre, texto){
 }
 
 async function enviarVentasWhatsApp(){
-  if(currentRole !== 'admin' || currentModo !== 'manual'){
-    toast('Por ahora este botón funciona solo en Herramientas Manuales.', 'error');
+  const esInvitado = currentRole === 'guest';
+  if(!esInvitado && currentModo !== 'manual'){
+    toast('Por ahora este botón funciona en Herramientas Manuales o en el modo Invitado.', 'error');
     return;
   }
   const btn = document.getElementById('btnEnviarVentasWA');
   const txtOrig = btn ? btn.textContent : '';
+  const progreso = (t)=>{ if(btn) btn.textContent = t; };
   if(btn){ btn.disabled = true; btn.textContent = '⏳ Generando PDF...'; }
   try{
-    // Pide a exportVentasPDF el mismo HTML del reporte (respeta la fecha elegida).
-    const cap = await new Promise((ok, no)=>{
-      _ventasHtmlCaptura = (html, diaFmt, label)=> ok({ html, diaFmt, label });
-      try{ exportVentasPDF(); } catch(e){ _ventasHtmlCaptura = null; return no(e); }
-      if(_ventasHtmlCaptura){ _ventasHtmlCaptura = null; no(new Error('No se pudo armar el reporte')); }
-    });
-    const blob = await _htmlAPdfBlob(cap.html);
-    const nombre = ('Ventas-' + cap.label + '-' + cap.diaFmt).replace(/[^\w\-]+/g, '-').replace(/-+/g, '-') + '.pdf';
-    _mostrarEnvioWhatsApp(blob, nombre, '🛠️ Ventas ' + cap.label + ' — ' + cap.diaFmt);
+    const limpiar = (t)=> t.replace(/[^\w\-]+/g, '-').replace(/-+/g, '-');
+    if(esInvitado){
+      // INVITADO: 3 PDF -> "Ventas", "Detalle Manuales" y "Detalle Eléctricas"
+      const dia = ventaFilterDateKey() || dateKeyOffset(0);
+      const docs = [];
+      const htmlVentas = buildInvitadoVentasHtml(false);
+      if(htmlVentas) docs.push({ nombre: 'Ventas-' + limpiar(dia) + '.pdf', html: htmlVentas });
+      docs.push({ nombre: 'Detalle-Manuales-' + limpiar(dia) + '.pdf', html: buildModoDetalleHtml('manual', false) });
+      docs.push({ nombre: 'Detalle-Electricas-' + limpiar(dia) + '.pdf', html: buildModoDetalleHtml('electrico', false) });
+      const items = [];
+      for(let i = 0; i < docs.length; i++){
+        progreso('⏳ PDF ' + (i + 1) + ' de ' + docs.length + '...');
+        items.push({ blob: await _htmlAPdfBlob(docs[i].html), nombre: docs[i].nombre });
+      }
+      await _entregarWhatsApp(items, '🧾 Ventas del día ' + dia, '');
+    } else {
+      // DUEÑO (Manuales): un solo PDF, como antes.
+      const cap = await new Promise((ok, no)=>{
+        _ventasHtmlCaptura = (html, diaFmt, label)=> ok({ html, diaFmt, label });
+        try{ exportVentasPDF(); } catch(e){ _ventasHtmlCaptura = null; return no(e); }
+        if(_ventasHtmlCaptura){ _ventasHtmlCaptura = null; no(new Error('No se pudo armar el reporte')); }
+      });
+      const blob = await _htmlAPdfBlob(cap.html);
+      const nombre = limpiar('Ventas-' + cap.label + '-' + cap.diaFmt) + '.pdf';
+      await _entregarWhatsApp([{ blob, nombre }], '🛠️ Ventas ' + cap.label + ' — ' + cap.diaFmt, WHATSAPP_VENTAS_MANUAL);
+    }
   } catch(err){
     console.error('Enviar ventas WhatsApp:', err);
     toast('No se pudo generar el PDF: ' + ((err && err.message) || err), 'error');

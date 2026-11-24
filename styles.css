@@ -1225,3 +1225,38 @@ body.modo-manual .btn-wa-ventas, body.modo-electrico .btn-wa-ventas, body.role-g
 }
 .menu-exportar-panel[hidden]{display:none;}
 .menu-exportar-panel .btn{width:100%; justify-content:flex-start; text-align:left;}
+
+/* ---------- REGISTRO POR VOZ / FOTO ---------- */
+.vl-top{display:flex; gap:10px; flex-wrap:wrap; margin-bottom:10px;}
+.vl-top .btn{flex:1; min-width:140px; min-height:50px; font-size:16px;}
+.vl-mic-on{background:#dc2626 !important; border-color:#dc2626 !important; color:#fff !important; animation:vlPulse 1.3s infinite;}
+@keyframes vlPulse{0%,100%{box-shadow:0 0 0 0 rgba(220,38,38,.55);}50%{box-shadow:0 0 0 9px rgba(220,38,38,0);}}
+#vlTexto{width:100%; min-height:110px; font-size:18px; line-height:1.4; resize:vertical;}
+.vl-interim{min-height:18px; margin:4px 0 0; font-style:italic; opacity:.75;}
+.vl-chips{display:flex; flex-wrap:wrap; gap:6px; margin:8px 0 0;}
+.vl-chip{padding:4px 10px; border-radius:999px; border:1px solid var(--border); background:var(--surface); font-weight:700; font-size:14px;}
+.vl-chip-qr{border-color:#2563eb; color:#2563eb;}
+.vl-chip-luz{background:rgba(250,204,21,.18); border-color:#ca8a04;}
+#vlTable td{padding:6px 8px; font-size:13px; vertical-align:middle;}
+#vlTable .ocr-del-btn{cursor:pointer; opacity:.4; transition:opacity .15s;}
+#vlTable .ocr-del-btn:hover{opacity:1;}
+#vlTable tr.vl-dudoso{background:rgba(251,191,36,0.12);}
+.vl-badge{display:inline-block; padding:2px 8px; border-radius:6px; border:1px solid var(--border); font-size:12.5px; font-weight:600; white-space:nowrap;}
+.vl-badge-qr{border-color:#2563eb; color:#2563eb;}
+.vl-badge-luz{background:rgba(250,204,21,.18); border-color:#ca8a04;}
+.vl-cmp-ok{color:#16a34a; font-weight:600;}
+.vl-cmp-mal{color:#d97706; font-weight:600;}
+#vlTable{width:100%;}
+#vlTable td:first-child, #vlTable th:first-child{width:28px; text-align:center;}
+#vlTable select.input, #vlTable input.input{padding:6px 6px; font-size:13px; min-height:36px;}
+@media (max-width:560px){
+  .vl-bt{display:none;}
+  #vlTable td, #vlTable th{padding:6px 4px;}
+  .vl-badge{padding:2px 5px; font-size:11.5px;}
+  #vlTable .btn-sm{padding:7px 9px; font-size:14px;}
+  #vlTable select.input{max-width:104px;}
+  #vlTable [data-edit="precio"]{width:78px !important;}
+}
+#vlTable{min-width:0 !important;}
+.vl-edit{display:flex; flex-wrap:wrap; gap:6px; align-items:center;}
+.vl-edit select.input{width:auto !important; max-width:none !important;}

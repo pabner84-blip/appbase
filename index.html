@@ -224,6 +224,7 @@
       <div class="toolbar">
         <button class="btn btn-primary" id="btnNuevaVenta">➕ Nueva venta</button>
         <button class="btn btn-success" id="btnRegistroRapido">⚡ Registro rápido</button>
+        <button class="btn btn-success" id="btnVentasVoz">🎙️ Dictar</button>
         <input type="text" id="ventaSearch" class="input" placeholder="🔍 Buscar por código o nombre..." style="flex:1; min-width:180px;">
         <button type="button" class="btn btn-success btn-wa-ventas" id="btnEnviarVentasWA">📲 Enviar por WhatsApp</button>
         <div class="menu-exportar" id="menuExportarVentas">
@@ -942,6 +943,53 @@
     <div class="rr-actions">
       <button type="button" class="btn btn-secondary" id="btnRrCerrar">Cerrar panel</button>
       <button type="button" class="btn btn-success" id="btnRrSiguiente">Siguiente ➜</button>
+    </div>
+  </div>
+</div>
+
+<!-- Modal: Registro por voz (lote de ventas) — la revisión imita la ventana de factura Truper -->
+<div class="modal modal-lg" id="modalVentasLote">
+  <div class="modal-header">
+    <h3>🎙️ Ventas por voz — revisar y registrar</h3>
+    <button class="modal-close" data-close-modal>✕</button>
+  </div>
+  <div class="modal-body">
+    <div id="vlStep1">
+      <div class="vl-top">
+        <button type="button" class="btn btn-success" id="vlMic">🎙️ Dictar</button>
+      </div>
+      <p class="hint" id="vlHint" style="margin:0 0 8px;"></p>
+      <textarea id="vlTexto" class="input" rows="4" placeholder="50, 100 qr, 20 luz, 40 qr luz..." autocomplete="off" spellcheck="false"></textarea>
+      <div class="hint vl-interim" id="vlInterim"></div>
+      <div class="vl-chips" id="vlEntendi"></div>
+      <div style="display:flex; gap:8px; margin-top:12px;">
+        <button class="btn btn-secondary" id="btnVlCancelar" style="flex:1;">Cancelar</button>
+        <button class="btn btn-primary" id="btnVlRevisar" style="flex:2;">Revisar ➜</button>
+      </div>
+    </div>
+    <div id="vlStep2" style="display:none;">
+      <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:8px;">
+        <label style="font-weight:600; display:flex; align-items:center; gap:6px;">📅 Fecha de las ventas
+          <input type="date" id="vlFecha" class="input" style="width:auto;">
+        </label>
+        <label style="font-weight:600; display:flex; align-items:center; gap:6px;">🧮 Total anotado (opcional)
+          <input type="number" id="vlTotalAnotado" class="input" min="0" step="0.01" inputmode="decimal" style="width:120px;">
+        </label>
+      </div>
+      <p class="hint" id="vlResumen" style="margin:0 0 4px; font-weight:600;"></p>
+      <p class="hint vl-cmp" id="vlComparacion" style="display:none; margin:0 0 6px;"></p>
+      <p class="hint" id="vlAvisoModo" style="display:none; margin:0 0 6px; color:#d97706;">⚠️ "luz" se ignora en este modo: todas las ventas van al modo actual.</p>
+      <div class="table-wrap" style="max-height:400px; overflow-y:auto;">
+        <table class="table" id="vlTable">
+          <thead><tr></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <button type="button" class="btn btn-secondary btn-sm" id="btnVlAgregar" style="margin-top:8px;">➕ Agregar fila</button>
+      <div style="display:flex; gap:8px; margin-top:12px;">
+        <button class="btn btn-secondary" id="btnVlVolver" style="flex:1;">⬅ Volver</button>
+        <button class="btn btn-primary" id="btnVlRegistrar" style="flex:2;">✅ Registrar ventas</button>
+      </div>
     </div>
   </div>
 </div>

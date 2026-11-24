@@ -3992,7 +3992,7 @@ function saveVenta(data){
     // Se guarda en el día que se está viendo en Ventas (si es "Todas", hoy)
     // y con la HORA actual al momento de registrar. Así la fecha y hora que
     // se muestran coinciden con el día seleccionado en Ventas.
-    fecha: stampForDay(ventaFilterDateKey())
+    fecha: data.fecha || stampForDay(ventaFilterDateKey())
   };
 
   // En modo invitado la venta se guarda en su propia base (aislada).
@@ -4427,6 +4427,432 @@ function rapidoSiguiente(){
   rapidoPrecio = '';
   rapidoRender();
   rapidoResetModo();
+}
+
+
+/* =========================================================================
+   REGISTRO POR VOZ (lote de ventas)
+   Anota muchas ventas "solo precio" por dictado en vivo o texto:
+     50 · 100 qr · 20 luz · 40 qr luz · borra
+   Se abre una ventana de revisión igual a la de la factura
+   Truper (Modificar / Guardar / Quitar) y NADA se registra hasta presionar
+   "Registrar ventas".
+   ========================================================================= */
+// VL-PURE-START
+const VL_NUM = {
+  cero:0, un:1, uno:1, una:1, dos:2, tres:3, cuatro:4, cinco:5, seis:6, siete:7, ocho:8, nueve:9,
+  diez:10, once:11, doce:12, trece:13, catorce:14, quince:15, dieciseis:16, diecisiete:17, dieciocho:18, diecinueve:19,
+  veinte:20, veintiun:21, veintiuno:21, veintiuna:21, veintidos:22, veintitres:23, veinticuatro:24, veinticinco:25,
+  veintiseis:26, veintisiete:27, veintiocho:28, veintinueve:29,
+  treinta:30, cuarenta:40, cincuenta:50, sesenta:60, setenta:70, ochenta:80, noventa:90,
+  cien:100, ciento:100, doscientos:200, doscientas:200, trescientos:300, trescientas:300,
+  cuatrocientos:400, cuatrocientas:400, quinientos:500, quinientas:500, seiscientos:600, seiscientas:600,
+  setecientos:700, setecientas:700, ochocientos:800, ochocientas:800, novecientos:900, novecientas:900, mil:1000
+};
+
+function vlSinAcentos(s){
+  return String(s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+}
+
+// Convierte "mil cuatrocientos cincuenta" -> "1450" dentro de una lista de palabras.
+// Si el reconocedor ya escribió dígitos (lo normal en Chrome), no hace nada.
+function vlPalabrasANumeros(toks){
+  const out = [];
+  let run = null;
+  const nuevo = () => ({ total:0, cur:0, mil:false, pendY:false, g:{ h:false, t:false, u:false } });
+  const cerrar = () => { if(run){ out.push(String(run.total + run.cur)); run = null; } };
+  const clase = v => v === 1000 ? 'mil' : v >= 100 ? 'hund' : (v >= 20 && v % 10 === 0) ? 'tens' : v >= 10 ? 'teen' : 'unit';
+  const puede = (cls) => {
+    if(!run) return true;
+    const g = run.g;
+    if(cls === 'mil') return !run.mil && run.cur > 0;
+    if(cls === 'hund') return !g.h && !g.t && !g.u;
+    if(cls === 'tens' || cls === 'teen') return !g.t && !g.u;
+    return !g.u && (!g.t || (g.t === 'tens' && run.pendY)); // unit
+  };
+  for(let i = 0; i < toks.length; i++){
+    const w = toks[i];
+    const v = VL_NUM[w];
+    if(v === undefined){
+      const sig = VL_NUM[toks[i + 1]];
+      if(w === 'y' && run && run.g.t === 'tens' && sig !== undefined && sig >= 1 && sig <= 9){ run.pendY = true; continue; }
+      cerrar(); out.push(w); continue;
+    }
+    const cls = clase(v);
+    if(!puede(cls)) cerrar();
+    if(!run) run = nuevo();
+    if(cls === 'mil'){ run.total += (run.cur || 1) * 1000; run.cur = 0; run.mil = true; run.g = { h:false, t:false, u:false }; run.pendY = false; }
+    else if(cls === 'hund'){ run.cur += v; run.g.h = true; }
+    else if(cls === 'tens' || cls === 'teen'){ run.cur += v; run.g.t = cls; }
+    else { run.cur += v; run.g.u = true; run.pendY = false; }
+  }
+  cerrar();
+  return out;
+}
+
+const VL_RUIDO = new Set(['y','con','por','en','de','la','el','bs','bolivianos','boliviano','pago','pagos','precio','siguiente','otro','otra','ok','listo','mas','coma','a','al','es','son','venta','ventas','producto']);
+
+// Texto dictado/escrito -> ventas. Cada número empieza una venta nueva; las
+// palabras que le siguen (qr, luz...) se aplican a ESE número.
+//   "50"            -> manuales, efectivo
+//   "100 qr"        -> manuales, QR
+//   "20 luz"        -> eléctricas, efectivo
+//   "40 qr luz"     -> eléctricas, QR
+//   "borra"         -> quita la última · "borra todo" -> vacía la lista
+function vlParse(texto){
+  let t = vlSinAcentos(texto);
+  t = t.replace(/\bq\s*\.?\s*r\b\.?/g, ' qr ')
+       .replace(/\b(que\s+erre|cu\s*erre|cuerre|curre|kerre|keerre)\b/g, ' qr ')
+       .replace(/(\d)([a-z])/g, '$1 $2').replace(/([a-z])(\d)/g, '$1 $2')
+       .replace(/\b\d{1,3}(?:[.,]\d{3})+\b/g, m => m.replace(/[.,]/g, ''))
+       .replace(/[^a-z0-9.,\s]/g, ' ');
+  let toks = t.split(/\s+/).map(w => w.replace(/^[.,]+|[.,]+$/g, '')).filter(Boolean);
+  toks = vlPalabrasANumeros(toks);
+  const items = [];
+  const ignorados = [];
+  let cur = null;
+  for(let i = 0; i < toks.length; i++){
+    const w = toks[i];
+    if(/^\d+(?:[.,]\d+)?$/.test(w)){
+      const n = parseFloat(w.replace(',', '.'));
+      if(n > 0 && n < 10000000){ cur = { precio: n, qr: false, electrica: false }; items.push(cur); }
+      else { cur = null; ignorados.push(w); }
+    }else if(w === 'qr'){
+      if(cur) cur.qr = true; else ignorados.push(w);
+    }else if(/^(luz|luces|luzes|lus|rayo|rayos|elec|electrica|electricas|electrico|electricos|electric)$/.test(w)){
+      if(cur) cur.electrica = true; else ignorados.push(w);
+    }else if(/^(manual|manuales)$/.test(w)){
+      if(cur) cur.electrica = false;
+    }else if(/^(efectivo|cash)$/.test(w)){
+      if(cur) cur.qr = false;
+    }else if(/^(borra|borrar|borre|borro|borrado|elimina|eliminar|quita|quitar|deshacer|anula|anular|atras)$/.test(w)){
+      if(/^(todo|todos|todas)$/.test(toks[i + 1] || '')){ items.length = 0; i++; }
+      else items.pop();
+      cur = null;
+    }else if(!VL_RUIDO.has(w)){
+      ignorados.push(w);
+    }
+  }
+  return { items, ignorados };
+}
+
+function vlItemsATexto(items){
+  return items.map(it => String(it.precio) + (it.qr ? ' qr' : '') + (it.electrica ? ' luz' : '')).join(', ');
+}
+// VL-PURE-END
+
+
+let vlItems = [];            // [{id, precio, qr, electrica, dudoso, activo, editando, nuevo}]
+let vlSeq = 0;
+let vlRec = null;            // SpeechRecognition activo
+let vlQuiereEscuchar = false;
+let vlLang = 'es-BO';
+let vlRegistrando = false;
+
+function vlEl(id){ return document.getElementById(id); }
+
+function vlAbrir(modo){
+  vlDetenerVoz();
+  vlItems = [];
+  vlRegistrando = false;
+  vlEl('vlTexto').value = '';
+  vlEl('vlInterim').textContent = '';
+  vlEl('vlTotalAnotado').value = '';
+  vlEl('vlFecha').value = ventaFilterDateKey() || dateKeyOffset(0);
+  const inv = currentModo === 'invitado';
+  vlEl('vlHint').innerHTML = inv
+    ? 'Di o escribe cada precio: <b>50</b> · <b>100 qr</b> · <b>20 luz</b> · <b>40 qr luz</b> · <b>borra</b><br><small>Solo el número = Manuales en efectivo · <b>qr</b> = pago QR · <b>luz</b> = Eléctricas</small>'
+    : 'Di o escribe cada precio: <b>50</b> · <b>100 qr</b> · <b>borra</b><br><small>Solo el número = efectivo · <b>qr</b> = pago QR · todo se registra en ' + (currentModo === 'electrico' ? 'Eléctricas' : 'Manuales') + '</small>';
+  vlEl('vlStep1').style.display = '';
+  vlEl('vlStep2').style.display = 'none';
+  vlActualizarEntendi();
+  vlRefrescarBtnMic();
+  openModal('modalVentasLote');
+  if(modo === 'voz') vlIniciarVoz();
+  else setTimeout(()=>{ try{ vlEl('vlTexto').focus(); }catch(e){} }, 60);
+}
+
+// ---------- Texto en vivo ("Entendí: ...") ----------
+function vlActualizarEntendi(){
+  const r = vlParse(vlEl('vlTexto').value);
+  const box = vlEl('vlEntendi');
+  if(!r.items.length && !r.ignorados.length){
+    box.innerHTML = '<span class="hint">Aquí verás lo que se entendió.</span>';
+    return;
+  }
+  const inv = currentModo === 'invitado';
+  const total = r.items.reduce((s, it) => s + it.precio, 0);
+  let html = r.items.map(it =>
+    '<span class="vl-chip' + (it.qr ? ' vl-chip-qr' : '') + (it.electrica && inv ? ' vl-chip-luz' : '') + '">' +
+      escapeHtml(String(it.precio)) + (it.qr ? ' 📱' : '') + (it.electrica && inv ? ' ⚡' : '') + '</span>').join('');
+  html += '<div class="hint" style="width:100%; margin-top:4px;">' + r.items.length + ' venta(s) · Total ' + fmtMoney(total) +
+    (r.ignorados.length ? ' · <span style="color:var(--warning,#d97706);">no entendí: ' + escapeHtml(r.ignorados.slice(0, 8).join(' ')) + '</span>' : '') + '</div>';
+  box.innerHTML = html;
+}
+
+// ---------- Dictado en vivo (Web Speech API) ----------
+function vlRefrescarBtnMic(){
+  const b = vlEl('vlMic');
+  if(!b) return;
+  const on = !!vlQuiereEscuchar;
+  b.classList.toggle('vl-mic-on', on);
+  b.textContent = on ? '⏹️ Detener dictado' : '🎙️ Dictar';
+}
+function vlAgregarTexto(txt){
+  const ta = vlEl('vlTexto');
+  const t = String(txt || '').trim();
+  if(!t) return;
+  ta.value = (ta.value.trim() ? ta.value.trim() + ' ' : '') + t;
+  ta.scrollTop = ta.scrollHeight;
+  vlActualizarEntendi();
+}
+function vlIniciarVoz(){
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if(!SR){
+    toast('Este navegador no tiene dictado en vivo. Usa el micrófono del teclado en el cuadro de texto.', 'error');
+    return;
+  }
+  vlQuiereEscuchar = true;
+  vlRefrescarBtnMic();
+  if(vlRec) return;
+  const rec = new SR();
+  rec.lang = vlLang;
+  rec.continuous = true;
+  rec.interimResults = true;
+  rec.maxAlternatives = 1;
+  rec.onresult = (ev)=>{
+    let interim = '';
+    for(let i = ev.resultIndex; i < ev.results.length; i++){
+      const r = ev.results[i];
+      if(r.isFinal) vlAgregarTexto(r[0].transcript);
+      else interim += r[0].transcript;
+    }
+    vlEl('vlInterim').textContent = interim ? '… ' + interim : '';
+  };
+  rec.onerror = (e)=>{
+    if(e.error === 'not-allowed' || e.error === 'service-not-allowed'){
+      vlQuiereEscuchar = false;
+      toast('Sin permiso de micrófono. Actívalo en el navegador y vuelve a intentar.', 'error');
+    }else if(e.error === 'language-not-supported' && vlLang !== 'es-419'){
+      vlLang = 'es-419';
+    }else if(e.error === 'network'){
+      vlQuiereEscuchar = false;
+      toast('El dictado necesita internet.', 'error');
+    }
+  };
+  rec.onend = ()=>{
+    vlRec = null;
+    vlEl('vlInterim').textContent = '';
+    // Chrome corta el dictado tras unos segundos de silencio: se reanuda solo.
+    if(vlQuiereEscuchar && vlEl('modalVentasLote').classList.contains('open')){
+      setTimeout(()=>{ if(vlQuiereEscuchar && !vlRec) vlIniciarVoz(); }, 250);
+    }else{
+      vlQuiereEscuchar = false;
+    }
+    vlRefrescarBtnMic();
+  };
+  vlRec = rec;
+  try{ rec.start(); }catch(e){ vlRec = null; vlQuiereEscuchar = false; vlRefrescarBtnMic(); }
+}
+function vlDetenerVoz(){
+  vlQuiereEscuchar = false;
+  if(vlRec){ try{ vlRec.stop(); }catch(e){} }
+  const i = vlEl('vlInterim'); if(i) i.textContent = '';
+  vlRefrescarBtnMic();
+}
+
+// ---------- Paso 2: ventana de revisión (igual a la de la factura Truper) ----------
+function vlIrARevisar(){
+  const r = vlParse(vlEl('vlTexto').value);
+  if(!r.items.length){ toast('No hay precios para revisar. Di o escribe al menos uno.', 'error'); return; }
+  const inv = currentModo === 'invitado';
+  vlItems = r.items.map(it => ({
+    id: 'vl' + (++vlSeq), precio: it.precio, qr: it.qr, electrica: inv ? it.electrica : false,
+    dudoso: false, activo: true, editando: false, nuevo: false
+  }));
+  vlMostrarPaso2();
+}
+function vlMostrarPaso2(){
+  vlDetenerVoz();
+  vlEl('vlStep1').style.display = 'none';
+  vlEl('vlStep2').style.display = '';
+  vlRender();
+}
+function vlVolver(){
+  vlEl('vlStep2').style.display = 'none';
+  vlEl('vlStep1').style.display = '';
+  vlActualizarEntendi();
+}
+function vlRenderResumen(){
+  const act = vlItems.filter(it => it.activo);
+  const suma = a => a.reduce((s, it) => s + (Number(it.precio) || 0), 0);
+  const total = suma(act), qr = suma(act.filter(it => it.qr)), ef = total - qr;
+  let txt = act.length + ' venta(s) · Total ' + fmtMoney(total) + ' · 💵 ' + fmtMoney(ef) + ' · 📱 QR ' + fmtMoney(qr);
+  vlEl('vlResumen').textContent = txt;
+  const anot = parseFloat(vlEl('vlTotalAnotado').value);
+  const cmp = vlEl('vlComparacion');
+  if(anot > 0){
+    const d1 = Math.round((total - anot) * 100) / 100, d2 = Math.round((qr - anot) * 100) / 100;
+    const f = d => d === 0 ? '✔ coincide' : ('dif. ' + (d > 0 ? '+' : '') + d);
+    const ok = d1 === 0 || d2 === 0;
+    cmp.innerHTML = 'Comparado con tu total anotado (' + fmtMoney(anot) + '): total general ' + f(d1) + ' · solo QR ' + f(d2);
+    cmp.className = 'hint vl-cmp ' + (ok ? 'vl-cmp-ok' : 'vl-cmp-mal');
+    cmp.style.display = '';
+  }else{
+    cmp.style.display = 'none';
+  }
+  const inv = currentModo === 'invitado';
+  const luzIgnorada = !inv && vlParse(vlEl('vlTexto').value).items.some(it => it.electrica);
+  vlEl('vlAvisoModo').style.display = luzIgnorada ? '' : 'none';
+}
+function vlRender(){
+  const inv = currentModo === 'invitado';
+  const thr = document.querySelector('#vlTable thead tr');
+  thr.innerHTML = '<th>#</th><th>Precio</th><th>Pago</th>' + (inv ? '<th>Tipo</th>' : '') + '<th>Acción</th>';
+  const NC = inv ? 5 : 4;
+  const tbody = document.querySelector('#vlTable tbody');
+  vlRenderResumen();
+  const act = vlItems.filter(it => it.activo);
+  if(!act.length){
+    tbody.innerHTML = '<tr class="empty-row"><td colspan="' + NC + '">No quedan ventas en la lista.</td></tr>';
+    return;
+  }
+  const wrap = document.querySelector('#vlTable').parentElement; if(wrap) wrap.scrollLeft = 0;
+  tbody.innerHTML = act.map((it, i) => {
+    const cls = it.dudoso ? 'vl-dudoso' : '';
+    if(it.editando){
+      return `
+    <tr class="${cls}" data-vl-id="${it.id}">
+      <td colspan="${NC}">
+        <div class="vl-edit">
+          <strong>${i + 1}.</strong>
+          <input type="number" class="input" data-edit="precio" min="0" step="0.01" inputmode="decimal" placeholder="Precio" value="${it.precio ? it.precio : ''}" style="width:96px;">
+          <select class="input" data-edit="pago"><option value="efectivo"${it.qr ? '' : ' selected'}>💵 Efectivo</option><option value="qr"${it.qr ? ' selected' : ''}>📱 QR</option></select>
+          ${inv ? `<select class="input" data-edit="tipo"><option value="manual"${it.electrica ? '' : ' selected'}>🛠️ Manual</option><option value="electrico"${it.electrica ? ' selected' : ''}>⚡ Eléctrica</option></select>` : ''}
+          <button type="button" class="btn btn-success btn-sm" data-vl-save="${it.id}">💾 Guardar</button>
+          <button type="button" class="btn btn-secondary btn-sm" data-vl-cancel="${it.id}">✖</button>
+        </div>
+      </td>
+    </tr>`;
+    }
+    return `
+    <tr class="${cls}" data-vl-id="${it.id}">
+      <td>${i + 1}</td>
+      <td style="font-weight:700; font-size:15px;">${fmtMoney(it.precio)}${it.dudoso ? '<small style="display:block; font-weight:600; color:#d97706;">⚠️ revisar este número</small>' : ''}</td>
+      <td>${it.qr ? '<span class="vl-badge vl-badge-qr">📱 QR</span>' : '<span class="vl-badge">💵 Efectivo</span>'}</td>
+      ${inv ? `<td>${it.electrica ? '<span class="vl-badge vl-badge-luz">⚡ Eléctrica</span>' : '<span class="vl-badge">🛠️ Manual</span>'}</td>` : ''}
+      <td style="white-space:nowrap;">
+        <button type="button" class="btn btn-secondary btn-sm" data-vl-edit="${it.id}" title="Modificar">✏️<span class="vl-bt"> Modificar</span></button>
+        <span class="ocr-del-btn" data-vl-del="${it.id}" title="Quitar de la lista">🗑️</span>
+      </td>
+    </tr>`;
+  }).join('');
+}
+function vlBindTabla(){
+  const tbody = document.querySelector('#vlTable tbody');
+  if(!tbody || tbody.dataset.bound === '1') return;
+  tbody.dataset.bound = '1';
+  const find = id => vlItems.find(it => it.id === id);
+  const guardar = (btn)=>{
+    const it = find(btn.dataset.vlSave);
+    const row = btn.closest('tr');
+    if(!it || !row) return;
+    const val = f => (row.querySelector('[data-edit="' + f + '"]') || {}).value || '';
+    const precio = parseFloat(val('precio'));
+    if(!(precio > 0)){ toast('Escribe un precio mayor a 0', 'error'); return; }
+    it.precio = precio;
+    it.qr = val('pago') === 'qr';
+    if(currentModo === 'invitado') it.electrica = val('tipo') === 'electrico';
+    it.dudoso = false; it.editando = false; it.nuevo = false;
+    vlRender();
+  };
+  tbody.addEventListener('click', (e)=>{
+    const bEdit = e.target.closest('[data-vl-edit]');
+    const bSave = e.target.closest('[data-vl-save]');
+    const bCancel = e.target.closest('[data-vl-cancel]');
+    const bDel = e.target.closest('[data-vl-del]');
+    if(bEdit){ const it = find(bEdit.dataset.vlEdit); if(it){ it.editando = true; vlRender(); } }
+    else if(bCancel){
+      const it = find(bCancel.dataset.vlCancel);
+      if(it){ if(it.nuevo) it.activo = false; else it.editando = false; vlRender(); }
+    }
+    else if(bSave) guardar(bSave);
+    else if(bDel){ const it = find(bDel.dataset.vlDel); if(it){ it.activo = false; vlRender(); } }
+  });
+  tbody.addEventListener('keydown', (e)=>{
+    if(e.key !== 'Enter') return;
+    const row = e.target.closest('tr');
+    const b = row && row.querySelector('[data-vl-save]');
+    if(b){ e.preventDefault(); guardar(b); }
+  });
+}
+function vlAgregarFila(){
+  vlItems.push({ id: 'vl' + (++vlSeq), precio: 0, qr: false, electrica: false, dudoso: false, activo: true, editando: true, nuevo: true });
+  vlRender();
+  setTimeout(()=>{ const all = document.querySelectorAll('#vlTable [data-edit="precio"]'); if(all.length) all[all.length - 1].focus(); }, 30);
+}
+
+// ---------- Registrar (recién aquí se guardan las ventas) ----------
+async function vlRegistrar(){
+  if(vlRegistrando) return;
+  if(vlItems.some(it => it.activo && it.editando)){
+    toast('Guarda o cancela la fila que estás editando', 'error');
+    return;
+  }
+  const lista = vlItems.filter(it => it.activo && it.precio > 0);
+  if(!lista.length){ toast('No hay ventas para registrar', 'error'); return; }
+  vlRegistrando = true;
+  const btn = vlEl('btnVlRegistrar');
+  const txtBtn = btn.textContent;
+  btn.disabled = true;
+  const inv = currentModo === 'invitado';
+  const persona = rapidoQrPersona();
+  const diaKey = /^\d{4}-\d{2}-\d{2}$/.test(vlEl('vlFecha').value) ? vlEl('vlFecha').value : (ventaFilterDateKey() || dateKeyOffset(0));
+  const base = new Date(stampForDay(diaKey)).getTime();
+  let total = 0, hechas = 0;
+  try{
+    for(let i = 0; i < lista.length; i++){
+      const it = lista[i];
+      btn.textContent = 'Registrando ' + (i + 1) + '/' + lista.length + '...';
+      saveVenta({
+        codigo: 'OTRO', nombre: 'producto', cantidad: 1, total: it.precio,
+        metodoPago: it.qr ? 'qr' : 'efectivo',
+        modoDestino: (inv && it.electrica) ? 'electrico' : 'manual',
+        qrPersona: it.qr ? persona : '', efectivoMonto: 0, qrMonto: 0,
+        fecha: new Date(base + i * 1000).toISOString()
+      });
+      total += it.precio; hechas++;
+      if(i % 4 === 3) await new Promise(r => setTimeout(r, 0)); // deja respirar a la pantalla
+    }
+  }catch(e){
+    toast('Se registraron ' + hechas + ' de ' + lista.length + '. Error: ' + (e && e.message ? e.message : e), 'error');
+  }
+  vlRegistrando = false;
+  btn.disabled = false;
+  btn.textContent = txtBtn;
+  try{ playCashRegisterSound(); }catch(e){}
+  renderVentas();
+  if(typeof renderFinanzas === 'function') renderFinanzas();
+  closeModalById('modalVentasLote');
+  toast('✔ ' + hechas + ' venta(s) registradas · ' + fmtMoney(total), 'success');
+}
+
+function vlInit(){
+  const modal = vlEl('modalVentasLote');
+  if(!modal) return;
+  vlEl('btnVentasVoz').addEventListener('click', ()=> vlAbrir('voz'));
+  vlEl('vlMic').addEventListener('click', ()=>{ if(vlQuiereEscuchar) vlDetenerVoz(); else vlIniciarVoz(); });
+  vlEl('vlTexto').addEventListener('input', vlActualizarEntendi);
+  vlEl('btnVlRevisar').addEventListener('click', vlIrARevisar);
+  vlEl('btnVlCancelar').addEventListener('click', ()=> closeModalById('modalVentasLote'));
+  vlEl('btnVlVolver').addEventListener('click', vlVolver);
+  vlEl('btnVlAgregar').addEventListener('click', vlAgregarFila);
+  vlEl('btnVlRegistrar').addEventListener('click', vlRegistrar);
+  vlEl('vlTotalAnotado').addEventListener('input', vlRenderResumen);
+  vlBindTabla();
+  // Si la ventana se cierra por cualquier vía (X, atrás, fondo), apaga el micrófono.
+  new MutationObserver(()=>{ if(!modal.classList.contains('open')) vlDetenerVoz(); })
+    .observe(modal, { attributes: true, attributeFilter: ['class'] });
 }
 
 // Pago mixto (QR + efectivo): si no hay nada escrito aún, deja por defecto
@@ -14547,6 +14973,7 @@ function setupEventListeners(){
     openVentaModalOtro();
   });
   document.getElementById('btnRegistroRapido').addEventListener('click', openRegistroRapido);
+  vlInit(); // registro por voz / foto
   document.querySelectorAll('[data-rr-key]').forEach(b=>{
     b.addEventListener('click', ()=> rapidoKey(b.dataset.rrKey));
   });

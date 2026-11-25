@@ -2489,6 +2489,89 @@ const comprasStoreCache = {}; // copia de la lista mientras se actualiza
 let fbComprasUnsub = null;
 let sfForceComprasBackfill = false; // true = "Recibir y mandar" pidió respaldar YA
 
+// Ingresos que existen SOLO en este dispositivo (anotados como pendientes pero
+// que Firebase todavía no confirmó). Los demás dispositivos NO los ven hasta que suban.
+let comprasSinSubirSet = new Set();
+
+// Convierte un snapshot de la colección de ingresos en la lista de la pantalla.
+function aplicarSnapshotCompras(snap, modo){
+  const lista = [];
+  const idsNube = new Set();
+  snap.docs.forEach(d => {
+    const data = d.data();
+    if(data && data.id){ lista.push(data); idsNube.add(String(data.id)); }
+  });
+  // Ingresos aún sin confirmar por Firebase: se siguen mostrando en ESTE dispositivo
+  // (nunca desaparecen), marcados como "sin subir".
+  const pend = comprasPendLeer(modo);
+  const sinSubir = new Set();
+  if(pend.length){
+    if(!snap.metadata.fromCache){
+      const yaEstan = pend.filter(c => c && idsNube.has(String(c.id))).map(c => c.id);
+      if(yaEstan.length) comprasPendQuitar(yaEstan, modo);
+    }
+    pend.forEach(c => {
+      if(c && c.id && !idsNube.has(String(c.id))){ lista.push(c); sinSubir.add(String(c.id)); }
+    });
+  }
+  comprasSinSubirSet = sinSubir;
+  lista.sort((a,b)=> new Date(b.fecha) - new Date(a.fecha)); // la fecha más nueva arriba
+  db.compras = lista;
+  aplicarPreciosDeUltimosIngresos(); // los precios del producto = los del último ingreso
+  rerenderCurrentView();
+}
+
+// Botón "Actualizar ingresos": lee la colección DIRECTO del servidor (sin usar la
+// copia guardada en el dispositivo) y dice cuántos ingresos hay en Firebase y si
+// alguno quedó solo en este dispositivo.
+async function refrescarIngresosDesdeNube(){
+  const modo = currentModo;
+  const col = fbComprasCol(modo);
+  if(!col){
+    toast('Este dispositivo no está conectado a Firebase. Revisa el interruptor "Conectar a Firebase" y el internet.', 'error');
+    return;
+  }
+  const btn = document.getElementById('btnActualizarIngresos');
+  if(btn) btn.disabled = true;
+  try{
+    const snap = await withTimeout(col.get({ source: 'server' }), 20000);
+    if(!snap){ toast('Firebase no respondió a tiempo. Revisa el internet y vuelve a intentar.', 'error'); return; }
+    if(modo !== currentModo) return;
+    aplicarSnapshotCompras(snap, modo);
+    const sin = comprasSinSubirSet.size;
+    if(!sin){
+      toast('Ingresos al día: ' + snap.size + ' en Firebase.', 'success');
+    }else{
+      toast('Firebase tiene ' + snap.size + ' ingresos, pero ' + sin + ' están SOLO en este dispositivo (sin subir).', 'warning');
+      if(ingresosActivos() && confirm('Hay ' + sin + ' ingreso(s) que solo existen en este dispositivo y los demás NO ven.\n\n¿Subirlos a Firebase ahora?')){
+        const pend = comprasPendLeer(modo).filter(c => c && c.id && comprasSinSubirSet.has(String(c.id)));
+        const ok = await syncCompraDocs(pend, modo);
+        if(ok) toast(pend.length + ' ingreso(s) subidos a Firebase', 'success');
+      }
+    }
+  }catch(e){
+    toast('No se pudo leer Firebase (' + ((e && e.code) || 'error') + ')', 'error');
+  }finally{
+    if(btn) btn.disabled = false;
+  }
+}
+document.addEventListener('click', ev => {
+  if(ev.target && ev.target.closest && ev.target.closest('#btnActualizarIngresos')) refrescarIngresosDesdeNube();
+});
+// Al volver a la app después de un rato (o cuando regresa el internet) se vuelve a
+// abrir la escucha de ingresos: así un celular que estuvo dormido no se queda con
+// la lista vieja.
+let comprasOcultoDesde = 0;
+document.addEventListener('visibilitychange', ()=>{
+  if(document.hidden){ comprasOcultoDesde = Date.now(); return; }
+  if(comprasOcultoDesde && Date.now() - comprasOcultoDesde > 120000 && currentRole !== 'guest' && fbReady){
+    try{ startComprasListener(currentModo); }catch(e){ /* ignorar */ }
+  }
+});
+window.addEventListener('online', ()=>{
+  if(currentRole !== 'guest' && fbReady){ try{ startComprasListener(currentModo); }catch(e){ /* ignorar */ } }
+});
+
 function startComprasListener(modo){
   const col = fbComprasCol(modo);
   if(!col) return;
@@ -2505,29 +2588,15 @@ function startComprasListener(modo){
   // escritura en Firebase).
   fbComprasUnsub = col.onSnapshot(snap => {
     if(tokenListener !== modeToken || currentModo !== modoListener) return; // snapshot de otro modo: se ignora
-    // RÁPIDO: ya NO se espera al servidor; la copia que Firestore guarda en este
-    // dispositivo se muestra al instante y el servidor la corrige apenas llega.
-    const lista = [];
-    const idsNube = new Set();
-    snap.docs.forEach(d => {
-      const data = d.data();
-      if(data && data.id){ lista.push(data); idsNube.add(String(data.id)); }
-    });
-    // Ingresos aún sin confirmar por Firebase: se siguen mostrando (nunca desaparecen).
-    const pend = comprasPendLeer(modoListener);
-    if(pend.length){
-      if(!snap.metadata.fromCache){
-        const yaEstan = pend.filter(c => c && idsNube.has(String(c.id))).map(c => c.id);
-        if(yaEstan.length) comprasPendQuitar(yaEstan, modoListener);
-      }
-      pend.forEach(c => { if(c && c.id && !idsNube.has(String(c.id))) lista.push(c); });
-    }
-    lista.sort((a,b)=> new Date(b.fecha) - new Date(a.fecha)); // la fecha más nueva arriba
-    db.compras = lista;
-    aplicarPreciosDeUltimosIngresos(); // los precios del producto = los del último ingreso
-    rerenderCurrentView();
+    aplicarSnapshotCompras(snap, modoListener);
   }, err => {
     console.error('Error escuchando los ingresos compartidos', err);
+    // Si el listener se cae (red, cuota, etc.) se reintenta solo en unos segundos.
+    setTimeout(()=>{
+      if(tokenListener === modeToken && currentModo === modoListener && currentRole !== 'guest'){
+        try{ startComprasListener(modoListener); }catch(e){ /* ignorar */ }
+      }
+    }, 8000);
   });
   reintentarComprasPendientes(modoListener); // reenvía lo que quedó pendiente antes de recargar
 }
@@ -6971,7 +7040,8 @@ function renderCompras(){
   }).join('');
 
   const totalGral = entries.reduce((s,e)=> s + e.total, 0);
-  summary.textContent = `${entries.length} producto(s) · ${filtradas.length} ingreso(s) ${comprasFilterLabel()} · ${fmtMoney(totalGral)} invertido`;
+  summary.textContent = `${entries.length} producto(s) · ${filtradas.length} ingreso(s) ${comprasFilterLabel()} · ${fmtMoney(totalGral)} invertido` +
+    (comprasSinSubirSet.size ? ` · ⚠️ ${comprasSinSubirSet.size} ingreso(s) SIN SUBIR (solo en este dispositivo)` : '');
   maybeShowCompraReminder();
 }
 
@@ -7028,7 +7098,7 @@ function openCompraHistorial(codigo){
           : `<td>${fmtMoney(c.precioUnitario)}</td>`;
         return `
       <tr>
-        <td>${fmtCompraFecha(c.fecha)}</td>
+        <td>${fmtCompraFecha(c.fecha)}${comprasSinSubirSet.has(String(c.id)) ? ' <span class="badge badge-danger-soft" title="Solo existe en este dispositivo: los demás no lo ven">⏳ sin subir</span>' : ''}</td>
         <td>${escapeHtml(c.proveedor || '-')}</td>
         ${precios}
         <td>${c.cantidad}</td>

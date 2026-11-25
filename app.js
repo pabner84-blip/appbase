@@ -592,6 +592,7 @@ function esMaestro(){
 function setEsMaestro(on){
   maestroSesion = !!on;
   if(on) suichMarcarActividad(); // empieza a contar los 10 minutos sin uso
+  if(on){ try{ aplicarPreciosDeUltimosIngresos(); }catch(e){} }
   // Al apagar el modo maestro, la próxima conexión vuelve a alinear el catálogo.
   if(!on){ try{ localStorage.removeItem(ALIGN_KEY); }catch(e){} }
   applyMasterUI();
@@ -1413,6 +1414,7 @@ function manualSync(){
 }
 
 function rerenderCurrentView(){
+  limpiarCaracteristicasManuales();
   const activeView = document.querySelector('.view.active');
   if(!activeView) return;
   const name = activeView.id.replace('view-', '');
@@ -1787,13 +1789,14 @@ function productoDocData(p){
     precioVenta: Number(p.precioVenta) || 0,
     stock: Number(p.stock) || 0,
     stockMin: Number(p.stockMin) || 0,
-    caracteristicas: String(p.caracteristicas || ''),
     _updatedAt: typeof p._updatedAt === 'number' ? p._updatedAt : Date.now()
   };
+  // Características: SOLO Eléctricas. Manuales ya no las usa ni las sube.
+  if(esProductoElectrico(p)) d.caracteristicas = String(p.caracteristicas || '');
   // Fecha del primer registro (para el distintivo NUEVO): solo si el producto la tiene.
   if(p.fechaRegistro) d.fechaRegistro = p.fechaRegistro;
   // Marca de la última edición MANUAL de las características (si existe).
-  if(typeof p._carAt === 'number' && p._carAt > 0) d._carAt = p._carAt;
+  if(esProductoElectrico(p) && typeof p._carAt === 'number' && p._carAt > 0) d._carAt = p._carAt;
   // Precio distribuidor y descuento (Manuales): solo si el producto los tiene.
   if(p.precioDistribuidor !== undefined && p.precioDistribuidor !== null && !isNaN(Number(p.precioDistribuidor))) d.precioDistribuidor = Number(p.precioDistribuidor);
   if(p.descuento !== undefined && p.descuento !== null && !isNaN(Number(p.descuento))) d.descuento = Number(p.descuento);
@@ -2521,6 +2524,7 @@ function startComprasListener(modo){
     }
     lista.sort((a,b)=> new Date(b.fecha) - new Date(a.fecha)); // la fecha más nueva arriba
     db.compras = lista;
+    aplicarPreciosDeUltimosIngresos(); // los precios del producto = los del último ingreso
     rerenderCurrentView();
   }, err => {
     console.error('Error escuchando los ingresos compartidos', err);
@@ -2875,7 +2879,55 @@ async function backfillProductos(modo){
 // locales que la documentación individual todavía no tiene (los documentos de
 // producto se crearon antes de que existiera ese campo). Así el celular que
 // las recibe por listener vuelve a ver "Características" sin reimportar nada.
+// Manuales: borra "caracteristicas" (y su marca _carAt) de TODOS los documentos de
+// producto de la nube. Se hace una vez por dispositivo; no cambia nada más del producto.
+async function purgarCaracteristicasNube(modo){
+  const col = fbProductsCol(modo);
+  if(!col) return;
+  const markKey = 'fs_caract_purge_v1_' + modo;
+  try{ if(await kvGet(markKey) === '1') return; }catch(e){}
+  try{
+    const snap = await col.get();
+    const docs = snap.docs.filter(d => {
+      const x = d.data() || {};
+      return x.caracteristicas !== undefined || x._carAt !== undefined;
+    });
+    if(docs.length){
+      const fs = col.firestore;
+      const borrar = firebase.firestore.FieldValue.delete();
+      for(let i = 0; i < docs.length; i += 450){
+        const batch = fs.batch();
+        docs.slice(i, i + 450).forEach(d => batch.update(d.ref, { caracteristicas: borrar, _carAt: borrar }));
+        await batch.commit();
+      }
+    }
+    try{ await kvSet(markKey, '1'); }catch(e){}
+  }catch(e){ if(e && e.code !== 'permission-denied') console.error('Error borrando características de la nube', e); }
+}
+
+// Quita las características de los productos de Manuales que haya en memoria
+// (también en el modo invitado, solo los productos de origen Manuales).
+function limpiarCaracteristicasManuales(){
+  let conTexto = 0, cambios = 0;
+  try{
+    if(!db || !Array.isArray(db.productos)) return 0;
+    db.productos.forEach(p => {
+      if(!p || esProductoElectrico(p)) return;
+      if('caracteristicas' in p || '_carAt' in p){
+        if(String(p.caracteristicas || '').length > 0) conTexto++;
+        delete p.caracteristicas;
+        delete p._carAt;
+        cambios++;
+      }
+    });
+    if(cambios && currentRole !== 'guest') persistLocalCache();
+    if(conTexto && currentRole !== 'guest' && currentModo === 'manual') saveDB(); // limpia también el documento grande de la nube
+  }catch(e){ console.error('Error limpiando características de Manuales', e); }
+  return cambios;
+}
+
 async function syncCaracteristicasCloud(modo){
+  if((modo || currentModo) !== 'electrico'){ return purgarCaracteristicasNube(modo || currentModo); }
   const col = fbProductsCol(modo);
   if(!col) return;
   const markKey = 'fs_caract_sync_' + modo;
@@ -3043,6 +3095,7 @@ function startStockListener(modo){
         if(!soloStock && remoteTs >= (p._updatedAt || 0)){
           ['codigo','nombre','marca','categoria','precioCompra','precioMarca','precioVenta','precioDistribuidor','descuento','stockMin','caracteristicas'].forEach(f => {
             if(data[f] === undefined) return;
+            if(f === 'caracteristicas' && modo !== 'electrico') return; // Manuales: sin características
             let val = data[f];
             // Características anteriores a la última eliminación: no vuelven.
             if(f === 'caracteristicas' && caracteristicasObsoletas(store, data._carAt)) val = '';
@@ -3187,7 +3240,7 @@ async function assimilateCatalogFromCloud(modo, force){
         // las de la nube sin pisar las que ya estén.
         const localCar = String(existing.caracteristicas || '');
         const cloudCar = String(data.caracteristicas || '');
-        if(cloudCar && !localCar && !caracteristicasObsoletas(store, data._carAt)){
+        if(modo === 'electrico' && cloudCar && !localCar && !caracteristicasObsoletas(store, data._carAt)){
           existing.caracteristicas = cloudCar;
           if(typeof data._carAt === 'number') existing._carAt = data._carAt;
           refilled = true;
@@ -3386,6 +3439,109 @@ function aplicarPreciosProductoForm(p, data){
   p.precioCompra = r.compra;
   p.precioMarca = 0;
   p.precioVenta = parseFloat(data.precioVenta) || 0;
+}
+
+/* ---------- PRECIOS = ÚLTIMO INGRESO ----------
+   Los precios del producto (distribuidor, descuento, compra y venta) son SIEMPRE
+   los del ÚLTIMO ingreso registrado (el de fecha más reciente). Se recalculan
+   cada vez que cambia la lista de ingresos (llegan de la nube, se registra,
+   se borra o se importa uno). Si un producto no tiene ingresos, conserva los
+   precios que ya tenía. Eléctricas: precio de compra y de venta. */
+const PRECIOS_PEND_KEY = 'fs_precios_por_subir_';
+function preciosPendLeer(modo){
+  try{ const a = JSON.parse(localStorage.getItem(PRECIOS_PEND_KEY + (modo || currentModo)) || '[]'); return Array.isArray(a) ? a : []; }
+  catch(e){ return []; }
+}
+function preciosPendGuardar(modo, arr){
+  try{
+    if(arr.length) localStorage.setItem(PRECIOS_PEND_KEY + (modo || currentModo), JSON.stringify(arr));
+    else localStorage.removeItem(PRECIOS_PEND_KEY + (modo || currentModo));
+  }catch(e){ /* ignorar */ }
+}
+// Sube a la nube los productos cuyo precio cambió por un ingreso (solo con el suich encendido),
+// para que los demás dispositivos y los invitados vean los precios más recientes.
+function subirPreciosPendientes(){
+  try{
+    if(!db || currentRole === 'guest' || !esMaestro()) return;
+    if(!(firebaseToggleOn() && fbConfigOk(currentModo))) return;
+    const ids = preciosPendLeer(currentModo);
+    if(!ids.length) return;
+    const set = new Set(ids);
+    const lista = (db.productos || []).filter(p => p && set.has(String(p.id)));
+    preciosPendGuardar(currentModo, []);
+    if(lista.length) syncProductoDocs(lista, currentModo);
+  }catch(e){ console.error('Error subiendo precios de ingresos', e); }
+}
+function compraTiempo(c){
+  const t = new Date(c && c.fecha).getTime();
+  return isNaN(t) ? 0 : t;
+}
+function compraEsMasNueva(a, b){
+  if(!b) return true;
+  const ta = compraTiempo(a), tb = compraTiempo(b);
+  if(ta !== tb) return ta > tb;
+  const sa = Number(a._ts) || 0, sb = Number(b._ts) || 0;
+  if(sa !== sb) return sa > sb;
+  return String(a.id || '') > String(b.id || '');
+}
+function numValido(v){
+  return v !== undefined && v !== null && String(v).trim() !== '' && !isNaN(Number(v));
+}
+// Copia al producto los precios de ese ingreso. Devuelve true si algo cambió.
+function aplicarPreciosDeIngresoAProducto(p, c){
+  let cambio = false;
+  const poner = (campo, val) => {
+    if(p[campo] === undefined || Number(p[campo]) !== val){ p[campo] = val; cambio = true; }
+  };
+  if(!numValido(c.precioUnitario)) return false;
+  const compra = Number(c.precioUnitario);
+  if(esProductoElectrico(p)){
+    poner('precioCompra', compra);
+  }else{
+    let dist = numValido(c.precioDistribuidor) ? Number(c.precioDistribuidor) : precioDistribuidorDe(p);
+    if(compra > dist) dist = compra;
+    let desc = numValido(c.descuento) ? Number(c.descuento) : (dist > 0 ? r2n((1 - compra / dist) * 100) : 0);
+    poner('precioDistribuidor', dist);
+    poner('descuento', desc);
+    poner('precioCompra', compra);
+    if(Number(p.precioMarca) !== 0){ p.precioMarca = 0; cambio = true; }
+  }
+  if(numValido(c.precioVenta)) poner('precioVenta', Number(c.precioVenta));
+  if(cambio) touchProducto(p);
+  return cambio;
+}
+// Recorre los ingresos y deja a cada producto con los precios de su último ingreso.
+function aplicarPreciosDeUltimosIngresos(){
+  try{
+    if(!db || !Array.isArray(db.productos) || !Array.isArray(db.compras) || !db.compras.length) return [];
+    const porId = new Map(), porCod = new Map();
+    db.productos.forEach(p => {
+      if(!p) return;
+      if(p.id) porId.set(String(p.id), p);
+      const k = normalize(p.codigo);
+      if(k && !porCod.has(k)) porCod.set(k, p);
+    });
+    const ultimo = new Map();
+    db.compras.forEach(c => {
+      if(!c) return;
+      const p = (c.productoId && porId.get(String(c.productoId))) || porCod.get(normalize(c.codigo));
+      if(!p) return;
+      const prev = ultimo.get(p);
+      if(!prev || compraEsMasNueva(c, prev)) ultimo.set(p, c);
+    });
+    const cambiados = [];
+    ultimo.forEach((c, p) => { if(aplicarPreciosDeIngresoAProducto(p, c)) cambiados.push(p); });
+    if(cambiados.length){
+      persistLocalCache();
+      if(currentRole !== 'guest'){
+        const ids = new Set(preciosPendLeer(currentModo));
+        cambiados.forEach(p => { if(p.id) ids.add(String(p.id)); });
+        preciosPendGuardar(currentModo, Array.from(ids));
+      }
+    }
+    subirPreciosPendientes();
+    return cambiados;
+  }catch(e){ console.error('Error aplicando precios del último ingreso', e); return []; }
 }
 
 /* ---------- FECHA Y HORA DE BOLIVIA (UTC-4, sin horario de verano) ----------
@@ -6950,6 +7106,7 @@ function deleteCompra(id, mantenerInventario){
     }
   }
   db.compras = db.compras.filter(c => c.id !== id);
+  aplicarPreciosDeUltimosIngresos(); // si era el último, los precios vuelven al ingreso anterior
   comprasPendQuitar(id);
   marcarBorrado('compras', id); // el borrado viaja a los otros dispositivos
   deleteCompraDocs([id]); // y borra SU documento de la colección en la nube
@@ -7034,6 +7191,7 @@ function borrarComprasDelDiaConStock(ids, quitarStock, etiqueta){
   }
   lista.forEach(c => marcarBorrado('compras', c.id));
   db.compras = db.compras.filter(c => !set.has(c.id));
+  aplicarPreciosDeUltimosIngresos();
   comprasPendQuitar(Array.from(set));
   deleteCompraDocs(lista.map(c => c.id));
   saveDB();
@@ -7352,7 +7510,6 @@ function importComprasCSV(file){
             precioVenta: idx.precioVenta > -1 ? parsePrecio(r[idx.precioVenta]) : 0,
             stock: 0,
             stockMin: 0,
-            caracteristicas: '',
             fechaCreacion: todayISO(),
             fechaRegistro: todayISO(),
             _updatedAt: Date.now()
@@ -7419,6 +7576,7 @@ function importComprasCSV(file){
         }
       }
       db.compras.sort((a,b)=> new Date(b.fecha) - new Date(a.fecha));
+      aplicarPreciosDeUltimosIngresos(); // precios del producto = último ingreso
       syncCompraDocs(nuevasCompras, currentModo); // cada ingreso, a su documento en la nube
       saveDB();
       // Stock en la nube: incremento atómico por producto (no pisa a otros dispositivos).
@@ -8548,11 +8706,11 @@ function handleCompraSubmit(e){
 
   p.stock = (p.stock || 0) + cantidad;
 
-  // Producto que YA existía: el ingreso NO toca su precio distribuidor, descuento
-  // ni precio de compra (los de la pestaña Productos se quedan como están; este
-  // ingreso guarda los suyos en el historial). Solo se actualiza lo demás si
-  // realmente cambió: la marca (solo la PC principal) y el precio de venta.
-  // El producto NUEVO sí nace con los precios del formulario.
+  // Producto que YA existía: la marca (solo la PC principal) y el precio de venta
+  // se actualizan aquí si cambiaron. Los precios distribuidor / descuento / compra /
+  // venta del producto pasan a ser los de ESTE ingreso si es el más reciente
+  // (aplicarPreciosDeUltimosIngresos, más abajo). El producto NUEVO nace con los
+  // precios del formulario.
   let datosCambiaron = false;
   if(!esNuevo){
     if(marca && esMaestro() && marca !== (p.marca || '')){ p.marca = marca; datosCambiaron = true; }
@@ -8584,9 +8742,12 @@ function handleCompraSubmit(e){
   if(p.marca) nuevaCompra.marca = p.marca; // el ingreso guarda la marca del producto
   // Manuales: el ingreso también guarda el precio de venta que tenía el producto
   // en ese momento (ya con el valor del formulario aplicado arriba).
-  if(currentModo === 'manual' && !isNaN(Number(p.precioVenta))) nuevaCompra.precioVenta = Number(p.precioVenta);
+  if(!isNaN(Number(p.precioVenta))) nuevaCompra.precioVenta = Number(p.precioVenta);
   db.compras.unshift(nuevaCompra);
   db.compras.sort((a,b)=> new Date(b.fecha) - new Date(a.fecha));
+  // Los precios del producto = los del ingreso más reciente (este, si es el último por fecha).
+  const preciosCambiados = aplicarPreciosDeUltimosIngresos();
+  if(!esNuevo && preciosCambiados.indexOf(p) > -1) syncProductoDoc(p);
   syncCompraDoc(nuevaCompra, currentModo).then(ok => { // al instante, en SU documento de la nube
     if(ok) toast('✓ Ingreso guardado en Firebase', 'success');
   });
@@ -9310,7 +9471,6 @@ function ocrRegistrarIngresos(activos){
         precioVenta: it.precio,
         stock: it.cantidad,
         stockMin: 0,
-        caracteristicas: '',
         fechaCreacion: todayISO(),
         fechaRegistro: todayISO(),
         _updatedAt: Date.now()
@@ -9339,6 +9499,7 @@ function ocrRegistrarIngresos(activos){
   });
 
   syncCompraDocs(nuevasCompras, currentModo); // ingresos del OCR a su colección en la nube
+  aplicarPreciosDeUltimosIngresos(); // precios del producto = último ingreso
   saveDB();
   renderCompras();
   renderProductos();
@@ -9829,16 +9990,15 @@ function exportProductosExcel(){
   // Eléctricas: conserva su estructura (precio compra / precio marca / precio venta).
   const manual = currentModo !== 'electrico';
   const header = manual
-    ? ['CODIGO','DESCRIPCION','MARCA','PRECIO DISTRIBUIDOR','DESCUENTO (%)','PRECIO DE COMPRA','PRECIO DE VENTA','CODIGO DE BARRAS','CATEGORIA','STOCK','STOCK MIN','CARACTERISTICAS','IMAGEN']
+    ? ['CODIGO','DESCRIPCION','MARCA','PRECIO DISTRIBUIDOR','DESCUENTO (%)','PRECIO DE COMPRA','PRECIO DE VENTA','CODIGO DE BARRAS','CATEGORIA','STOCK','STOCK MIN','IMAGEN']
     : ['CODIGO','CODIGO DE BARRAS','DESCRIPCION','MARCA','CATEGORIA','PRECIO COMPRA','PRECIO MARCA','PRECIO VENTA','STOCK','STOCK MIN','CARACTERISTICAS','IMAGEN'];
   const types = manual
-    ? ['text','text','text','number','number','number','number','text','text','number','number','text','text']
+    ? ['text','text','text','number','number','number','number','text','text','number','number','text']
     : ['text','text','text','text','text','number','number','number','number','number','text','text'];
   const rows = db.productos.map(p => manual ? [
     p.codigo || '', p.nombre, p.marca || '',
     precioDistribuidorDe(p), descuentoDe(p), Number(p.precioCompra) || 0, Number(p.precioVenta) || 0,
     p.codigoBarras || '', p.categoria || '', p.stock, p.stockMin,
-    p.caracteristicas || '',
     getImage(p.id) ? '[foto local]' : ''
   ] : [
     p.codigo || '', p.codigoBarras || '', p.nombre, p.marca || '', p.categoria || '',
@@ -10996,7 +11156,14 @@ function openProductDetails(productId){
   }
   document.getElementById('detStock').textContent = p.stock;
   document.getElementById('detStockMin').textContent = p.stockMin || 0;
-  document.getElementById('detCaracteristicas').value = p.caracteristicas || '';
+  document.getElementById('detCaracteristicas').value = detEsElec ? (p.caracteristicas || '') : '';
+  // Manuales: sin "Características" (ni cuadro de texto ni botón Guardar).
+  const detBloqueCar = document.getElementById('detCaracteristicas').closest('.detail-block');
+  if(detBloqueCar) detBloqueCar.style.display = detEsElec ? '' : 'none';
+  const detBtnGuardarCar = document.getElementById('btnDetSaveCaract');
+  if(detBtnGuardarCar) detBtnGuardarCar.style.display = detEsElec ? '' : 'none';
+  const detTitulo = document.querySelector('#modalProductoDetalle .modal-header h3');
+  if(detTitulo) detTitulo.textContent = detEsElec ? '📋 Características del producto' : '📋 Detalle del producto';
   // Los invitados no tienen acceso a Ingresos, así que se les oculta el botón.
   const detVerIngresos = document.getElementById('btnDetVerIngresos');
   if(detVerIngresos) detVerIngresos.style.display = currentRole === 'guest' ? 'none' : '';
@@ -11033,6 +11200,7 @@ function updateDetImgCounter(){
 function saveDetCaracteristicas(){
   const p = getProductoById(detTargetId);
   if(!p){ toast('No se pudo guardar', 'error'); return; }
+  if(!esProductoElectrico(p)) return; // Manuales ya no tiene características
   p.caracteristicas = document.getElementById('detCaracteristicas').value;
   touchProducto(p);
   p._carAt = Date.now(); // edición explícita: sobrevive a una "Eliminar características" anterior
@@ -11040,73 +11208,6 @@ function saveDetCaracteristicas(){
   syncProductoDoc(p); // mantiene el documento del producto en la nube al día
   renderProductos();
   toast('Características guardadas', 'success');
-}
-
-// Botón "Eliminar características" (Configuración de Manuales). Vacía SOLO el
-// campo `caracteristicas` de los productos de Manuales: en este dispositivo, en el
-// catálogo de la nube y en los documentos por producto. No toca códigos, marcas,
-// descripciones, precios, stock, fotos ni Eléctricas. Es idempotente.
-async function eliminarCaracteristicas(){
-  if(currentRole === 'guest' || currentModo !== 'manual'){
-    toast('Esta opción solo está en la configuración de Manuales', 'error');
-    return;
-  }
-  if(!subidaCatalogoPermitida()){
-    toast('Esta PC todavía no está alineada con la nube. Conecta Firebase, espera a que sincronice y vuelve a intentarlo.', 'warning');
-    return;
-  }
-  const conCar = (db.productos || []).filter(p => p && String(p.caracteristicas || '').length > 0).length;
-  confirmDialog('Eliminar características',
-    '¿Eliminar el contenido de "Características" de TODOS los productos de Manuales?\n\n' +
-    '• En este dispositivo y en la nube (catálogo y documentos por producto).\n' +
-    '• No se tocan códigos, descripciones, marcas, precios, cantidades ni fotos.\n' +
-    '• Eléctricas y otros dueños no se afectan.\n' +
-    '• Productos con características en este dispositivo: ' + conCar + '.\n\n' +
-    'No se puede deshacer.',
-    async ()=>{
-      const modo = 'manual';
-      const ahora = Date.now();
-      let locales = 0;
-      (db.productos || []).forEach(p => {
-        if(p && String(p.caracteristicas || '').length > 0){
-          p.caracteristicas = '';
-          p._updatedAt = ahora; // la copia limpia gana a cualquier copia vieja
-          locales++;
-        }
-      });
-      // La marca viaja con el catálogo: cualquier dispositivo que todavía tenga
-      // características viejas las descarta al recibirla.
-      db.sinCaracteristicasAt = ahora;
-      saveDB();
-      let nube = 0, nubeOk = true, conNube = false;
-      const col = fbProductsCol(modo);
-      if(col){
-        conNube = true;
-        try{
-          const snap = await col.get();
-          const docs = snap.docs.filter(d => String((d.data() || {}).caracteristicas || '').length > 0);
-          const fs = col.firestore;
-          for(let i = 0; i < docs.length; i += 450){
-            const batch = fs.batch();
-            docs.slice(i, i + 450).forEach(d => batch.update(d.ref, { caracteristicas: '', _updatedAt: ahora }));
-            await batch.commit();
-          }
-          nube = docs.length;
-        }catch(e){
-          nubeOk = false;
-          console.error('Error eliminando características en la nube', e);
-        }
-      }
-      try{ renderProductos(); }catch(e){}
-      try{ if(detTargetId) document.getElementById('detCaracteristicas').value = ''; }catch(e){}
-      if(!conNube){
-        toast('Características eliminadas en este dispositivo (' + locales + '). La sincronización está apagada: la nube no se tocó.', 'warning');
-      }else if(!nubeOk){
-        toast('Se limpiaron ' + locales + ' productos aquí, pero la nube falló. Vuelve a pulsar el botón con buena conexión.', 'error');
-      }else{
-        toast('Características eliminadas: ' + locales + ' aquí y ' + nube + ' documentos en la nube.', 'success');
-      }
-    });
 }
 
 function openImageModal(productId){
@@ -11889,7 +11990,8 @@ function importProductsCSV(file){
         precioVenta: headers.findIndex(h => h.includes('PRECIO') && h.includes('VENTA')),
         stock: headers.findIndex(h => h.includes('STOCK') && !h.includes('MIN')),
         stockMin: headers.findIndex(h => h.includes('STOCK') && h.includes('MIN')),
-        caracteristicas: headers.findIndex(h => h.includes('CARACTERISTICA') || h.includes('OBSERVACION') || h.includes('NOTA')),
+        // Manuales ya no tiene características: esa columna se ignora (aunque el archivo la traiga).
+        caracteristicas: currentModo === 'electrico' ? headers.findIndex(h => h.includes('CARACTERISTICA') || h.includes('OBSERVACION') || h.includes('NOTA')) : -1,
         imagen: headers.findIndex(h => h.includes('IMAGEN') || h.includes('FOTO'))
       };
       if(idx.codigo === -1 || idx.nombre === -1){
@@ -15379,8 +15481,6 @@ function setupEventListeners(){
   document.getElementById('btnVaciarCatalogo').addEventListener('click', vaciarCatalogo);
   document.getElementById('btnFactoryReset').addEventListener('click', factoryReset);
   document.getElementById('btnGlobalReset').addEventListener('click', globalReset);
-  const btnEliminarCaract = document.getElementById('btnEliminarCaracteristicas');
-  if(btnEliminarCaract) btnEliminarCaract.addEventListener('click', eliminarCaracteristicas);
 }
 
 /* -------------------------------------------------------------------------

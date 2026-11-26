@@ -4715,7 +4715,7 @@ function vlPalabrasANumeros(toks){
   return out;
 }
 
-const VL_RUIDO = new Set(['y','con','por','en','de','la','el','bs','bolivianos','boliviano','pago','pagos','precio','siguiente','otro','otra','ok','listo','mas','coma','a','al','es','son','venta','ventas','producto']);
+const VL_RUIDO = new Set(['y','con','por','en','de','la','el','bs','bolivianos','boliviano','pago','pagos','precio','siguiente','otro','otra','ok','okey','okay','listo','ya','dale','next','mas','coma','a','al','es','son','venta','ventas','producto']);
 
 // Texto dictado/escrito -> ventas. Cada número empieza una venta nueva; las
 // palabras que le siguen (qr, luz...) se aplican a ESE número.
@@ -4769,6 +4769,45 @@ function vlItemsATexto(items){
 
 let vlItems = [];            // [{id, precio, qr, electrica, dudoso, activo, editando, nuevo}]
 let vlSeq = 0;
+// Modos de uso del dictado (se elige al entrar y se recuerda en este dispositivo):
+//   1 = palabra "ok" · 2 = botón "➕ Siguiente" · 3 = confirmación (cartel + pitido) · 4 = las tres juntas
+const VL_MODO_KEY = 'fs_vl_modo_uso';
+let vlModoUso = (()=>{ try{ const n = Number(localStorage.getItem(VL_MODO_KEY)); return (n >= 1 && n <= 4) ? n : 4; }catch(e){ return 4; } })();
+function vlModoTiene(f){
+  // f: 'ok' | 'siguiente' | 'confirma'
+  if(vlModoUso === 4) return true;
+  return (f === 'ok' && vlModoUso === 1) || (f === 'siguiente' && vlModoUso === 2) || (f === 'confirma' && vlModoUso === 3);
+}
+function vlHintModo(){
+  const ok = '<b>ok</b> entre un monto y otro (“cincuenta <b>ok</b> nueve <b>ok</b>”)';
+  const sig = 'toca <b>➕ Siguiente</b> después de cada monto';
+  const conf = 'cada monto entendido se confirma con un cartel y un pitido (los de 1000 o más se marcan como sospechosos)';
+  const t = { 1: 'Para que dos montos no se junten (50 y 9 → 59), di ' + ok + '.',
+              2: 'Para que dos montos no se junten (50 y 9 → 59), ' + sig + '.',
+              3: 'Si se junta un monto, lo notarás al instante: ' + conf + '.',
+              4: 'Para que dos montos no se junten (50 y 9 → 59), di ' + ok + ' o ' + sig + '. Además, ' + conf + '.' };
+  return '<br><small>💡 ' + t[vlModoUso] + '</small>';
+}
+function vlPintarHint(){
+  const inv = currentModo === 'invitado';
+  vlEl('vlHint').innerHTML = (inv
+    ? 'Di o escribe cada precio: <b>50</b> · <b>100 qr</b> · <b>20 luz</b> · <b>40 qr luz</b> · <b>borra</b><br><small>Solo el número = Manuales en efectivo · <b>qr</b> = pago QR · <b>luz</b> = Eléctricas</small>'
+    : 'Di o escribe cada precio: <b>50</b> · <b>100 qr</b> · <b>borra</b><br><small>Solo el número = efectivo · <b>qr</b> = pago QR · todo se registra en ' + (currentModo === 'electrico' ? 'Eléctricas' : 'Manuales') + '</small>') + vlHintModo();
+}
+function vlAplicarModoUso(){
+  document.querySelectorAll('[data-vl-modo]').forEach(b => b.classList.toggle('activo', Number(b.dataset.vlModo) === vlModoUso));
+  const bs = vlEl('vlSiguiente');
+  if(bs) bs.style.display = vlModoTiene('siguiente') ? '' : 'none';
+  if(!vlModoTiene('confirma')){ const f = vlEl('vlFlash'); if(f) f.style.display = 'none'; }
+  vlPintarHint();
+}
+document.addEventListener('click', ev => {
+  const b = ev.target && ev.target.closest ? ev.target.closest('[data-vl-modo]') : null;
+  if(!b) return;
+  vlModoUso = Number(b.dataset.vlModo) || 4;
+  try{ localStorage.setItem(VL_MODO_KEY, String(vlModoUso)); }catch(e){}
+  vlAplicarModoUso();
+});
 let vlRec = null;            // SpeechRecognition activo
 let vlQuiereEscuchar = false;
 let vlLang = 'es-BO';
@@ -4785,9 +4824,7 @@ function vlAbrir(modo){
   vlEl('vlTotalAnotado').value = '';
   vlEl('vlFecha').value = ventaFilterDateKey() || dateKeyOffset(0);
   const inv = currentModo === 'invitado';
-  vlEl('vlHint').innerHTML = inv
-    ? 'Di o escribe cada precio: <b>50</b> · <b>100 qr</b> · <b>20 luz</b> · <b>40 qr luz</b> · <b>borra</b><br><small>Solo el número = Manuales en efectivo · <b>qr</b> = pago QR · <b>luz</b> = Eléctricas</small>'
-    : 'Di o escribe cada precio: <b>50</b> · <b>100 qr</b> · <b>borra</b><br><small>Solo el número = efectivo · <b>qr</b> = pago QR · todo se registra en ' + (currentModo === 'electrico' ? 'Eléctricas' : 'Manuales') + '</small>';
+  vlAplicarModoUso(); // muestra el modo elegido (hint, botón Siguiente, confirmación)
   vlEl('vlStep1').style.display = '';
   vlEl('vlStep2').style.display = 'none';
   vlActualizarEntendi();
@@ -4827,9 +4864,63 @@ function vlAgregarTexto(txt){
   const ta = vlEl('vlTexto');
   const t = String(txt || '').trim();
   if(!t) return;
+  const antes = vlParse(ta.value).items.length;
   ta.value = (ta.value.trim() ? ta.value.trim() + ' ' : '') + t;
   ta.scrollTop = ta.scrollHeight;
   vlActualizarEntendi();
+  vlConfirmarDictado(antes); // aviso grande + sonido/vibración de lo que se acaba de entender
+}
+
+// "➕ Siguiente": corta la frase actual para que el próximo monto llegue SEPARADO
+// (el reconocedor junta los números dichos seguidos). El dictado se reanuda solo.
+function vlSiguiente(){
+  if(!vlModoTiene('siguiente')) return;
+  if(!vlQuiereEscuchar){ vlIniciarVoz(); return; }
+  if(vlRec){ try{ vlRec.stop(); }catch(e){ /* ignorar */ } }
+}
+
+// Confirmación de cada monto dictado: cartel grande, pitido y vibración.
+// Un monto de 1000 o más se marca como sospechoso (puede ser dos montos juntos).
+let vlAudioCtx = null;
+let vlFlashTimer = null;
+function vlBip(alerta){
+  try{
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if(!AC) return;
+    vlAudioCtx = vlAudioCtx || new AC();
+    if(vlAudioCtx.state === 'suspended') vlAudioCtx.resume();
+    const o = vlAudioCtx.createOscillator(), g = vlAudioCtx.createGain();
+    o.type = 'sine';
+    o.frequency.value = alerta ? 300 : 880;
+    g.gain.value = 0.07;
+    o.connect(g); g.connect(vlAudioCtx.destination);
+    o.start();
+    o.stop(vlAudioCtx.currentTime + (alerta ? 0.28 : 0.08));
+  }catch(e){ /* sin sonido */ }
+}
+function vlConfirmarDictado(cantAntes){
+  if(!vlModoTiene('confirma')) return;
+  const box = vlEl('vlFlash');
+  const items = vlParse(vlEl('vlTexto').value).items;
+  let html = '', alerta = false;
+  if(items.length < cantAntes){
+    html = '↩️ Se quitó la última venta';
+  }else{
+    const nuevos = items.slice(cantAntes);
+    if(!nuevos.length) return;
+    alerta = nuevos.some(it => it.precio >= 1000);
+    html = nuevos.map(it => '✅ <b>' + escapeHtml(String(it.precio)) + '</b> Bs' + (it.qr ? ' 📱 QR' : '') + (it.electrica && currentModo === 'invitado' ? ' ⚡' : '')).join(' &nbsp; ');
+    if(alerta) html = '⚠️ ' + html.replace(/✅ /g, '') + ' — ¿se juntaron dos montos? Di “borra” y repítelos con “ok” entre uno y otro.';
+  }
+  vlBip(alerta);
+  try{ if(navigator.vibrate) navigator.vibrate(alerta ? [90, 60, 90] : 35); }catch(e){}
+  if(box){
+    box.className = 'vl-flash' + (alerta ? ' vl-flash-alerta' : '');
+    box.innerHTML = html;
+    box.style.display = '';
+    if(vlFlashTimer) clearTimeout(vlFlashTimer);
+    vlFlashTimer = setTimeout(()=>{ box.style.display = 'none'; }, alerta ? 6000 : 2500);
+  }
 }
 function vlIniciarVoz(){
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -5067,6 +5158,7 @@ function vlInit(){
   if(!modal) return;
   vlEl('btnVentasVoz').addEventListener('click', ()=> vlAbrir('voz'));
   vlEl('vlMic').addEventListener('click', ()=>{ if(vlQuiereEscuchar) vlDetenerVoz(); else vlIniciarVoz(); });
+  vlEl('vlSiguiente').addEventListener('click', vlSiguiente);
   vlEl('vlTexto').addEventListener('input', vlActualizarEntendi);
   vlEl('btnVlRevisar').addEventListener('click', vlIrARevisar);
   vlEl('btnVlCancelar').addEventListener('click', ()=> closeModalById('modalVentasLote'));

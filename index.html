@@ -948,12 +948,20 @@
   </div>
   <div class="modal-body">
     <div id="vlStep1">
+      <div class="vl-modos" id="vlModos">
+        <button type="button" class="vl-modo-btn" data-vl-modo="1">1 · 🗣️ Palabra “ok”</button>
+        <button type="button" class="vl-modo-btn" data-vl-modo="2">2 · ➕ Botón Siguiente</button>
+        <button type="button" class="vl-modo-btn" data-vl-modo="3">3 · ✅ Confirmación</button>
+        <button type="button" class="vl-modo-btn" data-vl-modo="4">4 · ⭐ Completo (ok + botón + confirmación)</button>
+      </div>
       <div class="vl-top">
         <button type="button" class="btn btn-success" id="vlMic">🎙️ Dictar</button>
+        <button type="button" class="btn btn-primary" id="vlSiguiente" title="Separa el próximo monto del anterior">➕ Siguiente</button>
       </div>
       <p class="hint" id="vlHint" style="margin:0 0 8px;"></p>
       <textarea id="vlTexto" class="input" rows="4" placeholder="50, 100 qr, 20 luz, 40 qr luz..." autocomplete="off" spellcheck="false"></textarea>
       <div class="hint vl-interim" id="vlInterim"></div>
+      <div class="vl-flash" id="vlFlash" style="display:none;" aria-live="polite"></div>
       <div class="vl-chips" id="vlEntendi"></div>
       <div style="display:flex; gap:8px; margin-top:12px;">
         <button class="btn btn-secondary" id="btnVlCancelar" style="flex:1;">Cancelar</button>

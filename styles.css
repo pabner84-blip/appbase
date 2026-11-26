@@ -1227,6 +1227,9 @@ body.modo-manual .btn-wa-ventas, body.modo-electrico .btn-wa-ventas, body.role-g
 .menu-exportar-panel .btn{width:100%; justify-content:flex-start; text-align:left;}
 
 /* ---------- REGISTRO POR VOZ / FOTO ---------- */
+.vl-modos{display:grid; grid-template-columns:1fr 1fr; gap:6px; margin-bottom:10px;}
+.vl-modo-btn{padding:9px 8px; border-radius:10px; border:2px solid var(--border); background:var(--surface); color:inherit; font-size:13.5px; line-height:1.25; cursor:pointer; text-align:center;}
+.vl-modo-btn.activo{border-color:#f26522; background:rgba(242,101,34,.16); font-weight:700;}
 .vl-top{display:flex; gap:10px; flex-wrap:wrap; margin-bottom:10px;}
 .vl-top .btn{flex:1; min-width:140px; min-height:50px; font-size:16px;}
 .vl-mic-on{background:#dc2626 !important; border-color:#dc2626 !important; color:#fff !important; animation:vlPulse 1.3s infinite;}
@@ -1234,6 +1237,8 @@ body.modo-manual .btn-wa-ventas, body.modo-electrico .btn-wa-ventas, body.role-g
 #vlTexto{width:100%; min-height:110px; font-size:18px; line-height:1.4; resize:vertical;}
 .vl-interim{min-height:18px; margin:4px 0 0; font-style:italic; opacity:.75;}
 .vl-chips{display:flex; flex-wrap:wrap; gap:6px; margin:8px 0 0;}
+.vl-flash{margin:8px 0 0; padding:12px 14px; border-radius:10px; border:2px solid #16a34a; background:rgba(22,163,74,.12); font-size:22px; line-height:1.3; text-align:center;}
+.vl-flash-alerta{border-color:#d97706; background:rgba(217,119,6,.16); font-size:17px; text-align:left;}
 .vl-chip{padding:4px 10px; border-radius:999px; border:1px solid var(--border); background:var(--surface); font-weight:700; font-size:14px;}
 .vl-chip-qr{border-color:#2563eb; color:#2563eb;}
 .vl-chip-luz{background:rgba(250,204,21,.18); border-color:#ca8a04;}

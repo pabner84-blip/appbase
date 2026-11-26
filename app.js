@@ -4658,7 +4658,7 @@ function rapidoSiguiente(){
 /* =========================================================================
    REGISTRO POR VOZ (lote de ventas)
    Anota muchas ventas "solo precio" por dictado en vivo o texto:
-     50 · 100 qr · 20 luz · 40 qr luz · borra
+     50 · 100 qr · 20 jose · 40 qr jose · borra
    Se abre una ventana de revisión igual a la de la factura
    Truper (Modificar / Guardar / Quitar) y NADA se registra hasta presionar
    "Registrar ventas".
@@ -4718,11 +4718,11 @@ function vlPalabrasANumeros(toks){
 const VL_RUIDO = new Set(['y','con','por','en','de','la','el','bs','bolivianos','boliviano','pago','pagos','precio','siguiente','otro','otra','ok','okey','okay','listo','ya','dale','next','mas','coma','a','al','es','son','venta','ventas','producto']);
 
 // Texto dictado/escrito -> ventas. Cada número empieza una venta nueva; las
-// palabras que le siguen (qr, luz...) se aplican a ESE número.
+// palabras que le siguen (qr, jose...) se aplican a ESE número.
 //   "50"            -> manuales, efectivo
 //   "100 qr"        -> manuales, QR
-//   "20 luz"        -> eléctricas, efectivo
-//   "40 qr luz"     -> eléctricas, QR
+//   "20 jose"       -> eléctricas, efectivo
+//   "40 qr jose"    -> eléctricas, QR
 //   "borra"         -> quita la última · "borra todo" -> vacía la lista
 function vlParse(texto){
   let t = vlSinAcentos(texto);
@@ -4744,7 +4744,7 @@ function vlParse(texto){
       else { cur = null; ignorados.push(w); }
     }else if(w === 'qr'){
       if(cur) cur.qr = true; else ignorados.push(w);
-    }else if(/^(luz|luces|luzes|lus|rayo|rayos|elec|electrica|electricas|electrico|electricos|electric)$/.test(w)){
+    }else if(/^(jose|joce|jose?s|hose|hoce|elec|electrica|electricas|electrico|electricos|electric)$/.test(w)){
       if(cur) cur.electrica = true; else ignorados.push(w);
     }else if(/^(manual|manuales)$/.test(w)){
       if(cur) cur.electrica = false;
@@ -4762,7 +4762,7 @@ function vlParse(texto){
 }
 
 function vlItemsATexto(items){
-  return items.map(it => String(it.precio) + (it.qr ? ' qr' : '') + (it.electrica ? ' luz' : '')).join(', ');
+  return items.map(it => String(it.precio) + (it.qr ? ' qr' : '') + (it.electrica ? ' jose' : '')).join(', ');
 }
 // VL-PURE-END
 
@@ -4776,7 +4776,7 @@ function vlHintModo(){
 function vlPintarHint(){
   const inv = currentModo === 'invitado';
   vlEl('vlHint').innerHTML = (inv
-    ? 'Di o escribe cada precio: <b>50</b> · <b>100 qr</b> · <b>20 luz</b> · <b>40 qr luz</b> · <b>borra</b><br><small>Solo el número = Manuales en efectivo · <b>qr</b> = pago QR · <b>luz</b> = Eléctricas</small>'
+    ? 'Di o escribe cada precio: <b>50</b> · <b>100 qr</b> · <b>20 jose</b> · <b>40 qr jose</b> · <b>borra</b><br><small>Solo el número = Manuales en efectivo · <b>qr</b> = pago QR · <b>jose</b> = Eléctricas</small>'
     : 'Di o escribe cada precio: <b>50</b> · <b>100 qr</b> · <b>borra</b><br><small>Solo el número = efectivo · <b>qr</b> = pago QR · todo se registra en ' + (currentModo === 'electrico' ? 'Eléctricas' : 'Manuales') + '</small>') + vlHintModo();
 }
 function vlAplicarModoUso(){ vlPintarHint(); }

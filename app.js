@@ -4769,24 +4769,9 @@ function vlItemsATexto(items){
 
 let vlItems = [];            // [{id, precio, qr, electrica, dudoso, activo, editando, nuevo}]
 let vlSeq = 0;
-// Modos de uso del dictado (se elige al entrar y se recuerda en este dispositivo):
-//   1 = palabra "ok" · 2 = botón "➕ Siguiente" · 3 = confirmación (cartel + pitido) · 4 = las tres juntas
-const VL_MODO_KEY = 'fs_vl_modo_uso';
-let vlModoUso = (()=>{ try{ const n = Number(localStorage.getItem(VL_MODO_KEY)); return (n >= 1 && n <= 4) ? n : 4; }catch(e){ return 4; } })();
-function vlModoTiene(f){
-  // f: 'ok' | 'siguiente' | 'confirma'
-  if(vlModoUso === 4) return true;
-  return (f === 'ok' && vlModoUso === 1) || (f === 'siguiente' && vlModoUso === 2) || (f === 'confirma' && vlModoUso === 3);
-}
+// Modo único del dictado: CONFIRMACIÓN (cartel grande + pitido + vibración por cada monto).
 function vlHintModo(){
-  const ok = '<b>ok</b> entre un monto y otro (“cincuenta <b>ok</b> nueve <b>ok</b>”)';
-  const sig = 'toca <b>➕ Siguiente</b> después de cada monto';
-  const conf = 'cada monto entendido se confirma con un cartel y un pitido (los de 1000 o más se marcan como sospechosos)';
-  const t = { 1: 'Para que dos montos no se junten (50 y 9 → 59), di ' + ok + '.',
-              2: 'Para que dos montos no se junten (50 y 9 → 59), ' + sig + '.',
-              3: 'Si se junta un monto, lo notarás al instante: ' + conf + '.',
-              4: 'Para que dos montos no se junten (50 y 9 → 59), di ' + ok + ' o ' + sig + '. Además, ' + conf + '.' };
-  return '<br><small>💡 ' + t[vlModoUso] + '</small>';
+  return '<br><small>💡 Cada monto entendido se confirma con un cartel y un pitido (los de 1000 o más se marcan como sospechosos). Si se junta un monto, di “borra” y repítelo.</small>';
 }
 function vlPintarHint(){
   const inv = currentModo === 'invitado';
@@ -4794,20 +4779,7 @@ function vlPintarHint(){
     ? 'Di o escribe cada precio: <b>50</b> · <b>100 qr</b> · <b>20 luz</b> · <b>40 qr luz</b> · <b>borra</b><br><small>Solo el número = Manuales en efectivo · <b>qr</b> = pago QR · <b>luz</b> = Eléctricas</small>'
     : 'Di o escribe cada precio: <b>50</b> · <b>100 qr</b> · <b>borra</b><br><small>Solo el número = efectivo · <b>qr</b> = pago QR · todo se registra en ' + (currentModo === 'electrico' ? 'Eléctricas' : 'Manuales') + '</small>') + vlHintModo();
 }
-function vlAplicarModoUso(){
-  document.querySelectorAll('[data-vl-modo]').forEach(b => b.classList.toggle('activo', Number(b.dataset.vlModo) === vlModoUso));
-  const bs = vlEl('vlSiguiente');
-  if(bs) bs.style.display = vlModoTiene('siguiente') ? '' : 'none';
-  if(!vlModoTiene('confirma')){ const f = vlEl('vlFlash'); if(f) f.style.display = 'none'; }
-  vlPintarHint();
-}
-document.addEventListener('click', ev => {
-  const b = ev.target && ev.target.closest ? ev.target.closest('[data-vl-modo]') : null;
-  if(!b) return;
-  vlModoUso = Number(b.dataset.vlModo) || 4;
-  try{ localStorage.setItem(VL_MODO_KEY, String(vlModoUso)); }catch(e){}
-  vlAplicarModoUso();
-});
+function vlAplicarModoUso(){ vlPintarHint(); }
 let vlRec = null;            // SpeechRecognition activo
 let vlQuiereEscuchar = false;
 let vlLang = 'es-BO';
@@ -4871,14 +4843,6 @@ function vlAgregarTexto(txt){
   vlConfirmarDictado(antes); // aviso grande + sonido/vibración de lo que se acaba de entender
 }
 
-// "➕ Siguiente": corta la frase actual para que el próximo monto llegue SEPARADO
-// (el reconocedor junta los números dichos seguidos). El dictado se reanuda solo.
-function vlSiguiente(){
-  if(!vlModoTiene('siguiente')) return;
-  if(!vlQuiereEscuchar){ vlIniciarVoz(); return; }
-  if(vlRec){ try{ vlRec.stop(); }catch(e){ /* ignorar */ } }
-}
-
 // Confirmación de cada monto dictado: cartel grande, pitido y vibración.
 // Un monto de 1000 o más se marca como sospechoso (puede ser dos montos juntos).
 let vlAudioCtx = null;
@@ -4899,7 +4863,6 @@ function vlBip(alerta){
   }catch(e){ /* sin sonido */ }
 }
 function vlConfirmarDictado(cantAntes){
-  if(!vlModoTiene('confirma')) return;
   const box = vlEl('vlFlash');
   const items = vlParse(vlEl('vlTexto').value).items;
   let html = '', alerta = false;
@@ -4910,7 +4873,7 @@ function vlConfirmarDictado(cantAntes){
     if(!nuevos.length) return;
     alerta = nuevos.some(it => it.precio >= 1000);
     html = nuevos.map(it => '✅ <b>' + escapeHtml(String(it.precio)) + '</b> Bs' + (it.qr ? ' 📱 QR' : '') + (it.electrica && currentModo === 'invitado' ? ' ⚡' : '')).join(' &nbsp; ');
-    if(alerta) html = '⚠️ ' + html.replace(/✅ /g, '') + ' — ¿se juntaron dos montos? Di “borra” y repítelos con “ok” entre uno y otro.';
+    if(alerta) html = '⚠️ ' + html.replace(/✅ /g, '') + ' — ¿se juntaron dos montos? Di “borra” y repítelos uno por uno.';
   }
   vlBip(alerta);
   try{ if(navigator.vibrate) navigator.vibrate(alerta ? [90, 60, 90] : 35); }catch(e){}
@@ -5024,8 +4987,8 @@ function vlRenderResumen(){
 function vlRender(){
   const inv = currentModo === 'invitado';
   const thr = document.querySelector('#vlTable thead tr');
-  thr.innerHTML = '<th>#</th><th>Precio</th><th>Pago</th>' + (inv ? '<th>Tipo</th>' : '') + '<th>Acción</th>';
-  const NC = inv ? 5 : 4;
+  thr.innerHTML = '<th class="vl-grip-th"></th><th>#</th><th>Precio</th><th>Pago</th>' + (inv ? '<th>Tipo</th>' : '') + '<th>Acción</th>';
+  const NC = inv ? 6 : 5;
   const tbody = document.querySelector('#vlTable tbody');
   vlRenderResumen();
   const act = vlItems.filter(it => it.activo);
@@ -5053,6 +5016,7 @@ function vlRender(){
     }
     return `
     <tr class="${cls}" data-vl-id="${it.id}">
+      <td class="vl-grip" data-vl-grip="${it.id}" title="Mantén y arrastra para mover">☰</td>
       <td>${i + 1}</td>
       <td style="font-weight:700; font-size:15px;">${fmtMoney(it.precio)}${it.dudoso ? '<small style="display:block; font-weight:600; color:#d97706;">⚠️ revisar este número</small>' : ''}</td>
       <td>${it.qr ? '<span class="vl-badge vl-badge-qr">📱 QR</span>' : '<span class="vl-badge">💵 Efectivo</span>'}</td>
@@ -5100,6 +5064,88 @@ function vlBindTabla(){
     const row = e.target.closest('tr');
     const b = row && row.querySelector('[data-vl-save]');
     if(b){ e.preventDefault(); guardar(b); }
+  });
+}
+// ---------- Reordenar arrastrando (mantén apretado ☰ y mueve) ----------
+function vlBindArrastre(){
+  const tbody = document.querySelector('#vlTable tbody');
+  if(!tbody || tbody.dataset.dragBound === '1') return;
+  tbody.dataset.dragBound = '1';
+  const wrap = tbody.closest('.table-wrap');
+  let d = null; // estado del arrastre
+  const filas = () => Array.from(tbody.querySelectorAll('tr[data-vl-id]'));
+  const limpiar = () => filas().forEach(r => r.classList.remove('vl-drop-antes', 'vl-drop-final'));
+  const destino = (y) => {
+    const otras = filas().filter(r => r !== d.row);
+    for(const r of otras){
+      const b = r.getBoundingClientRect();
+      if(y < b.top + b.height / 2) return { ref: r, final: false };
+    }
+    return { ref: otras[otras.length - 1] || null, final: true };
+  };
+  const mover = () => {
+    d.row.style.transform = 'translateY(' + ((d.y - d.y0) + (wrap ? wrap.scrollTop - d.sc0 : 0)) + 'px)';
+    limpiar();
+    d.dest = destino(d.y);
+    if(d.dest.ref) d.dest.ref.classList.add(d.dest.final ? 'vl-drop-final' : 'vl-drop-antes');
+  };
+  const parar = () => {
+    if(d && d.timer) clearInterval(d.timer);
+    document.removeEventListener('pointermove', onMove);
+    document.removeEventListener('pointerup', onUp);
+    document.removeEventListener('pointercancel', onCancel);
+  };
+  const onMove = (e) => {
+    if(!d || e.pointerId !== d.id) return;
+    e.preventDefault();
+    d.y = e.clientY;
+    mover();
+  };
+  const onUp = (e) => {
+    if(!d || e.pointerId !== d.id) return;
+    const dest = d.dest, row = d.row, idMov = row.dataset.vlId;
+    parar(); d = null; limpiar();
+    row.style.transform = '';
+    if(!dest || !dest.ref){ vlRender(); return; }
+    const mov = vlItems.find(it => it.id === idMov);
+    const ref = vlItems.find(it => it.id === dest.ref.dataset.vlId);
+    if(!mov || !ref){ vlRender(); return; }
+    const resto = vlItems.filter(it => it !== mov);
+    let pos = resto.indexOf(ref);
+    if(dest.final) pos++;
+    resto.splice(pos, 0, mov);
+    vlItems = resto;
+    vlRender();
+    try{ if(navigator.vibrate) navigator.vibrate(20); }catch(_){}
+  };
+  const onCancel = () => {
+    if(!d) return;
+    const row = d.row;
+    parar(); d = null; limpiar();
+    row.style.transform = '';
+    row.classList.remove('vl-arrastrando');
+  };
+  tbody.addEventListener('pointerdown', (e) => {
+    const g = e.target.closest('[data-vl-grip]');
+    if(!g || d) return;
+    if(e.pointerType === 'mouse' && e.button !== 0) return;
+    const row = g.closest('tr');
+    if(!row) return;
+    e.preventDefault();
+    row.classList.add('vl-arrastrando');
+    d = { id: e.pointerId, row, y0: e.clientY, y: e.clientY, sc0: wrap ? wrap.scrollTop : 0, dest: null, timer: null };
+    // Desplazamiento automático al acercarse al borde de la lista
+    d.timer = setInterval(() => {
+      if(!d || !wrap) return;
+      const b = wrap.getBoundingClientRect();
+      let v = 0;
+      if(d.y < b.top + 40) v = -10; else if(d.y > b.bottom - 40) v = 10;
+      if(v){ wrap.scrollTop += v; mover(); }
+    }, 30);
+    document.addEventListener('pointermove', onMove, { passive: false });
+    document.addEventListener('pointerup', onUp);
+    document.addEventListener('pointercancel', onCancel);
+    mover();
   });
 }
 function vlAgregarFila(){
@@ -5158,7 +5204,6 @@ function vlInit(){
   if(!modal) return;
   vlEl('btnVentasVoz').addEventListener('click', ()=> vlAbrir('voz'));
   vlEl('vlMic').addEventListener('click', ()=>{ if(vlQuiereEscuchar) vlDetenerVoz(); else vlIniciarVoz(); });
-  vlEl('vlSiguiente').addEventListener('click', vlSiguiente);
   vlEl('vlTexto').addEventListener('input', vlActualizarEntendi);
   vlEl('btnVlRevisar').addEventListener('click', vlIrARevisar);
   vlEl('btnVlCancelar').addEventListener('click', ()=> closeModalById('modalVentasLote'));
@@ -5167,6 +5212,7 @@ function vlInit(){
   vlEl('btnVlRegistrar').addEventListener('click', vlRegistrar);
   vlEl('vlTotalAnotado').addEventListener('input', vlRenderResumen);
   vlBindTabla();
+  vlBindArrastre();
   // Si la ventana se cierra por cualquier vía (X, atrás, fondo), apaga el micrófono.
   new MutationObserver(()=>{ if(!modal.classList.contains('open')) vlDetenerVoz(); })
     .observe(modal, { attributes: true, attributeFilter: ['class'] });

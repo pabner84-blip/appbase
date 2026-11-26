@@ -1265,3 +1265,11 @@ body.modo-manual .btn-wa-ventas, body.modo-electrico .btn-wa-ventas, body.role-g
 #vlTable{min-width:0 !important;}
 .vl-edit{display:flex; flex-wrap:wrap; gap:6px; align-items:center;}
 .vl-edit select.input{width:auto !important; max-width:none !important;}
+
+/* Reordenar ventas de la revisión arrastrando */
+#vlTable td.vl-grip{width:38px; text-align:center; font-size:22px; line-height:1; cursor:grab; user-select:none; -webkit-user-select:none; touch-action:none; opacity:.6; padding:6px 2px;}
+#vlTable td.vl-grip:active{cursor:grabbing;}
+#vlTable .vl-grip-th{width:38px;}
+#vlTable tr.vl-arrastrando{position:relative; z-index:5; background:var(--surface,#fff); opacity:.92; outline:2px solid #f26522; pointer-events:none;}
+#vlTable tr.vl-drop-antes td{border-top:3px solid #f26522;}
+#vlTable tr.vl-drop-final td{border-bottom:3px solid #f26522;}
